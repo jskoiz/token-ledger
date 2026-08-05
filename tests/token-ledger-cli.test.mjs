@@ -1,0 +1,624 @@
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { dirname, resolve } from "node:path";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+
+import {
+  aggregateProjects,
+  dayBounds,
+  DEFAULT_SNAPSHOT,
+  filterDayEvents,
+  parseArgs,
+  sanitizeTerminalText,
+  snapshotNeedsRefresh,
+  weekBounds,
+} from "../bin/token-ledger.mjs";
+import {
+  quotaCycleSummary,
+  renderFullscreen,
+  renderTerminal,
+} from "../bin/token-ledger-terminal.mjs";
+import { sourceFingerprint } from "../lib/token-ledger-collector.mjs";
+
+const testDirectory = dirname(fileURLToPath(import.meta.url));
+const cliPath = resolve(testDirectory, "../bin/token-ledger.mjs");
+const fixturePath = resolve(
+  testDirectory,
+  "fixtures/demo-snapshot.json",
+);
+const fixture = JSON.parse(await readFile(fixturePath, "utf8"));
+
+function runCli(args, options = {}) {
+  return spawnSync(process.execPath, [cliPath, ...args], {
+    encoding: "utf8",
+    timeout: 15_000,
+    env: {
+      ...process.env,
+      ...options.env,
+    },
+  });
+}
+
+function stripAnsi(value) {
+  return String(value)
+    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "")
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
+}
+
+function tokenEvent({ timestamp, turnId, totalTokens, model = "gpt-5.6-sol" }) {
+  return {
+    timestamp,
+    type: "event_msg",
+    payload: {
+      type: "token_count",
+      info: {
+        total_token_usage: {
+          input_tokens: totalTokens - 10,
+          cached_input_tokens: Math.max(0, totalTokens - 20),
+          output_tokens: 10,
+          reasoning_output_tokens: 2,
+          total_tokens: totalTokens,
+        },
+        last_token_usage: {
+          input_tokens: totalTokens - 10,
+          cached_input_tokens: Math.max(0, totalTokens - 20),
+          output_tokens: 10,
+          reasoning_output_tokens: 2,
+          total_tokens: totalTokens,
+        },
+        model_context_window: 128000,
+      },
+    },
+    model,
+    turnId,
+  };
+}
+
+async function writeSyntheticCodexHome(root, options = {}) {
+  const threadId = options.threadId ?? "11111111-1111-4111-8111-111111111111";
+  const turnId = options.turnId ?? `turn-${options.totalTokens ?? 100}`;
+  const target = options.archived ? "archived_sessions" : "sessions";
+  const directory = resolve(root, target, "2026", "08", "05");
+  await mkdir(directory, { recursive: true });
+  await mkdir(resolve(root, "sessions"), { recursive: true });
+  const timestamp = "2026-08-05T12:00:00.000Z";
+  const rows = [
+    {
+      timestamp,
+      type: "session_meta",
+      payload: {
+        id: threadId,
+        cwd: `/workspace/${options.project ?? "synthetic-source"}`,
+        source: "exec",
+      },
+    },
+    {
+      timestamp,
+      type: "event_msg",
+      payload: {
+        type: "task_started",
+        turn_id: turnId,
+        started_at: Date.parse(timestamp) / 1000,
+      },
+    },
+    {
+      timestamp,
+      type: "turn_context",
+      payload: {
+        turn_id: turnId,
+        model: "gpt-5.6-sol",
+        effort: "medium",
+        cwd: `/workspace/${options.project ?? "synthetic-source"}`,
+      },
+    },
+    tokenEvent({
+      timestamp: "2026-08-05T12:00:02.000Z",
+      turnId,
+      totalTokens: options.totalTokens ?? 100,
+    }),
+  ];
+  const file = resolve(directory, `rollout-2026-08-05-${threadId}.jsonl`);
+  await writeFile(file, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`);
+  return file;
+}
+
+test("day and week bounds honor explicit local calendar timezones", () => {
+  const day = dayBounds("2026-08-01", "Pacific/Honolulu");
+  assert.equal(day.start.toISOString(), "2026-08-01T10:00:00.000Z");
+  assert.equal(day.end.toISOString(), "2026-08-02T10:00:00.000Z");
+
+  const week = weekBounds("2026-08-03", "Pacific/Honolulu");
+  assert.equal(week.startDateString, "2026-07-28");
+  assert.equal(week.endDateString, "2026-08-03");
+  assert.equal(week.start.toISOString(), "2026-07-28T10:00:00.000Z");
+  assert.equal(week.end.toISOString(), "2026-08-04T10:00:00.000Z");
+});
+
+test("today and yesterday resolve in the selected timezone", () => {
+  const today = dayBounds("today", "Pacific/Honolulu");
+  const yesterday = dayBounds("yesterday", "Pacific/Honolulu");
+  assert.equal(
+    (today.start.getTime() - yesterday.start.getTime()) / 86_400_000,
+    1,
+  );
+});
+
+test("filterDayEvents includes the start and excludes the end boundary", () => {
+  const snapshot = {
+    events: [
+      { id: "before", timestamp: "2026-08-01T09:59:59.999Z" },
+      { id: "start", timestamp: "2026-08-01T10:00:00.000Z" },
+      { id: "inside", timestamp: "2026-08-01T20:00:00.000Z" },
+      { id: "end", timestamp: "2026-08-02T10:00:00.000Z" },
+    ],
+  };
+  const events = filterDayEvents(
+    snapshot,
+    dayBounds("2026-08-01", "Pacific/Honolulu"),
+  );
+  assert.deepEqual(events.map((event) => event.id), ["start", "inside"]);
+});
+
+test("bare execution and week default to the current seven-day window", () => {
+  for (const argv of [[], ["week"]]) {
+    const options = parseArgs(argv);
+    assert.equal(options.range, "week");
+    assert.equal(options.date, "today");
+    assert.equal(options.top, 10);
+    assert.equal(options.autoRefresh, true);
+    assert.equal(options.timeZone, Intl.DateTimeFormat().resolvedOptions().timeZone);
+    assert.equal(options.input, resolve(homedir(), ".token-ledger", "token-ledger-snapshot.json"));
+    assert.equal(options.input, DEFAULT_SNAPSHOT);
+  }
+  assert.equal(parseArgs(["day"]).date, "today");
+  assert.equal(parseArgs(["day", "yesterday"]).date, "yesterday");
+});
+
+test("every retained option maps to the intended setting", () => {
+  const codexHome = resolve(tmpdir(), "synthetic-codex-home");
+  const options = parseArgs([
+    "week",
+    "--date",
+    "2026-08-05",
+    "--input",
+    fixturePath,
+    "--no-refresh",
+    "--codex-home",
+    codexHome,
+    "--tz",
+    "UTC",
+    "--top",
+    "3",
+    "--width",
+    "80",
+    "--raw-projects",
+    "--no-archived",
+    "--plain",
+    "--ascii",
+    "--static",
+  ]);
+  assert.deepEqual(
+    {
+      range: options.range,
+      date: options.date,
+      input: options.input,
+      inputExplicit: options.inputExplicit,
+      autoRefresh: options.autoRefresh,
+      codexHome: options.codexHome,
+      includeArchived: options.includeArchived,
+      timeZone: options.timeZone,
+      top: options.top,
+      width: options.width,
+      rawProjects: options.rawProjects,
+      plain: options.plain,
+      ascii: options.ascii,
+      static: options.static,
+    },
+    {
+      range: "week",
+      date: "2026-08-05",
+      input: fixturePath,
+      inputExplicit: true,
+      autoRefresh: false,
+      codexHome,
+      includeArchived: false,
+      timeZone: "UTC",
+      top: 3,
+      width: 80,
+      rawProjects: true,
+      plain: true,
+      ascii: true,
+      static: true,
+    },
+  );
+  assert.equal(parseArgs(["--refresh"]).refresh, true);
+  assert.equal(parseArgs(["--help"]).help, true);
+  assert.equal(parseArgs(["-h"]).help, true);
+});
+
+test("argument failures are explicit and bounded", () => {
+  assert.throws(() => parseArgs(["unknown"]), /Unknown command/);
+  assert.throws(() => parseArgs(["week", "2026-08-05", "extra"]), /Unknown option/);
+  for (const option of ["--date", "--input", "--codex-home", "--tz", "--top", "--width"]) {
+    assert.throws(() => parseArgs([option]), /requires a value/);
+  }
+  assert.throws(() => parseArgs(["--top", "0"]), /1 to 100/);
+  assert.throws(() => parseArgs(["--top", "101"]), /1 to 100/);
+  assert.throws(() => parseArgs(["--width", "39"]), /40 to 200/);
+  assert.throws(() => parseArgs(["--width", "201"]), /40 to 200/);
+  assert.throws(() => parseArgs(["--refresh", "--no-refresh"]), /cannot be combined/);
+  assert.throws(() => parseArgs(["--refresh", "--input", fixturePath]), /cannot be combined/);
+  assert.throws(() => dayBounds("2026-02-30", "UTC"), /Invalid calendar day/);
+  assert.throws(() => dayBounds("not-a-day", "UTC"), /Day must be/);
+  assert.throws(() => dayBounds("2026-08-05", "Mars\/Base"), /Unknown IANA timezone/);
+});
+
+test("snapshot freshness includes source identity as well as mtime", () => {
+  const one = sourceFingerprint(resolve(tmpdir(), "synthetic-one"));
+  const two = sourceFingerprint(resolve(tmpdir(), "synthetic-two"));
+  assert.notEqual(
+    sourceFingerprint(resolve(tmpdir(), "synthetic-one"), true),
+    sourceFingerprint(resolve(tmpdir(), "synthetic-one"), false),
+  );
+  assert.equal(snapshotNeedsRefresh(100, 101, one, one, 2, 2), true);
+  assert.equal(snapshotNeedsRefresh(100, 100, one, one, 2, 2), false);
+  assert.equal(snapshotNeedsRefresh(100, 99, one, one, 2, 2), false);
+  assert.equal(snapshotNeedsRefresh(100, 99, one, two, 2, 2), true);
+  assert.equal(snapshotNeedsRefresh(100, 99, one, one, 2, 1), true);
+});
+
+test("project aggregation groups singleton labels and strips terminal controls", () => {
+  const snapshot = {
+    events: [],
+    threads: [
+      { id: "alpha-1", project: "synthetic-alpha" },
+      { id: "alpha-2", project: "synthetic-alpha" },
+      { id: "beta-1", project: "synthetic-beta" },
+    ],
+  };
+  const events = [
+    { project: "synthetic-alpha", threadId: "alpha-1", model: "gpt-5.6-sol", totalTokens: 900 },
+    { project: "synthetic-alpha", threadId: "alpha-2", model: "gpt-5.6-luna", totalTokens: 100 },
+    { project: "\u001b]8;;invalid\u0007synthetic-beta\u001b]8;;\u0007", threadId: "beta-1", model: "gpt-5.5", totalTokens: 500 },
+  ];
+  const grouped = aggregateProjects(snapshot, events);
+  assert.deepEqual(grouped.map((row) => row.project), ["synthetic-alpha", "Other activity"]);
+  const raw = aggregateProjects(snapshot, events, { rawProjects: true });
+  assert.equal(raw[1].project, "synthetic-beta");
+  assert.equal(raw[0].threads, 2);
+  assert.deepEqual(raw[0].models.map((model) => model.model), ["Sol", "Luna"]);
+  assert.equal(sanitizeTerminalText("safe\u001b[31m red\u0007"), "safe red ");
+});
+
+test("renderer supports static widths and interactive selection without false keys", () => {
+  const bounds = weekBounds("2026-08-05", "UTC");
+  const events = filterDayEvents(fixture, bounds);
+  const allRows = aggregateProjects(fixture, events, { rawProjects: true });
+  const staticOutput = renderTerminal({
+    options: { range: "week", plain: true, ascii: true, static: true, width: 40 },
+    snapshot: fixture,
+    bounds,
+    events,
+    rows: allRows.slice(0, 3),
+    allRows,
+  });
+  assert.ok(staticOutput.split("\n").every((line) => line.length <= 40));
+  assert.doesNotMatch(staticOutput, /select|inspect|range|quit/);
+  assert.doesNotMatch(staticOutput, /> 1\./);
+
+  const interactive = renderTerminal({
+    options: {
+      range: "week",
+      plain: true,
+      ascii: true,
+      static: false,
+      selectedIndex: 1,
+      width: 90,
+    },
+    snapshot: fixture,
+    bounds,
+    events,
+    rows: allRows,
+    allRows,
+  });
+  assert.match(interactive, /> 2\./);
+  assert.doesNotMatch(interactive, /> 1\./);
+  assert.match(interactive, /\[j\/k\] select\s+\[q\/esc\] quit/);
+  assert.doesNotMatch(interactive, /inspect|d\/w\/m/);
+});
+
+test("quota context maps the selected range to reset-cycle burn", () => {
+  const observation = {
+    timestamp: "2026-08-02T00:00:00.000Z",
+    usedPercent: 25,
+    windowMinutes: 10080,
+    resetsAt: Date.parse("2026-08-07T00:00:00.000Z") / 1000,
+  };
+  const events = [
+    { timestamp: "2026-08-01T00:00:00.000Z", totalTokens: 800 },
+    { timestamp: "2026-08-01T12:00:00.000Z", totalTokens: 200 },
+    { timestamp: "2026-08-03T00:00:00.000Z", totalTokens: 1000 },
+  ];
+  const quota = quotaCycleSummary({ events, quotaObservations: [observation] }, [events[0]]);
+  assert.equal(quota.usedPercent, 25);
+  assert.equal(quota.remainingPercent, 75);
+  assert.equal(quota.cycleTokens, 1000);
+  assert.equal(quota.displayedTokens, 800);
+  assert.equal(quota.estimatedDisplayedBurnPercent, 20);
+});
+
+test("fullscreen renderer applies the terminal theme and selected row", () => {
+  const bounds = weekBounds("2026-08-05", "UTC");
+  const events = filterDayEvents(fixture, bounds);
+  const allRows = aggregateProjects(fixture, events, { rawProjects: true });
+  const output = renderFullscreen({
+    options: { range: "week", forceColor: true, selectedIndex: 2 },
+    snapshot: fixture,
+    bounds,
+    events,
+    rows: allRows,
+    allRows,
+    width: 100,
+    height: 30,
+  });
+  assert.equal(output.split("\n").length, 30);
+  assert.match(output, /\u001b\[48;2;16;16;18m/);
+  assert.match(output, /\u001b\[48;2;5;5;6m/);
+  assert.match(stripAnsi(output), /▶ 3\./);
+  assert.match(stripAnsi(output), /└─+┴─+┘/);
+  assert.doesNotMatch(output, /inspect|d\/w\/m/);
+});
+
+test("CLI help lists the complete self-contained command surface", () => {
+  for (const flag of ["--help", "-h"]) {
+    const result = runCli([flag]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /token-ledger week \[end-day\]/);
+    for (const option of [
+      "--date",
+      "--input",
+      "--refresh",
+      "--no-refresh",
+      "--codex-home",
+      "--tz",
+      "--top",
+      "--width",
+      "--raw-projects",
+      "--no-archived",
+      "--plain",
+      "--ascii",
+      "--static",
+      "--help",
+    ]) {
+      assert.match(result.stdout, new RegExp(option.replace("--", "\\-\\-")));
+    }
+  }
+});
+
+test("CLI renders explicit snapshots through week, day, plain, ASCII, top, width, and raw paths", () => {
+  const week = runCli([
+    "week",
+    "2026-08-05",
+    "--input",
+    fixturePath,
+    "--static",
+    "--plain",
+    "--raw-projects",
+    "--top",
+    "3",
+    "--width",
+    "100",
+    "--tz",
+    "UTC",
+  ]);
+  assert.equal(week.status, 0, week.stderr);
+  assert.match(week.stdout, /TOKEN LEDGER/);
+  assert.match(week.stdout, /synthetic-alpha/);
+  assert.match(week.stdout, /synthetic-beta/);
+  assert.match(week.stdout, /synthetic-gamma/);
+  assert.doesNotMatch(week.stdout, /synthetic-delta/);
+  assert.doesNotMatch(week.stdout, /\u001b/);
+  assert.ok(week.stdout.trimEnd().split("\n").every((line) => line.length <= 100));
+
+  const day = runCli([
+    "day",
+    "--date",
+    "2026-08-05",
+    "--input",
+    fixturePath,
+    "--plain",
+    "--ascii",
+    "--raw-projects",
+    "--width",
+    "80",
+    "--tz",
+    "UTC",
+  ]);
+  assert.equal(day.status, 0, day.stderr);
+  assert.match(day.stdout, /DAY/);
+  assert.match(day.stdout, /#+/);
+  assert.doesNotMatch(day.stdout, /█/);
+
+  const noColor = runCli([
+    "week",
+    "2026-08-05",
+    "--input",
+    fixturePath,
+    "--static",
+  ], { env: { NO_COLOR: "1", TZ: "UTC" } });
+  assert.equal(noColor.status, 0, noColor.stderr);
+  assert.doesNotMatch(noColor.stdout, /\u001b/);
+});
+
+test("CLI failure messages cover invalid input without terminal injection", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-errors-"));
+  try {
+    const missing = resolve(root, "missing.json");
+    const missingResult = runCli(["week", "--input", missing, "--static"]);
+    assert.equal(missingResult.status, 1);
+    assert.match(missingResult.stderr, /Snapshot not found/);
+
+    const malformed = resolve(root, "malformed.json");
+    await writeFile(malformed, "{not-json}\n");
+    const malformedResult = runCli(["week", "--input", malformed, "--static"]);
+    assert.equal(malformedResult.status, 1);
+    assert.match(malformedResult.stderr, /Could not read snapshot/);
+
+    const invalidShape = resolve(root, "invalid-shape.json");
+    await writeFile(invalidShape, "{}\n");
+    const shapeResult = runCli(["week", "--input", invalidShape, "--static"]);
+    assert.equal(shapeResult.status, 1);
+    assert.match(shapeResult.stderr, /missing its events array/);
+
+    const badZone = runCli(["week", "--input", fixturePath, "--tz", "Mars/Base", "--static"]);
+    assert.equal(badZone.status, 1);
+    assert.match(badZone.stderr, /Unknown IANA timezone/);
+
+    const badDate = runCli(["day", "2026-02-30", "--input", fixturePath, "--static"]);
+    assert.equal(badDate.status, 1);
+    assert.match(badDate.stderr, /Invalid calendar day/);
+
+    const unknown = runCli(["unknown"]);
+    assert.equal(unknown.status, 1);
+    assert.match(unknown.stderr, /Unknown command/);
+    assert.doesNotMatch(unknown.stderr, /\u001b/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("automatic refresh is source-bound, atomic, private, and cached-only when requested", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-refresh-"));
+  try {
+    const home = resolve(root, "home");
+    const sourceOne = resolve(root, "source-one");
+    const sourceTwo = resolve(root, "source-two");
+    await mkdir(home, { recursive: true });
+    await writeSyntheticCodexHome(sourceOne, {
+      project: "synthetic-one",
+      totalTokens: 100,
+      threadId: "11111111-1111-4111-8111-111111111111",
+    });
+    await writeSyntheticCodexHome(sourceTwo, {
+      project: "synthetic-two",
+      totalTokens: 200,
+      threadId: "22222222-2222-4222-8222-222222222222",
+    });
+
+    const first = runCli([
+      "week",
+      "2026-08-05",
+      "--codex-home",
+      sourceOne,
+      "--static",
+      "--plain",
+      "--raw-projects",
+      "--tz",
+      "UTC",
+    ], { env: { HOME: home, CODEX_HOME: sourceOne } });
+    assert.equal(first.status, 0, first.stderr);
+    assert.match(first.stderr, /refreshing local snapshot/);
+    assert.match(first.stdout, /synthetic-one/);
+
+    const cache = resolve(home, ".token-ledger", "token-ledger-snapshot.json");
+    const firstSnapshot = JSON.parse(await readFile(cache, "utf8"));
+    assert.equal(firstSnapshot.coverage.observedTokens, 100);
+    assert.equal(firstSnapshot.provenance.sourceFingerprint, sourceFingerprint(sourceOne));
+    assert.equal((await stat(cache)).mode & 0o777, 0o600);
+    assert.equal((await readFile(cache, "utf8")).includes("/workspace/"), false);
+
+    await chmod(cache, 0o644);
+    const switched = runCli([
+      "week",
+      "2026-08-05",
+      "--codex-home",
+      sourceTwo,
+      "--static",
+      "--plain",
+      "--raw-projects",
+      "--tz",
+      "UTC",
+    ], { env: { HOME: home, CODEX_HOME: sourceTwo } });
+    assert.equal(switched.status, 0, switched.stderr);
+    assert.match(switched.stderr, /refreshing local snapshot/);
+    assert.match(switched.stdout, /synthetic-two/);
+    const switchedSnapshot = JSON.parse(await readFile(cache, "utf8"));
+    assert.equal(switchedSnapshot.coverage.observedTokens, 200);
+    assert.equal(switchedSnapshot.provenance.sourceFingerprint, sourceFingerprint(sourceTwo));
+    assert.equal((await stat(cache)).mode & 0o777, 0o600);
+
+    const cachedOnly = runCli([
+      "week",
+      "2026-08-05",
+      "--codex-home",
+      sourceOne,
+      "--no-refresh",
+      "--static",
+      "--plain",
+      "--raw-projects",
+      "--tz",
+      "UTC",
+    ], { env: { HOME: home, CODEX_HOME: sourceOne } });
+    assert.equal(cachedOnly.status, 0, cachedOnly.stderr);
+    assert.doesNotMatch(cachedOnly.stderr, /refreshing local snapshot/);
+    assert.match(cachedOnly.stdout, /synthetic-two/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("forced refresh and archived-session exclusion are deterministic", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-archived-"));
+  try {
+    const home = resolve(root, "home");
+    const source = resolve(root, "source");
+    await mkdir(home, { recursive: true });
+    await writeSyntheticCodexHome(source, {
+      archived: true,
+      project: "synthetic-archived",
+      totalTokens: 300,
+      threadId: "33333333-3333-4333-8333-333333333333",
+    });
+    const env = { HOME: home, CODEX_HOME: source };
+    const excluded = runCli([
+      "week",
+      "2026-08-05",
+      "--refresh",
+      "--no-archived",
+      "--static",
+      "--plain",
+      "--raw-projects",
+      "--tz",
+      "UTC",
+    ], { env });
+    assert.equal(excluded.status, 0, excluded.stderr);
+    assert.match(excluded.stdout, /No model-call events found/);
+    assert.doesNotMatch(excluded.stdout, /synthetic-archived/);
+
+    const included = runCli([
+      "week",
+      "2026-08-05",
+      "--refresh",
+      "--static",
+      "--plain",
+      "--raw-projects",
+      "--tz",
+      "UTC",
+    ], { env });
+    assert.equal(included.status, 0, included.stderr);
+    assert.match(included.stdout, /synthetic-archived/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

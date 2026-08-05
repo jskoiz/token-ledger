@@ -1,0 +1,60 @@
+# Dependencies, caches, and build output
+node_modules/
+.cache/
+.npm/
+coverage/
+dist/
+out/
+tmp/
+*.tgz
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Secrets and machine-local configuration
+.env
+.env.*
+!.env.example
+.npmrc
+*.key
+*.pem
+*.p12
+*.mobileprovision
+
+# Local Codex and agent metadata
+.codex/
+.openai/
+AGENTS.md
+**/AGENTS.md
+CLAUDE.md
+**/CLAUDE.md
+
+# Usage data, snapshots, and local databases
+*.json
+!package.json
+!package-lock.json
+!tests/fixtures/demo-snapshot.json
+*.jsonl
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+outputs/
+snapshots/
+token-ledger-snapshot.*
+
+# Personal/generated media; retain only the intentional synthetic demo
+*.gif
+*.jpeg
+*.jpg
+*.png
+*.webp
+*.svg
+!docs/token-ledger-demo.svg
+
+# Operating-system artifacts
+.DS_Store
+Thumbs.db

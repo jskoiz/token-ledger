@@ -1,0 +1,140 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-08-05T20:00:00.000Z",
+  "label": "Intentional synthetic demo",
+  "provenance": {
+    "kind": "synthetic-demo",
+    "sourceFingerprint": "synthetic-demo-source",
+    "privacy": "All labels and values in this fixture are synthetic."
+  },
+  "quotaObservations": [
+    {
+      "timestamp": "2026-08-05T20:00:00.000Z",
+      "eventCutoffAt": "2026-08-05T20:00:00.000Z",
+      "usedPercent": 42,
+      "windowMinutes": 10080,
+      "resetsAt": 1786269600
+    }
+  ],
+  "threads": [
+    { "id": "synthetic-thread-a1", "project": "synthetic-alpha" },
+    { "id": "synthetic-thread-a2", "project": "synthetic-alpha" },
+    { "id": "synthetic-thread-b1", "project": "synthetic-beta" },
+    { "id": "synthetic-thread-c1", "project": "synthetic-gamma" },
+    { "id": "synthetic-thread-d1", "project": "synthetic-delta" }
+  ],
+  "events": [
+    {
+      "id": "synthetic-event-01",
+      "timestamp": "2026-07-30T18:00:00.000Z",
+      "threadId": "synthetic-thread-a1",
+      "project": "synthetic-alpha",
+      "model": "gpt-5.6-sol",
+      "useType": "interactive",
+      "inputTokens": 1000000,
+      "cachedInputTokens": 640000,
+      "outputTokens": 200000,
+      "reasoningTokens": 50000,
+      "totalTokens": 1200000,
+      "toolCalls": 2
+    },
+    {
+      "id": "synthetic-event-02",
+      "timestamp": "2026-07-31T20:00:00.000Z",
+      "threadId": "synthetic-thread-a2",
+      "project": "synthetic-alpha",
+      "model": "gpt-5.6-luna",
+      "useType": "subagent",
+      "inputTokens": 760000,
+      "cachedInputTokens": 500000,
+      "outputTokens": 140000,
+      "reasoningTokens": 40000,
+      "totalTokens": 900000,
+      "toolCalls": 1
+    },
+    {
+      "id": "synthetic-event-03",
+      "timestamp": "2026-08-01T22:00:00.000Z",
+      "threadId": "synthetic-thread-b1",
+      "project": "synthetic-beta",
+      "model": "gpt-5.6-terra",
+      "useType": "cli",
+      "inputTokens": 650000,
+      "cachedInputTokens": 260000,
+      "outputTokens": 130000,
+      "reasoningTokens": 20000,
+      "totalTokens": 780000,
+      "toolCalls": 3
+    },
+    {
+      "id": "synthetic-event-04",
+      "timestamp": "2026-08-02T19:00:00.000Z",
+      "threadId": "synthetic-thread-a1",
+      "project": "synthetic-alpha",
+      "model": "gpt-5.6-sol",
+      "useType": "tool",
+      "inputTokens": 540000,
+      "cachedInputTokens": 330000,
+      "outputTokens": 110000,
+      "reasoningTokens": 30000,
+      "totalTokens": 650000,
+      "toolCalls": 4
+    },
+    {
+      "id": "synthetic-event-05",
+      "timestamp": "2026-08-03T21:00:00.000Z",
+      "threadId": "synthetic-thread-c1",
+      "project": "synthetic-gamma",
+      "model": "gpt-5.5",
+      "useType": "interactive",
+      "inputTokens": 430000,
+      "cachedInputTokens": 100000,
+      "outputTokens": 90000,
+      "reasoningTokens": 25000,
+      "totalTokens": 520000,
+      "toolCalls": 1
+    },
+    {
+      "id": "synthetic-event-06",
+      "timestamp": "2026-08-04T18:00:00.000Z",
+      "threadId": "synthetic-thread-b1",
+      "project": "synthetic-beta",
+      "model": "gpt-5.6-terra",
+      "useType": "cli",
+      "inputTokens": 350000,
+      "cachedInputTokens": 190000,
+      "outputTokens": 60000,
+      "reasoningTokens": 15000,
+      "totalTokens": 410000,
+      "toolCalls": 2
+    },
+    {
+      "id": "synthetic-event-07",
+      "timestamp": "2026-08-05T17:00:00.000Z",
+      "threadId": "synthetic-thread-d1",
+      "project": "synthetic-delta",
+      "model": "gpt-5.6-luna",
+      "useType": "subagent",
+      "inputTokens": 235000,
+      "cachedInputTokens": 120000,
+      "outputTokens": 45000,
+      "reasoningTokens": 10000,
+      "totalTokens": 280000,
+      "toolCalls": 1
+    },
+    {
+      "id": "synthetic-event-08",
+      "timestamp": "2026-08-05T19:00:00.000Z",
+      "threadId": "synthetic-thread-c1",
+      "project": "synthetic-gamma",
+      "model": "gpt-5.5",
+      "useType": "interactive",
+      "inputTokens": 180000,
+      "cachedInputTokens": 90000,
+      "outputTokens": 40000,
+      "reasoningTokens": 8000,
+      "totalTokens": 220000,
+      "toolCalls": 1
+    }
+  ]
+}

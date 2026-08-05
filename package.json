@@ -1,0 +1,43 @@
+{
+  "name": "token-ledger",
+  "version": "0.1.0",
+  "description": "A private, local terminal dashboard for Codex token usage",
+  "keywords": [
+    "codex",
+    "cli",
+    "terminal",
+    "tokens",
+    "usage",
+    "privacy"
+  ],
+  "homepage": "https://github.com/jskoiz/token-ledger#readme",
+  "bugs": {
+    "url": "https://github.com/jskoiz/token-ledger/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jskoiz/token-ledger.git"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "README.md"
+  ],
+  "bin": {
+    "token-ledger": "bin/token-ledger.mjs"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "test:cli": "node --test tests/token-ledger-cli.test.mjs",
+    "test:collector": "node --test tests/token-ledger-collector.test.mjs",
+    "demo": "node scripts/generate-demo-screenshot.mjs",
+    "prepublishOnly": "npm test"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module"
+}
