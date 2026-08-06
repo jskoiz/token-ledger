@@ -1,7 +1,8 @@
 {
   "name": "tledger",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "A local-only terminal dashboard for Codex token usage",
+  "license": "MIT",
   "keywords": [
     "codex",
     "cli",
@@ -24,6 +25,7 @@
   "files": [
     "bin/",
     "lib/",
+    "LICENSE",
     "README.md"
   ],
   "bin": {

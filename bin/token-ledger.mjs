@@ -382,6 +382,48 @@ function sourceLabel(snapshotPath, snapshot) {
   return `${cleanLabel(basename(snapshotPath), "snapshot")} · captured ${generated}`;
 }
 
+function latestActivityDateString(snapshot, timeZone) {
+  let latestTimestamp = Number.NEGATIVE_INFINITY;
+  for (const event of snapshot.events ?? []) {
+    const timestamp = new Date(event.timestamp).getTime();
+    if (Number.isFinite(timestamp) && timestamp > latestTimestamp) {
+      latestTimestamp = timestamp;
+    }
+  }
+  if (!Number.isFinite(latestTimestamp)) return null;
+  return dateStringFromParts(numericDateParts({
+    value: new Date(latestTimestamp),
+    timeZone,
+  }));
+}
+
+function displayCalendarDate(dateString) {
+  const [year, month, day] = dateString.split("-").map(Number);
+  return new Intl.DateTimeFormat("en-US", {
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(new Date(Date.UTC(year, month - 1, day)));
+}
+
+function emptyState(options, snapshot, bounds) {
+  const rangeDescription = options.range === "week"
+    ? `${bounds.startDateString} through ${bounds.endDateString}`
+    : bounds.dateString;
+  const lines = [
+    `No model-call events found for ${rangeDescription} (${bounds.timeZone}).`,
+    "Token Ledger reads only Codex history stored on this computer.",
+  ];
+  const latestDate = latestActivityDateString(snapshot, bounds.timeZone);
+  if (latestDate) {
+    lines.push(`Latest local activity: ${displayCalendarDate(latestDate)}.`);
+    lines.push(`Try: tledger ${options.range} ${latestDate}`);
+  }
+  lines.push(`Source: ${sourceLabel(options.input, snapshot)}`);
+  return lines.join("\n");
+}
+
 async function readSnapshot(snapshotPath) {
   let parsed;
   try {
@@ -489,13 +531,7 @@ export async function run(options) {
   const snapshot = await loadSnapshot(options);
   const events = filterDayEvents(snapshot, bounds);
   if (events.length === 0) {
-    const rangeDescription = options.range === "week"
-      ? `${bounds.startDateString} through ${bounds.endDateString}`
-      : bounds.dateString;
-    return [
-      `No model-call events found for ${rangeDescription} (${bounds.timeZone}).`,
-      `Source: ${sourceLabel(options.input, snapshot)}`,
-    ].join("\n");
+    return emptyState(options, snapshot, bounds);
   }
   const allRows = aggregateProjects(snapshot, events, options);
   const rows = allRows.slice(0, options.top);
@@ -519,14 +555,7 @@ async function runInteractive(options) {
   const snapshot = await loadSnapshot(options);
   const events = filterDayEvents(snapshot, bounds);
   if (events.length === 0) {
-    const rangeDescription = options.range === "week"
-      ? `${bounds.startDateString} through ${bounds.endDateString}`
-      : bounds.dateString;
-    process.stdout.write([
-      `No model-call events found for ${rangeDescription} (${bounds.timeZone}).`,
-      `Source: ${sourceLabel(options.input, snapshot)}`,
-      "",
-    ].join("\n"));
+    process.stdout.write(`${emptyState(options, snapshot, bounds)}\n`);
     return;
   }
   const allRows = aggregateProjects(snapshot, events, options);

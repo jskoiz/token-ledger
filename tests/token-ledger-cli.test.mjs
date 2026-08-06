@@ -538,6 +538,53 @@ test("CLI renders explicit snapshots through week, day, plain, ASCII, top, width
   assert.doesNotMatch(noColor.stdout, /\u001b/);
 });
 
+test("CLI empty state explains local scope and points to the latest activity", () => {
+  const empty = runCli([
+    "week",
+    "2026-08-12",
+    "--input",
+    fixturePath,
+    "--static",
+    "--plain",
+    "--tz",
+    "UTC",
+  ]);
+  assert.equal(empty.status, 0, empty.stderr);
+  assert.match(
+    empty.stdout,
+    /No model-call events found for 2026-08-06 through 2026-08-12 \(UTC\)\./,
+  );
+  assert.match(empty.stdout, /reads only Codex history stored on this computer/);
+  assert.match(empty.stdout, /Latest local activity: August 5, 2026\./);
+  assert.match(empty.stdout, /Try: tledger week 2026-08-05/);
+});
+
+test("CLI empty state resolves the latest date in the selected timezone", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-empty-timezone-"));
+  try {
+    const snapshot = resolve(root, "snapshot.json");
+    await writeFile(snapshot, JSON.stringify({
+      generatedAt: "2026-08-06T22:47:08.714Z",
+      events: [{ timestamp: "2026-07-29T06:33:43.754Z" }],
+    }));
+    const empty = runCli([
+      "week",
+      "2026-08-06",
+      "--input",
+      snapshot,
+      "--static",
+      "--plain",
+      "--tz",
+      "Pacific/Honolulu",
+    ]);
+    assert.equal(empty.status, 0, empty.stderr);
+    assert.match(empty.stdout, /Latest local activity: July 28, 2026\./);
+    assert.match(empty.stdout, /Try: tledger week 2026-07-28/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("CLI failure messages cover invalid input without terminal injection", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-errors-"));
   try {

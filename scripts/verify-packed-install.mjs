@@ -177,7 +177,12 @@ try {
   ));
   assert.equal(installedPackage.name, "tledger");
   assert.equal(installedPackage.version, expectedPackage.version);
+  assert.equal(installedPackage.license, "MIT");
   assert.deepEqual(installedPackage.dependencies ?? {}, {});
+  assert.match(
+    await readFile(resolve(installedRoot, "LICENSE"), "utf8"),
+    /^MIT License$/m,
+  );
 
   const installedModule = await import(pathToFileURL(
     resolve(installedRoot, "bin", "token-ledger.mjs"),
