@@ -17,6 +17,7 @@ const terminal = renderTerminal({
   options: {
     range: "week",
     plain: true,
+    forceColor: true,
     ascii: false,
     static: true,
     width: 108,
@@ -29,16 +30,20 @@ const terminal = renderTerminal({
   allRows,
 });
 
+const stripAnsi = (value) => String(value)
+  .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "")
+  .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
+
+const visibleTerminal = stripAnsi(terminal);
 const forbidden = [
   /\/(?:Users|home)\//i,
   /[A-Z]:\\/i,
   /@[a-z0-9.-]+/i,
   /github\.com/i,
   /token-ledger-snapshot/i,
-  /\u001b/,
 ];
 for (const pattern of forbidden) {
-  if (pattern.test(terminal)) {
+  if (pattern.test(visibleTerminal)) {
     throw new Error(`Synthetic demo failed privacy check: ${pattern}`);
   }
 }
@@ -47,25 +52,96 @@ const escapeXml = (value) => String(value)
   .replaceAll("&", "&amp;")
   .replaceAll("<", "&lt;")
   .replaceAll(">", "&gt;")
+  .replaceAll('"', "&quot;")
+  .replaceAll("'", "&apos;")
   .replaceAll(" ", "&#160;");
-const lines = terminal.split("\n");
+
+const STANDARD_COLORS = [
+  "#000000", "#800000", "#008000", "#808000",
+  "#000080", "#800080", "#008080", "#c0c0c0",
+  "#808080", "#ff0000", "#00ff00", "#ffff00",
+  "#0000ff", "#ff00ff", "#00ffff", "#ffffff",
+];
+const CUBE_LEVELS = [0, 95, 135, 175, 215, 255];
+const hex = (value) => value.toString(16).padStart(2, "0");
+
+function xtermColor(index) {
+  const value = Math.max(0, Math.min(255, Number(index) || 0));
+  if (value < 16) return STANDARD_COLORS[value];
+  if (value < 232) {
+    const offset = value - 16;
+    const red = CUBE_LEVELS[Math.floor(offset / 36)];
+    const green = CUBE_LEVELS[Math.floor((offset % 36) / 6)];
+    const blue = CUBE_LEVELS[offset % 6];
+    return `#${hex(red)}${hex(green)}${hex(blue)}`;
+  }
+  const level = 8 + (value - 232) * 10;
+  return `#${hex(level)}${hex(level)}${hex(level)}`;
+}
+
+function parseAnsiLine(line) {
+  const cells = [];
+  const style = { fill: "#d7d7dc", bold: false };
+  let column = 0;
+  let cursor = 0;
+  const sgr = /\u001b\[([0-9;]*)m/g;
+  let match;
+
+  const append = (value) => {
+    for (const character of value) {
+      cells.push({ character, column, ...style });
+      column += 1;
+    }
+  };
+
+  while ((match = sgr.exec(line)) !== null) {
+    append(line.slice(cursor, match.index));
+    const codes = (match[1] || "0").split(";").map(Number);
+    for (let index = 0; index < codes.length; index += 1) {
+      const code = codes[index];
+      if (code === 0) {
+        style.fill = "#d7d7dc";
+        style.bold = false;
+      } else if (code === 1) {
+        style.bold = true;
+      } else if (code === 22) {
+        style.bold = false;
+      } else if (code === 39) {
+        style.fill = "#d7d7dc";
+      } else if (code >= 30 && code <= 37) {
+        style.fill = STANDARD_COLORS[code - 30];
+      } else if (code >= 90 && code <= 97) {
+        style.fill = STANDARD_COLORS[code - 90 + 8];
+      } else if (code === 38 && codes[index + 1] === 5) {
+        style.fill = xtermColor(codes[index + 2]);
+        index += 2;
+      } else if (code === 38 && codes[index + 1] === 2) {
+        style.fill = `#${hex(codes[index + 2])}${hex(codes[index + 3])}${hex(codes[index + 4])}`;
+        index += 4;
+      } else if (code === 48 && (codes[index + 1] === 5 || codes[index + 1] === 2)) {
+        index += codes[index + 1] === 5 ? 2 : 4;
+      }
+    }
+    cursor = sgr.lastIndex;
+  }
+  append(line.slice(cursor));
+  return cells;
+}
+
+const lines = terminal.split("\n").map(parseAnsiLine);
 const lineHeight = 19;
 const cellWidth = 7.8;
-const width = Math.ceil(56 + Math.max(...lines.map((line) => [...line].length)) * cellWidth);
+const width = Math.ceil(56 + Math.max(...lines.map((line) => line.length)) * cellWidth);
 const height = 78 + lines.length * lineHeight + 26;
 const textRows = lines.map((line, index) => {
   const y = 70 + index * lineHeight;
-  const fill = index === 0
-    ? "#f7f7f8"
-    : /TOKENS BY PROJECT|MODEL MIX|USAGE TYPE|CACHE · INPUT|RESET CYCLE/.test(line)
-      ? "#57d99a"
-      : "#d7d7dc";
-  const glyphs = [...line].map((character, column) => {
+  const glyphs = line.map(({ character, column, fill, bold }) => {
     if (character === " ") return "";
     const x = (28 + column * cellWidth).toFixed(2);
-    return `    <text x="${x}" y="${y}">${escapeXml(character)}</text>`;
+    const weight = bold ? ' font-weight="700"' : "";
+    return `    <text x="${x}" y="${y}" fill="${fill}"${weight}>${escapeXml(character)}</text>`;
   }).filter(Boolean).join("\n");
-  return `  <g fill="${fill}" class="terminal-line">\n${glyphs}\n  </g>`;
+  return `  <g class="terminal-line">\n${glyphs}\n  </g>`;
 }).join("\n");
 
 const svg = `<?xml version="1.0" encoding="UTF-8"?>
@@ -82,10 +158,22 @@ const svg = `<?xml version="1.0" encoding="UTF-8"?>
   <circle cx="22" cy="21" r="6" fill="#ff5f57"/>
   <circle cx="42" cy="21" r="6" fill="#febc2e"/>
   <circle cx="62" cy="21" r="6" fill="#28c840"/>
-  <text x="${width / 2}" y="25" text-anchor="middle" fill="#8f8f98" class="chrome-label">SYNTHETIC DEMO</text>
+  <text x="${width / 2}" y="25" text-anchor="middle" fill="#8f8f98" class="chrome-label">TOKEN LEDGER</text>
 ${textRows}
 </svg>
 `;
+
+for (const modelColor of ["#5fd7d7", "#5f87af", "#d7af5f", "#d787d7", "#5f5f87"]) {
+  if (!svg.includes(`fill="${modelColor}"`)) {
+    throw new Error(`Synthetic demo is missing model color ${modelColor}`);
+  }
+}
+if (!svg.includes(">TOKEN LEDGER</text>") || svg.includes("SYNTHETIC DEMO")) {
+  throw new Error("Synthetic demo window title must be TOKEN LEDGER");
+}
+if (/\u001b/.test(svg)) {
+  throw new Error("Synthetic demo SVG contains an unparsed ANSI escape");
+}
 
 await writeFile(outputUrl, svg, "utf8");
 process.stdout.write(`Generated ${outputUrl.pathname}\n`);
