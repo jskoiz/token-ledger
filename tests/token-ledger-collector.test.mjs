@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { unlinkSync } from "node:fs";
 import {
   chmod,
   mkdir,
@@ -17,6 +18,8 @@ import { DatabaseSync } from "node:sqlite";
 import {
   collectUsage,
   latestSourceModifiedAt,
+  rolloutLineMayAffectUsage,
+  scanWorkerCount,
   sourceFingerprint,
   sourceState,
   writePrivateSnapshot,
@@ -63,6 +66,10 @@ function usageRecord(timestamp, turnId, total, last, model) {
 
 function serialize(rows) {
   return `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`;
+}
+
+function normalizeGeneratedAt(snapshot) {
+  return { ...snapshot, generatedAt: "normalized" };
 }
 
 function findForbiddenKeys(value, path = "root", found = []) {
@@ -272,12 +279,26 @@ test("collector de-duplicates copied history and omits titles and full paths", a
       serialize(childLines),
     );
 
-    const snapshot = await collectUsage({
+    const collectOptions = {
       output: resolve(root, "snapshot.json"),
       codexHome: root,
       includeArchived: true,
       since: null,
-    });
+    };
+    const sequential = await collectUsage({ ...collectOptions, workers: 1 });
+    const progress = [];
+    const snapshot = await collectUsage(
+      { ...collectOptions, workers: 2 },
+      ({ current, total }) => progress.push({ current, total }),
+    );
+    assert.deepEqual(
+      normalizeGeneratedAt(snapshot),
+      normalizeGeneratedAt(sequential),
+    );
+    assert.deepEqual(progress, [
+      { current: 1, total: 2 },
+      { current: 2, total: 2 },
+    ]);
     assert.equal(snapshot.events.length, 2);
     assert.equal(snapshot.coverage.observedTokens, 150);
     assert.equal(snapshot.coverage.duplicateEventsSkipped, 1);
@@ -296,6 +317,81 @@ test("collector de-duplicates copied history and omits titles and full paths", a
     assert.doesNotMatch(serialized, /\/workspace\//);
     assert.doesNotMatch(serialized, /repository_url|git_origin_url/);
     assert.match(serialized, /synthetic\/repo/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("rollout filtering recognizes supported records without parsing payload text", () => {
+  for (const type of [
+    "session_meta",
+    "turn_context",
+    "task_started",
+    "thread_settings_applied",
+    "token_count",
+    "function_call",
+    "custom_tool_call",
+    "tool_search_call",
+    "web_search_call",
+    "image_generation_call",
+  ]) {
+    assert.equal(
+      rolloutLineMayAffectUsage(`{"type" : "${type}"}`),
+      true,
+      type,
+    );
+  }
+  assert.equal(
+    rolloutLineMayAffectUsage(
+      JSON.stringify({
+        type: "response_item",
+        payload: { type: "message", text: "synthetic irrelevant payload" },
+      }),
+    ),
+    false,
+  );
+});
+
+test("worker selection is bounded by files, hardware, and the collector cap", () => {
+  assert.equal(scanWorkerCount(0, null, 12), 0);
+  assert.equal(scanWorkerCount(1, null, 12), 1);
+  assert.equal(scanWorkerCount(987, null, 12), 4);
+  assert.equal(scanWorkerCount(987, null, 4), 3);
+  assert.equal(scanWorkerCount(987, 2, 12), 2);
+  assert.throws(() => scanWorkerCount(10, 7, 12), /1 to 6/);
+});
+
+test("parallel collection propagates worker file failures", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-worker-error-"));
+  try {
+    const sessions = resolve(root, "sessions");
+    await mkdir(sessions, { recursive: true });
+    const files = [
+      resolve(sessions, "large.jsonl"),
+      resolve(sessions, "medium.jsonl"),
+      resolve(sessions, "removed.jsonl"),
+    ];
+    await writeFile(files[0], `${" ".repeat(20_000)}\n`);
+    await writeFile(files[1], `${" ".repeat(10_000)}\n`);
+    await writeFile(files[2], "{}\n");
+    let removed = false;
+    await assert.rejects(
+      collectUsage(
+        {
+          codexHome: root,
+          includeArchived: false,
+          since: null,
+          workers: 2,
+        },
+        ({ current }) => {
+          if (current === 1 && !removed) {
+            unlinkSync(files[2]);
+            removed = true;
+          }
+        },
+      ),
+      /ENOENT|no such file/i,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

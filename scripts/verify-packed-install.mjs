@@ -18,6 +18,10 @@ if (!tarball) {
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const fixture = resolve(repository, "tests/fixtures/demo-snapshot.json");
+const expectedPackage = JSON.parse(await readFile(
+  resolve(repository, "package.json"),
+  "utf8",
+));
 const root = await mkdtemp(resolve(tmpdir(), "token-ledger-packed-"));
 const prefix = resolve(root, "prefix");
 const home = resolve(root, "home");
@@ -161,7 +165,7 @@ try {
     "utf8",
   ));
   assert.equal(installedPackage.name, "@jskoiz/token-ledger");
-  assert.equal(installedPackage.version, "0.1.0");
+  assert.equal(installedPackage.version, expectedPackage.version);
   assert.deepEqual(installedPackage.dependencies ?? {}, {});
 
   const installedModule = await import(pathToFileURL(

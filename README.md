@@ -52,7 +52,9 @@ Useful options:
 
 By default, Token Ledger reads `CODEX_HOME` or `~/.codex` and keeps a
 privacy-reduced cache at `~/.token-ledger/token-ledger-snapshot.json`. It checks
-source freshness automatically, makes no network requests, and excludes
+source freshness automatically. Fresh scans use a bounded pool of up to four
+workers; unchanged runs read the existing cache. Token Ledger makes no network
+requests and excludes
 message bodies, reasoning text, tool payloads, credentials, and full local
 paths from the cache. Project labels can still reveal local context, so keep
 snapshots private unless you have reviewed them. Reset-cycle burn
