@@ -1,5 +1,5 @@
 {
-  "name": "token-ledger",
+  "name": "@jskoiz/token-ledger",
   "version": "0.1.0",
   "description": "A private, local terminal dashboard for Codex token usage",
   "keywords": [

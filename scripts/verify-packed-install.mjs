@@ -150,12 +150,17 @@ try {
     ".bin",
     process.platform === "win32" ? "token-ledger.cmd" : "token-ledger",
   );
-  const installedRoot = resolve(prefix, "node_modules", "token-ledger");
+  const installedRoot = resolve(
+    prefix,
+    "node_modules",
+    "@jskoiz",
+    "token-ledger",
+  );
   const installedPackage = JSON.parse(await readFile(
     resolve(installedRoot, "package.json"),
     "utf8",
   ));
-  assert.equal(installedPackage.name, "token-ledger");
+  assert.equal(installedPackage.name, "@jskoiz/token-ledger");
   assert.equal(installedPackage.version, "0.1.0");
   assert.deepEqual(installedPackage.dependencies ?? {}, {});
 
@@ -330,7 +335,10 @@ try {
   ]);
   assert.equal(dependencyTree.status, 0, dependencyTree.stderr);
   const tree = JSON.parse(dependencyTree.stdout);
-  assert.deepEqual(tree.dependencies?.["token-ledger"]?.dependencies ?? {}, {});
+  assert.deepEqual(
+    tree.dependencies?.["@jskoiz/token-ledger"]?.dependencies ?? {},
+    {},
+  );
 
   process.stdout.write("Packed install verification passed.\n");
 } finally {

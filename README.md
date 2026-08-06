@@ -14,7 +14,7 @@ Token Ledger requires Node.js 22.13 or newer and has no runtime npm
 dependencies.
 
 ```bash
-npm install --global token-ledger
+npm install --global @jskoiz/token-ledger
 ```
 
 ## Use
