@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  access,
   mkdir,
   mkdtemp,
   readFile,
@@ -49,7 +50,7 @@ function runCli(bin, args, options = {}) {
   assert.equal(
     result.status,
     options.expectedStatus ?? 0,
-    `token-ledger ${args.join(" ")}\n${result.stderr}`,
+    `tledger ${args.join(" ")}\n${result.stderr}`,
   );
   return result;
 }
@@ -152,18 +153,29 @@ try {
     prefix,
     "node_modules",
     ".bin",
+    process.platform === "win32" ? "tledger.cmd" : "tledger",
+  );
+  const legacyBin = resolve(
+    prefix,
+    "node_modules",
+    ".bin",
     process.platform === "win32" ? "token-ledger.cmd" : "token-ledger",
+  );
+  await assert.rejects(
+    access(legacyBin),
+    (error) => error.code === "ENOENT",
+    "packed install must expose only the tledger executable",
   );
   const installedRoot = resolve(
     prefix,
     "node_modules",
-    "token-ledger",
+    "tledger",
   );
   const installedPackage = JSON.parse(await readFile(
     resolve(installedRoot, "package.json"),
     "utf8",
   ));
-  assert.equal(installedPackage.name, "token-ledger");
+  assert.equal(installedPackage.name, "tledger");
   assert.equal(installedPackage.version, expectedPackage.version);
   assert.deepEqual(installedPackage.dependencies ?? {}, {});
 
@@ -339,7 +351,7 @@ try {
   assert.equal(dependencyTree.status, 0, dependencyTree.stderr);
   const tree = JSON.parse(dependencyTree.stdout);
   assert.deepEqual(
-    tree.dependencies?.["token-ledger"]?.dependencies ?? {},
+    tree.dependencies?.["tledger"]?.dependencies ?? {},
     {},
   );
 

@@ -24,9 +24,9 @@ function usage() {
   return `Token Ledger terminal usage
 
 Usage:
-  token-ledger
-  token-ledger week [end-day]
-  token-ledger day [day]
+  tledger
+  tledger week [end-day]
+  tledger day [day]
 
 Options:
   --date <day>         Date as YYYY-MM-DD, today, or yesterday

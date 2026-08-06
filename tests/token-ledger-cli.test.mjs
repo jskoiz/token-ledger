@@ -461,7 +461,7 @@ test("CLI help lists the complete self-contained command surface", () => {
   for (const flag of ["--help", "-h"]) {
     const result = runCli([flag]);
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /token-ledger week \[end-day\]/);
+    assert.match(result.stdout, /tledger week \[end-day\]/);
     for (const option of [
       "--date",
       "--input",

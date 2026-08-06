@@ -15,17 +15,17 @@ Token Ledger requires Node.js 22.13 or newer and has no runtime npm
 dependencies.
 
 ```bash
-npm install --global token-ledger
+npm install --global tledger
 ```
 
 ## Use
 
 ```bash
-token-ledger                 # current seven-day window
-token-ledger week            # same default, stated explicitly
-token-ledger day             # today
-token-ledger day yesterday
-token-ledger week 2026-08-05
+tledger                 # current seven-day window
+tledger week            # same default, stated explicitly
+tledger day             # today
+tledger day yesterday
+tledger week 2026-08-05
 ```
 
 The local timezone and top 10 projects are selected automatically. The default

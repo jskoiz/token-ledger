@@ -1,5 +1,5 @@
 {
-  "name": "token-ledger",
+  "name": "tledger",
   "version": "0.1.2",
   "description": "A local-only terminal dashboard for Codex token usage",
   "keywords": [
@@ -27,7 +27,7 @@
     "README.md"
   ],
   "bin": {
-    "token-ledger": "bin/token-ledger.mjs"
+    "tledger": "bin/token-ledger.mjs"
   },
   "scripts": {
     "test": "node --test tests/*.test.mjs",
