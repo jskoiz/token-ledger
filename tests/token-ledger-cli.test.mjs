@@ -339,6 +339,82 @@ test("renderer supports static widths and interactive selection without false ke
   assert.doesNotMatch(interactive, /inspect|d\/w\/m/);
 });
 
+test("renderer surfaces auto review turns, tokens, and cache share", () => {
+  const bounds = weekBounds("2026-08-05", "UTC");
+  const base = {
+    timestamp: "2026-08-05T12:00:00.000Z",
+    project: "synthetic-review-project",
+    threadId: "synthetic-review-thread",
+    reasoningTokens: 0,
+    toolCalls: 0,
+  };
+  const event = ({ totalTokens, ...values }) => ({
+    ...base,
+    ...values,
+    inputTokens: totalTokens * 0.9,
+    cachedInputTokens: totalTokens * 0.8,
+    outputTokens: totalTokens * 0.1,
+    totalTokens,
+  });
+  const events = [
+    event({ id: "auto-1a", turnId: "auto-turn-1", model: "codex-auto-review", useType: "subagent", totalTokens: 50 }),
+    event({ id: "auto-1b", turnId: "auto-turn-1", model: "codex-auto-review", useType: "subagent", totalTokens: 50 }),
+    event({ id: "auto-2", turnId: "auto-turn-2", model: "codex-auto-review", useType: "subagent", totalTokens: 100 }),
+    event({ id: "regular-1", turnId: "regular-1", model: "gpt-5.6-sol", useType: "interactive", totalTokens: 800 }),
+    event({ id: "regular-2", turnId: "regular-2", model: "gpt-5.6-sol", useType: "subagent", totalTokens: 700 }),
+    event({ id: "regular-3", turnId: "regular-3", model: "gpt-5.6-sol", useType: "automation", totalTokens: 600 }),
+    event({ id: "regular-4", turnId: "regular-4", model: "gpt-5.6-sol", useType: "cli", totalTokens: 500 }),
+    event({ id: "regular-5", turnId: "regular-5", model: "gpt-5.6-sol", useType: "voice", totalTokens: 400 }),
+    event({ id: "regular-6", turnId: "regular-6", model: "gpt-5.6-sol", useType: "tool", totalTokens: 300 }),
+  ];
+  const snapshot = {
+    events,
+    threads: [{ id: base.threadId, project: base.project }],
+    quotaObservations: [{
+      timestamp: base.timestamp,
+      usedPercent: 25,
+      windowMinutes: 10_080,
+      resetsAt: Date.parse("2026-08-08T00:00:00.000Z") / 1000,
+    }],
+  };
+  const allRows = aggregateProjects(snapshot, events, { rawProjects: true });
+  const output = stripAnsi(renderTerminal({
+    options: {
+      range: "week",
+      plain: true,
+      ascii: true,
+      static: true,
+      width: 120,
+    },
+    snapshot,
+    bounds,
+    events,
+    rows: allRows,
+    allRows,
+  }));
+
+  assert.equal((output.match(/Auto Review/g) ?? []).length, 2);
+  assert.match(output, /Auto Review\s+5\.71%/);
+  assert.match(output, /2 turns · 25\.0%/);
+  assert.match(output, /200 · 88\.9% cached/);
+  assert.match(output, /Subagent\s+20\.0%/);
+
+  const fullscreen = stripAnsi(renderFullscreen({
+    options: { range: "week", forceColor: false, selectedIndex: 0 },
+    snapshot,
+    bounds,
+    events,
+    rows: allRows,
+    allRows,
+    width: 100,
+    height: 30,
+  }));
+  assert.equal(fullscreen.split("\n").length, 30);
+  assert.match(fullscreen, /Auto Review/);
+  assert.match(fullscreen, /RESET CYCLE/);
+  assert.match(fullscreen, /q\/esc quit/);
+});
+
 test("quota context maps the selected range to reset-cycle burn", () => {
   const observation = {
     timestamp: "2026-08-02T00:00:00.000Z",

@@ -6,6 +6,7 @@ export const MODEL_COLORS = {
   luna: [38, 5, 80],
   terra: [38, 5, 179],
   gpt: [38, 5, 176],
+  autoReview: [38, 5, 153],
   other: [38, 5, 60],
 };
 const TEXT_STYLE = [38, 5, 255];
@@ -94,7 +95,10 @@ function plural(value, singular, pluralForm = `${singular}s`) {
 
 function modelLabel(value) {
   const model = sanitizeText(value) || "Unknown model";
-  const lower = model.toLowerCase();
+  const lower = model.toLowerCase().replaceAll("_", "-");
+  if (lower === "codex-auto-review" || lower.startsWith("codex-auto-review-")) {
+    return "Auto Review";
+  }
   if (lower.includes("sol")) return "Sol";
   if (lower.includes("luna")) return "Luna";
   if (lower.includes("terra")) return "Terra";
@@ -103,7 +107,10 @@ function modelLabel(value) {
 }
 
 function modelColor(model) {
-  const key = String(model || "").toLowerCase();
+  const key = String(model || "")
+    .toLowerCase()
+    .replace(/[\s_-]+/g, "-");
+  if (key === "auto-review") return MODEL_COLORS.autoReview;
   return MODEL_COLORS[key] ?? MODEL_COLORS.other;
 }
 
@@ -167,7 +174,9 @@ function modelTotals(events) {
 function usageTypeTotals(events) {
   const totals = new Map();
   for (const event of events) {
-    const key = String(event.useType || "unknown").trim().toLowerCase() || "unknown";
+    const key = modelLabel(event.model) === "Auto Review"
+      ? "auto-review"
+      : String(event.useType || "unknown").trim().toLowerCase() || "unknown";
     totals.set(key, (totals.get(key) ?? 0) + (Number(event.totalTokens) || 0));
   }
   return [...totals.entries()]
@@ -282,6 +291,32 @@ function summary(events) {
     const cached = Math.max(0, Number(event.cachedInputTokens) || 0);
     return sum + Math.min(input, cached);
   }, 0);
+  const turnCount = (rows) => {
+    const keys = new Set();
+    for (const [index, event] of rows.entries()) {
+      const turnId = String(event.turnId || "").trim();
+      keys.add(turnId ? `turn:${turnId}` : `event:${event.id || index}`);
+    }
+    return keys.size;
+  };
+  const totalTurns = turnCount(events);
+  const autoReviewEvents = events.filter(
+    (event) => modelLabel(event.model) === "Auto Review",
+  );
+  const autoReviewTokens = autoReviewEvents.reduce(
+    (sum, event) => sum + (Number(event.totalTokens) || 0),
+    0,
+  );
+  const autoReviewInputTokens = autoReviewEvents.reduce(
+    (sum, event) => sum + Math.max(0, Number(event.inputTokens) || 0),
+    0,
+  );
+  const autoReviewCachedInputTokens = autoReviewEvents.reduce((sum, event) => {
+    const input = Math.max(0, Number(event.inputTokens) || 0);
+    const cached = Math.max(0, Number(event.cachedInputTokens) || 0);
+    return sum + Math.min(input, cached);
+  }, 0);
+  const autoReviewTurns = turnCount(autoReviewEvents);
   return {
     totalTokens,
     calls,
@@ -292,23 +327,56 @@ function summary(events) {
     uncachedInputTokens: Math.max(0, inputTokens - cachedInputTokens),
     models: modelTotals(events),
     usageTypes: usageTypeTotals(events),
+    autoReview: {
+      present: autoReviewEvents.length > 0,
+      totalTokens: autoReviewTokens,
+      turns: autoReviewTurns,
+      turnShare: totalTurns > 0 ? (autoReviewTurns / totalTurns) * 100 : 0,
+      cachedInputShare: autoReviewInputTokens > 0
+        ? (autoReviewCachedInputTokens / autoReviewInputTokens) * 100
+        : 0,
+    },
   };
 }
 
 function modelLegendItems(models, totalTokens) {
   const known = new Map();
   for (const model of models) {
-    const key = ["Sol", "Luna", "Terra", "GPT"].includes(model.model)
+    const key = ["Sol", "Luna", "Terra", "GPT", "Auto Review"].includes(model.model)
       ? model.model
       : "Other";
     known.set(key, (known.get(key) ?? 0) + model.totalTokens);
   }
-  return ["Luna", "Sol", "Terra", "GPT", "Other"]
+  const order = ["Luna", "Sol", "Terra", "GPT"];
+  if ((known.get("Auto Review") ?? 0) > 0) order.push("Auto Review");
+  order.push("Other");
+  return order
     .map((model) => ({
       model,
       totalTokens: known.get(model) ?? 0,
       share: totalTokens > 0 ? ((known.get(model) ?? 0) / totalTokens) * 100 : 0,
     }));
+}
+
+function visibleUsageTypeItems(items, limit = 5) {
+  if (items.length <= limit) return items;
+  const visible = items.slice(0, limit - 1);
+  const autoReview = items.find((item) => item.key === "auto-review");
+  if (autoReview && !visible.includes(autoReview)) {
+    visible[visible.length - 1] = autoReview;
+    visible.sort((left, right) => right.totalTokens - left.totalTokens);
+  }
+  const visibleKeys = new Set(visible.map((item) => item.key));
+  return [
+    ...visible,
+    {
+      key: "other",
+      label: "Other",
+      totalTokens: items
+        .filter((item) => !visibleKeys.has(item.key))
+        .reduce((sum, item) => sum + item.totalTokens, 0),
+    },
+  ];
 }
 
 function stackedBar(row, width, maximumTokens, options, enabled) {
@@ -418,29 +486,23 @@ function sidebarLines(stats, panelWidth, enabled, options = {}, quota = null) {
   for (const item of modelLegendItems(stats.models, stats.totalTokens)) {
     const swatch = colorize("■", modelColor(item.model), enabled);
     push(`${swatch} ${fit(item.model, Math.max(1, contentWidth - 10))}${fit(percent(item.share), 8, "right")}`);
+    if (item.model === "Auto Review" && stats.autoReview.present) {
+      const turnLabel = stats.autoReview.turns === 1 ? "turn" : "turns";
+      push(`  ${compact(stats.autoReview.turns)} ${turnLabel} · ${percent(stats.autoReview.turnShare)}`);
+      push(`  ${compact(stats.autoReview.totalTokens)} · ${percent(stats.autoReview.cachedInputShare)} cached`);
+    }
   }
-  push();
+  if (!compactSidebar) push();
   divider();
   push(heading("USAGE TYPE · TOKENS"));
   if (!compactSidebar) push();
-  const usageItems = stats.usageTypes.length > 5
-    ? [
-        ...stats.usageTypes.slice(0, 4),
-        {
-          key: "other",
-          label: "Other",
-          totalTokens: stats.usageTypes
-            .slice(4)
-            .reduce((sum, item) => sum + item.totalTokens, 0),
-        },
-      ]
-    : stats.usageTypes;
+  const usageItems = visibleUsageTypeItems(stats.usageTypes);
   for (const item of usageItems) {
     const swatch = "■";
     const share = stats.totalTokens > 0 ? (item.totalTokens / stats.totalTokens) * 100 : 0;
     push(`${swatch} ${fit(item.label, Math.max(1, contentWidth - 10))}${fit(percent(share), 8, "right")}`);
   }
-  push();
+  if (!compactSidebar) push();
   divider();
   push(heading("CACHE · INPUT"));
   if (!compactSidebar) push();
@@ -454,7 +516,7 @@ function sidebarLines(stats, panelWidth, enabled, options = {}, quota = null) {
     push(`${swatch} ${fit(item.label, Math.max(1, contentWidth - 10))}${fit(percent(share), 8, "right")}`);
   }
   if (quota?.available) {
-    push();
+    if (!compactSidebar) push();
     divider();
     push(heading("RESET CYCLE"));
     if (!compactSidebar) push();
@@ -549,7 +611,7 @@ export function renderTerminal({ options, snapshot, bounds, events, rows, allRow
   const columns = options.width ?? (Number(process.stdout.columns) || 120);
   const frameWidth = Math.max(38, Math.min(158, columns - 2));
   const sideBySide = options.forceSideBySide ?? frameWidth >= 100;
-  const sideWidth = sideBySide ? 26 : 0;
+  const sideWidth = sideBySide ? (stats.autoReview.present ? 28 : 26) : 0;
   const leftWidth = sideBySide ? frameWidth - sideWidth - 1 : frameWidth;
   const left = panelLines(rows, allRows, stats.totalTokens, leftWidth, options, enabled);
   const right = sideBySide ? sidebarLines(stats, sideWidth, enabled, options, quota) : null;

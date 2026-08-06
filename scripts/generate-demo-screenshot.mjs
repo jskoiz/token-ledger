@@ -45,6 +45,9 @@ const projectSubtitles = visibleTerminal.match(
 if (allRows.length < 10 || projectSubtitles.length < 10) {
   throw new Error("Synthetic demo must show at least 10 projects with usage subtitles");
 }
+if (!visibleTerminal.includes("Auto Review")) {
+  throw new Error("Synthetic demo must show Auto Review usage");
+}
 const forbidden = [
   /\/(?:Users|home)\//i,
   /[A-Z]:\\/i,
@@ -173,7 +176,7 @@ ${textRows}
 </svg>
 `;
 
-for (const modelColor of ["#5fd7d7", "#5f87af", "#d7af5f", "#d787d7", "#5f5f87"]) {
+for (const modelColor of ["#5fd7d7", "#5f87af", "#d7af5f", "#d787d7", "#afd7ff", "#5f5f87"]) {
   if (!svg.includes(`fill="${modelColor}"`)) {
     throw new Error(`Synthetic demo is missing model color ${modelColor}`);
   }

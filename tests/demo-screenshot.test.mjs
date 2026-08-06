@@ -11,7 +11,7 @@ test("synthetic demo uses the Token Ledger title and model palette", async () =>
   assert.match(svg, />TOKEN LEDGER<\/text>/);
   assert.doesNotMatch(svg, /SYNTHETIC DEMO/);
 
-  for (const color of ["#5fd7d7", "#5f87af", "#d7af5f", "#d787d7", "#5f5f87"]) {
+  for (const color of ["#5fd7d7", "#5f87af", "#d7af5f", "#d787d7", "#afd7ff", "#5f5f87"]) {
     assert.match(svg, new RegExp(`fill="${color}"`));
   }
 });
@@ -37,5 +37,6 @@ test("synthetic demo fixture fills the dashboard with varied usage", async () =>
   assert.equal(projects.size, 10);
   assert.ok(threads.size >= 30);
   assert.ok(models.size >= 5);
+  assert.ok(models.has("codex-auto-review"));
   assert.ok(useTypes.size >= 5);
 });

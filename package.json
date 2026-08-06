@@ -1,7 +1,7 @@
 {
-  "name": "@jskoiz/token-ledger",
-  "version": "0.1.1",
-  "description": "A private, local terminal dashboard for Codex token usage",
+  "name": "token-ledger",
+  "version": "0.1.2",
+  "description": "A local-only terminal dashboard for Codex token usage",
   "keywords": [
     "codex",
     "cli",

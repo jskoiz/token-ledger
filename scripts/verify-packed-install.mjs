@@ -157,14 +157,13 @@ try {
   const installedRoot = resolve(
     prefix,
     "node_modules",
-    "@jskoiz",
     "token-ledger",
   );
   const installedPackage = JSON.parse(await readFile(
     resolve(installedRoot, "package.json"),
     "utf8",
   ));
-  assert.equal(installedPackage.name, "@jskoiz/token-ledger");
+  assert.equal(installedPackage.name, "token-ledger");
   assert.equal(installedPackage.version, expectedPackage.version);
   assert.deepEqual(installedPackage.dependencies ?? {}, {});
 
@@ -340,7 +339,7 @@ try {
   assert.equal(dependencyTree.status, 0, dependencyTree.stderr);
   const tree = JSON.parse(dependencyTree.stdout);
   assert.deepEqual(
-    tree.dependencies?.["@jskoiz/token-ledger"]?.dependencies ?? {},
+    tree.dependencies?.["token-ledger"]?.dependencies ?? {},
     {},
   );
 

@@ -2,7 +2,8 @@
 
 Token Ledger is a lightweight, local-only terminal dashboard for Codex token
 usage. It ranks projects, shows model and cache mix, and adds reset-cycle
-context without sending usage data anywhere.
+context without sending usage data anywhere. Codex Auto Review is shown
+separately with its token total, distinct-turn share, and cached-input share.
 
 ![Token Ledger running with synthetic demo data](https://raw.githubusercontent.com/jskoiz/token-ledger/main/docs/token-ledger-demo.svg)
 
@@ -14,7 +15,7 @@ Token Ledger requires Node.js 22.13 or newer and has no runtime npm
 dependencies.
 
 ```bash
-npm install --global @jskoiz/token-ledger
+npm install --global token-ledger
 ```
 
 ## Use

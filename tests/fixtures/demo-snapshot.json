@@ -88,6 +88,7 @@
     { "id": "demo-event-29", "timestamp": "2026-08-05T08:25:00.000Z", "threadId": "demo-harbor-02", "project": "sample-harbor", "model": "other-model", "useType": "cli", "inputTokens": 21600000, "cachedInputTokens": 15000000, "outputTokens": 2400000, "reasoningTokens": 700000, "totalTokens": 24000000, "toolCalls": 3 },
 
     { "id": "demo-event-30", "timestamp": "2026-08-03T14:15:00.000Z", "threadId": "demo-iris-01", "project": "sample-iris", "model": "gpt-5.5", "useType": "interactive", "inputTokens": 25200000, "cachedInputTokens": 17000000, "outputTokens": 2800000, "reasoningTokens": 800000, "totalTokens": 28000000, "toolCalls": 3 },
-    { "id": "demo-event-31", "timestamp": "2026-08-05T18:55:00.000Z", "threadId": "demo-junction-01", "project": "sample-junction", "model": "other-model", "useType": "subagent", "inputTokens": 16200000, "cachedInputTokens": 11000000, "outputTokens": 1800000, "reasoningTokens": 500000, "totalTokens": 18000000, "toolCalls": 2 }
+    { "id": "demo-event-31", "timestamp": "2026-08-05T18:55:00.000Z", "threadId": "demo-junction-01", "project": "sample-junction", "model": "other-model", "useType": "subagent", "inputTokens": 16200000, "cachedInputTokens": 11000000, "outputTokens": 1800000, "reasoningTokens": 500000, "totalTokens": 18000000, "toolCalls": 2 },
+    { "id": "demo-event-32", "timestamp": "2026-08-05T19:05:00.000Z", "threadId": "demo-junction-01", "project": "sample-junction", "model": "codex-auto-review", "useType": "subagent", "inputTokens": 10800000, "cachedInputTokens": 9600000, "outputTokens": 1200000, "reasoningTokens": 300000, "totalTokens": 12000000, "toolCalls": 1 }
   ]
 }
