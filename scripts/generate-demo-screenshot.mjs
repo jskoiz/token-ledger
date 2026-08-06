@@ -19,8 +19,12 @@ const terminal = renderTerminal({
     plain: true,
     forceColor: true,
     ascii: false,
-    static: true,
-    width: 108,
+    static: false,
+    selectedIndex: 0,
+    highlight: false,
+    hideHelp: true,
+    compactSidebar: true,
+    width: 132,
     rawProjects: true,
   },
   snapshot,
@@ -35,6 +39,12 @@ const stripAnsi = (value) => String(value)
   .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
 
 const visibleTerminal = stripAnsi(terminal);
+const projectSubtitles = visibleTerminal.match(
+  /\d+ threads? · \d+(?:\.\d+)?% of tokens/g,
+) ?? [];
+if (allRows.length < 10 || projectSubtitles.length < 10) {
+  throw new Error("Synthetic demo must show at least 10 projects with usage subtitles");
+}
 const forbidden = [
   /\/(?:Users|home)\//i,
   /[A-Z]:\\/i,

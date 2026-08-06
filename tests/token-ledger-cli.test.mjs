@@ -333,6 +333,7 @@ test("renderer supports static widths and interactive selection without false ke
     allRows,
   });
   assert.match(interactive, /> 2\./);
+  assert.match(interactive, /\d+ threads · \d+\.\d+% of tokens/);
   assert.doesNotMatch(interactive, /> 1\./);
   assert.match(interactive, /\[j\/k\] select\s+\[q\/esc\] quit/);
   assert.doesNotMatch(interactive, /inspect|d\/w\/m/);
@@ -424,10 +425,10 @@ test("CLI renders explicit snapshots through week, day, plain, ASCII, top, width
   ]);
   assert.equal(week.status, 0, week.stderr);
   assert.match(week.stdout, /TOKEN LEDGER/);
-  assert.match(week.stdout, /synthetic-alpha/);
-  assert.match(week.stdout, /synthetic-beta/);
-  assert.match(week.stdout, /synthetic-gamma/);
-  assert.doesNotMatch(week.stdout, /synthetic-delta/);
+  assert.match(week.stdout, /sample-atlas/);
+  assert.match(week.stdout, /sample-beacon/);
+  assert.match(week.stdout, /sample-cascade/);
+  assert.doesNotMatch(week.stdout, /sample-drift/);
   assert.doesNotMatch(week.stdout, /\u001b/);
   assert.ok(week.stdout.trimEnd().split("\n").every((line) => line.length <= 100));
 

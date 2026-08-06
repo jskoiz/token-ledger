@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const demoUrl = new URL("../docs/token-ledger-demo.svg", import.meta.url);
+const fixtureUrl = new URL("./fixtures/demo-snapshot.json", import.meta.url);
 
 test("synthetic demo uses the Token Ledger title and model palette", async () => {
   const svg = await readFile(demoUrl, "utf8");
@@ -24,4 +25,17 @@ test("synthetic demo contains no local or account metadata", async () => {
   assert.doesNotMatch(svg, /github\.com/i);
   assert.doesNotMatch(svg, /token-ledger-snapshot/i);
   assert.doesNotMatch(svg, /\u001b/);
+});
+
+test("synthetic demo fixture fills the dashboard with varied usage", async () => {
+  const fixture = JSON.parse(await readFile(fixtureUrl, "utf8"));
+  const projects = new Set(fixture.events.map((event) => event.project));
+  const threads = new Set(fixture.events.map((event) => event.threadId));
+  const models = new Set(fixture.events.map((event) => event.model));
+  const useTypes = new Set(fixture.events.map((event) => event.useType));
+
+  assert.equal(projects.size, 10);
+  assert.ok(threads.size >= 30);
+  assert.ok(models.size >= 5);
+  assert.ok(useTypes.size >= 5);
 });

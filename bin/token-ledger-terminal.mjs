@@ -388,7 +388,7 @@ function panelLines(rows, allRows, totalTokens, panelWidth, options, enabled) {
     const metrics = `${fit(compact(row.totalTokens), totalWidth, "right")}${fit(percent(share), shareWidth, "right")}${" ".repeat(rightPadding)}`;
     const bar = stackedBar(row, barWidth, maxTokens, options, enabled);
     const rowLine = `${label}${bar} ${metrics}`;
-    const detail = plural(row.threads, "thread");
+    const detail = `${plural(row.threads, "thread")} · ${percent(share)} of tokens`;
     const detailText = truncateText(detail, labelWidth - 4);
     const subtitle = colorize(detailText, SUBTITLE_STYLE, enabled);
     const detailLine = `${fit(`    ${subtitle}`, labelWidth)}${" ".repeat(barWidth + 1 + totalWidth + shareWidth + rightPadding)}`;

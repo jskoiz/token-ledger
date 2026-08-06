@@ -221,9 +221,9 @@ try {
     "UTC",
     "--no-refresh",
   ]);
-  assert.match(week.stdout, /synthetic-alpha/);
-  assert.match(week.stdout, /synthetic-beta/);
-  assert.doesNotMatch(week.stdout, /synthetic-gamma/);
+  assert.match(week.stdout, /sample-atlas/);
+  assert.match(week.stdout, /sample-beacon/);
+  assert.doesNotMatch(week.stdout, /sample-cascade/);
   assert.ok(week.stdout.trimEnd().split("\n").every((line) => line.length <= 80));
 
   const day = runCli(bin, [
