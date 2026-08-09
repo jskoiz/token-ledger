@@ -134,7 +134,7 @@ function displayProject(row) {
 }
 
 function dateLabel(bounds, range = "day") {
-  if (range === "week" && bounds.startDateString && bounds.endDateString) {
+  if (range !== "day" && bounds.rangeDays !== 1 && bounds.startDateString && bounds.endDateString) {
     const startParts = bounds.startDateString.split("-").map(Number);
     const endParts = bounds.endDateString.split("-").map(Number);
     const monthNames = [
@@ -143,7 +143,12 @@ function dateLabel(bounds, range = "day") {
     ];
     const start = `${monthNames[startParts[1] - 1]} ${String(startParts[2]).padStart(2, "0")}`;
     const end = `${monthNames[endParts[1] - 1]} ${String(endParts[2]).padStart(2, "0")}`;
-    return `${start} – ${end} ${endParts[0]}`;
+    if (bounds.startDateString === bounds.endDateString) {
+      return `${end} ${endParts[0]}`;
+    }
+    return startParts[0] === endParts[0]
+      ? `${start} – ${end} ${endParts[0]}`
+      : `${start} ${startParts[0]} – ${end} ${endParts[0]}`;
   }
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: bounds.timeZone,
@@ -158,6 +163,13 @@ function dateLabel(bounds, range = "day") {
       .map((part) => [part.type, part.value]),
   );
   return `${values.weekday} ${values.day} ${values.month} ${values.year}`.toUpperCase();
+}
+
+function rangeModeLabel(bounds, range = "day", compact = false) {
+  if (range === "all") return "ALL";
+  if (range === "day") return "DAY";
+  const days = bounds.rangeDays ?? 1;
+  return compact ? `${days}D` : `${days} ${days === 1 ? "DAY" : "DAYS"}`;
 }
 
 function modelTotals(events) {
@@ -554,7 +566,7 @@ function panel(leftLines, rightLines, leftWidth, rightWidth, enabled, ascii) {
 function headerLines(stats, bounds, frameWidth, options, enabled) {
   const left = colorize("TOKEN LEDGER", TITLE_STYLE, enabled);
   const date = colorize(dateLabel(bounds, options.range), TEXT_STYLE, enabled);
-  const mode = colorize(options.range === "week" ? "7 DAYS" : "DAY", [1, ...TEAL], enabled);
+  const mode = colorize(rangeModeLabel(bounds, options.range), [1, ...TEAL], enabled);
   const metric = (value, label) =>
     `${colorize(String(value), TITLE_STYLE, enabled)} ${colorize(label, DIM, enabled)}`;
   const separator = colorize("·", DIM, enabled);
@@ -573,10 +585,14 @@ function headerLines(stats, bounds, frameWidth, options, enabled) {
     return [alignHeader(fullLine)];
   }
 
-  const compactDate = dateLabel(bounds, options.range)
-    .replace(/ 20\d{2}$/, "")
-    .replace(" – ", "–");
-  const compactMode = options.range === "week" ? "7D" : "DAY";
+  const crossesCalendarYear =
+    bounds.startDateString?.slice(0, 4) !== bounds.endDateString?.slice(0, 4);
+  const compactDate = (
+    crossesCalendarYear
+      ? dateLabel(bounds, options.range)
+      : dateLabel(bounds, options.range).replace(/ 20\d{2}$/, "")
+  ).replace(" – ", "–");
+  const compactMode = rangeModeLabel(bounds, options.range, true);
   const compactLine = [
     left,
     colorize(compactDate, TEXT_STYLE, enabled),
