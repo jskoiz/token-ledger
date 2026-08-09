@@ -40,7 +40,14 @@ tledger week            # same default, stated explicitly
 tledger day             # today
 tledger day yesterday
 tledger week 2026-08-05
+tledger month           # rolling 30-day window
+tledger 90d             # rolling 90-day window
+tledger 90d 2026-08-05  # 90 days ending on a chosen day
+tledger all             # every dated event in the local snapshot
 ```
+
+`week`, `month`, and custom ranges such as `90d` are inclusive rolling
+calendar-day windows ending today unless an end day is supplied.
 
 The local timezone and top 10 projects are selected automatically. The default
 view is interactive in a terminal; use arrow keys or `j`/`k` to move and `q` or

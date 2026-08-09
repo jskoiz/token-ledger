@@ -18,6 +18,7 @@ export const DEFAULT_SNAPSHOT = resolve(
   "token-ledger-snapshot.json",
 );
 const DEFAULT_TOP = 10;
+const MAX_RANGE_DAYS = 100_000;
 const DEFAULT_TIME_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 function usage() {
@@ -27,6 +28,16 @@ Usage:
   tledger
   tledger week [end-day]
   tledger day [day]
+  tledger month [end-day]
+  tledger <number>d [end-day]
+  tledger all
+
+Ranges:
+  day                  One calendar day
+  week                 7 days ending on end-day (default: today)
+  month                30 days ending on end-day (default: today)
+  <number>d            That many days ending on end-day, for example 90d
+  all                  Every dated event in the snapshot
 
 Options:
   --date <day>         Date as YYYY-MM-DD, today, or yesterday
@@ -56,14 +67,38 @@ function readOption(argv, index, name) {
   return value;
 }
 
-export function parseArgs(argv) {
-  const commandExplicit = argv[0] === "day" || argv[0] === "week";
-  if (argv[0] && !argv[0].startsWith("-") && !commandExplicit) {
-    throw new Error(`Unknown command: ${argv[0]}. Use day or week.`);
+function rangeSpec(value) {
+  if (value === "day") return { range: "day", rangeDays: 1 };
+  if (value === "week") return { range: "week", rangeDays: 7 };
+  if (value === "month") return { range: "month", rangeDays: 30 };
+  if (value === "all") return { range: "all", rangeDays: null };
+  const custom = /^(\d+)d$/.exec(value ?? "");
+  if (!custom) return null;
+  const rangeDays = Number(custom[1]);
+  if (
+    !Number.isSafeInteger(rangeDays) ||
+    rangeDays < 1 ||
+    rangeDays > MAX_RANGE_DAYS
+  ) {
+    throw new Error(
+      `Day range must be an integer from 1 to ${MAX_RANGE_DAYS.toLocaleString("en-US")}, for example 90d.`,
+    );
   }
-  const command = commandExplicit ? argv[0] : "week";
+  return { range: `${rangeDays}d`, rangeDays };
+}
+
+export function parseArgs(argv) {
+  const requestedRange = rangeSpec(argv[0]);
+  const commandExplicit = Boolean(requestedRange);
+  if (argv[0] && !argv[0].startsWith("-") && !commandExplicit) {
+    throw new Error(
+      `Unknown command: ${argv[0]}. Use day, week, month, all, or a duration like 90d.`,
+    );
+  }
+  const command = requestedRange ?? { range: "week", rangeDays: 7 };
   const options = {
-    range: command,
+    range: command.range,
+    rangeDays: command.rangeDays,
     date: null,
     input: DEFAULT_SNAPSHOT,
     inputExplicit: false,
@@ -134,7 +169,10 @@ export function parseArgs(argv) {
     }
   }
 
-  if (!options.help && !options.date) {
+  if (!options.help && options.range === "all" && options.date) {
+    throw new Error("The all range does not accept an end day.");
+  }
+  if (!options.help && !options.date && options.range !== "all") {
     options.date = "today";
   }
   if (!options.help && options.refresh && !options.autoRefresh) {
@@ -243,19 +281,97 @@ export function dayBounds(value, timeZone) {
   const nextDateString = shiftCalendarDate(dateString, 1);
   const start = zonedMidnight(dateString, timeZone);
   const end = zonedMidnight(nextDateString, timeZone);
-  return { dateString, start, end, timeZone };
+  return {
+    dateString,
+    startDateString: dateString,
+    endDateString: dateString,
+    start,
+    end,
+    timeZone,
+    rangeDays: 1,
+  };
 }
 
-export function weekBounds(value, timeZone) {
+export function rollingBounds(value, timeZone, rangeDays) {
+  if (
+    !Number.isSafeInteger(rangeDays) ||
+    rangeDays < 1 ||
+    rangeDays > MAX_RANGE_DAYS
+  ) {
+    throw new Error(
+      `Range days must be an integer from 1 to ${MAX_RANGE_DAYS.toLocaleString("en-US")}.`,
+    );
+  }
   const endDay = dayBounds(value, timeZone);
-  const startDateString = shiftCalendarDate(endDay.dateString, -6);
+  const startDateString = shiftCalendarDate(endDay.dateString, -(rangeDays - 1));
   return {
     ...endDay,
     startDateString,
     endDateString: endDay.dateString,
     start: zonedMidnight(startDateString, timeZone),
-    rangeDays: 7,
+    rangeDays,
   };
+}
+
+export function weekBounds(value, timeZone) {
+  return rollingBounds(value, timeZone, 7);
+}
+
+export function monthBounds(value, timeZone) {
+  return rollingBounds(value, timeZone, 30);
+}
+
+function eventTimestamp(event) {
+  if (typeof event?.timestamp !== "string" || !event.timestamp.trim()) {
+    return Number.NaN;
+  }
+  return new Date(event.timestamp).getTime();
+}
+
+export function allBounds(snapshot, timeZone) {
+  validateTimeZone(timeZone);
+  let earliest = Number.POSITIVE_INFINITY;
+  let latest = Number.NEGATIVE_INFINITY;
+  for (const event of snapshot.events ?? []) {
+    const timestamp = eventTimestamp(event);
+    if (!Number.isFinite(timestamp)) continue;
+    earliest = Math.min(earliest, timestamp);
+    latest = Math.max(latest, timestamp);
+  }
+  if (!Number.isFinite(earliest)) {
+    return {
+      ...dayBounds("today", timeZone),
+      rangeDays: null,
+      allTime: true,
+    };
+  }
+  const dateString = (timestamp) => dateStringFromParts(numericDateParts({
+    value: new Date(timestamp),
+    timeZone,
+  }));
+  const startDateString = dateString(earliest);
+  const endDateString = dateString(latest);
+  return {
+    dateString: endDateString,
+    startDateString,
+    endDateString,
+    start: zonedMidnight(startDateString, timeZone),
+    end: zonedMidnight(shiftCalendarDate(endDateString, 1), timeZone),
+    timeZone,
+    rangeDays: null,
+    allTime: true,
+  };
+}
+
+function boundsForOptions(options, snapshot) {
+  if (options.range === "all") return allBounds(snapshot, options.timeZone);
+  return rollingBounds(options.date, options.timeZone, options.rangeDays);
+}
+
+function describeRange(options, bounds) {
+  if (options.range === "all") return "all time";
+  if (bounds.rangeDays === 1) return bounds.dateString;
+  return `${bounds.startDateString} through ${bounds.endDateString}`;
 }
 
 export function sanitizeTerminalText(value) {
@@ -311,7 +427,7 @@ export function filterDayEvents(snapshot, bounds) {
   const start = bounds.start.getTime();
   const end = bounds.end.getTime();
   return (snapshot.events ?? []).filter((event) => {
-    const timestamp = new Date(event.timestamp).getTime();
+    const timestamp = eventTimestamp(event);
     return Number.isFinite(timestamp) && timestamp >= start && timestamp < end;
   });
 }
@@ -385,7 +501,7 @@ function sourceLabel(snapshotPath, snapshot) {
 function latestActivityDateString(snapshot, timeZone) {
   let latestTimestamp = Number.NEGATIVE_INFINITY;
   for (const event of snapshot.events ?? []) {
-    const timestamp = new Date(event.timestamp).getTime();
+    const timestamp = eventTimestamp(event);
     if (Number.isFinite(timestamp) && timestamp > latestTimestamp) {
       latestTimestamp = timestamp;
     }
@@ -408,11 +524,8 @@ function displayCalendarDate(dateString) {
 }
 
 function emptyState(options, snapshot, bounds) {
-  const rangeDescription = options.range === "week"
-    ? `${bounds.startDateString} through ${bounds.endDateString}`
-    : bounds.dateString;
   const lines = [
-    `No model-call events found for ${rangeDescription} (${bounds.timeZone}).`,
+    `No model-call events found for ${describeRange(options, bounds)} (${bounds.timeZone}).`,
     "Token Ledger reads only Codex history stored on this computer.",
   ];
   const latestDate = latestActivityDateString(snapshot, bounds.timeZone);
@@ -525,10 +638,9 @@ function render(options, snapshot, bounds, events, rows, allRows) {
 }
 
 export async function run(options) {
-  const bounds = options.range === "week"
-    ? weekBounds(options.date, options.timeZone)
-    : dayBounds(options.date, options.timeZone);
+  if (options.range !== "all") boundsForOptions(options);
   const snapshot = await loadSnapshot(options);
+  const bounds = boundsForOptions(options, snapshot);
   const events = filterDayEvents(snapshot, bounds);
   if (events.length === 0) {
     return emptyState(options, snapshot, bounds);
@@ -549,10 +661,9 @@ function shouldUseInteractive(options) {
 }
 
 async function runInteractive(options) {
-  const bounds = options.range === "week"
-    ? weekBounds(options.date, options.timeZone)
-    : dayBounds(options.date, options.timeZone);
+  if (options.range !== "all") boundsForOptions(options);
   const snapshot = await loadSnapshot(options);
+  const bounds = boundsForOptions(options, snapshot);
   const events = filterDayEvents(snapshot, bounds);
   if (events.length === 0) {
     process.stdout.write(`${emptyState(options, snapshot, bounds)}\n`);

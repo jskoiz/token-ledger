@@ -16,10 +16,13 @@ import { fileURLToPath } from "node:url";
 
 import {
   aggregateProjects,
+  allBounds,
   dayBounds,
   DEFAULT_SNAPSHOT,
   filterDayEvents,
+  monthBounds,
   parseArgs,
+  rollingBounds,
   sanitizeTerminalText,
   snapshotNeedsRefresh,
   weekBounds,
@@ -145,6 +148,35 @@ test("day and week bounds honor explicit local calendar timezones", () => {
   assert.equal(week.end.toISOString(), "2026-08-04T10:00:00.000Z");
 });
 
+test("month, custom, and all ranges use inclusive local calendar bounds", () => {
+  const month = monthBounds("2026-08-03", "Pacific/Honolulu");
+  assert.equal(month.startDateString, "2026-07-05");
+  assert.equal(month.endDateString, "2026-08-03");
+  assert.equal(month.rangeDays, 30);
+
+  const ninetyDays = rollingBounds("2026-08-03", "Pacific/Honolulu", 90);
+  assert.equal(ninetyDays.startDateString, "2026-05-06");
+  assert.equal(ninetyDays.endDateString, "2026-08-03");
+  assert.equal(ninetyDays.start.toISOString(), "2026-05-06T10:00:00.000Z");
+  assert.equal(ninetyDays.end.toISOString(), "2026-08-04T10:00:00.000Z");
+
+  const snapshot = {
+    events: [
+      { timestamp: "not-a-date" },
+      { timestamp: null },
+      { timestamp: "2026-06-01T10:00:00.000Z" },
+      { timestamp: "2026-08-04T09:59:59.999Z" },
+    ],
+  };
+  const all = allBounds(snapshot, "Pacific/Honolulu");
+  assert.equal(all.startDateString, "2026-06-01");
+  assert.equal(all.endDateString, "2026-08-03");
+  assert.equal(all.start.toISOString(), "2026-06-01T10:00:00.000Z");
+  assert.equal(all.end.toISOString(), "2026-08-04T10:00:00.000Z");
+  assert.equal(all.rangeDays, null);
+  assert.equal(filterDayEvents(snapshot, all).length, 2);
+});
+
 test("today and yesterday resolve in the selected timezone", () => {
   const today = dayBounds("today", "Pacific/Honolulu");
   const yesterday = dayBounds("yesterday", "Pacific/Honolulu");
@@ -183,6 +215,23 @@ test("bare execution and week default to the current seven-day window", () => {
   }
   assert.equal(parseArgs(["day"]).date, "today");
   assert.equal(parseArgs(["day", "yesterday"]).date, "yesterday");
+});
+
+test("month, all, and arbitrary day commands map to their ranges", () => {
+  const month = parseArgs(["month"]);
+  assert.equal(month.range, "month");
+  assert.equal(month.rangeDays, 30);
+  assert.equal(month.date, "today");
+
+  const custom = parseArgs(["90d", "2026-08-05"]);
+  assert.equal(custom.range, "90d");
+  assert.equal(custom.rangeDays, 90);
+  assert.equal(custom.date, "2026-08-05");
+
+  const all = parseArgs(["all"]);
+  assert.equal(all.range, "all");
+  assert.equal(all.rangeDays, null);
+  assert.equal(all.date, null);
 });
 
 test("every retained option maps to the intended setting", () => {
@@ -257,6 +306,8 @@ test("argument failures are explicit and bounded", () => {
   assert.throws(() => parseArgs(["--top", "101"]), /1 to 100/);
   assert.throws(() => parseArgs(["--width", "39"]), /40 to 200/);
   assert.throws(() => parseArgs(["--width", "201"]), /40 to 200/);
+  assert.throws(() => parseArgs(["0d"]), /integer from 1/);
+  assert.throws(() => parseArgs(["all", "2026-08-05"]), /does not accept an end day/);
   assert.throws(() => parseArgs(["--refresh", "--no-refresh"]), /cannot be combined/);
   assert.throws(() => parseArgs(["--refresh", "--input", fixturePath]), /cannot be combined/);
   assert.throws(() => dayBounds("2026-02-30", "UTC"), /Invalid calendar day/);
@@ -462,6 +513,9 @@ test("CLI help lists the complete self-contained command surface", () => {
     const result = runCli([flag]);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /tledger week \[end-day\]/);
+    assert.match(result.stdout, /tledger month \[end-day\]/);
+    assert.match(result.stdout, /tledger <number>d \[end-day\]/);
+    assert.match(result.stdout, /tledger all/);
     for (const option of [
       "--date",
       "--input",
@@ -536,6 +590,31 @@ test("CLI renders explicit snapshots through week, day, plain, ASCII, top, width
   ], { env: { NO_COLOR: "1", TZ: "UTC" } });
   assert.equal(noColor.status, 0, noColor.stderr);
   assert.doesNotMatch(noColor.stdout, /\u001b/);
+});
+
+test("CLI renders month, arbitrary-day, and all-time ranges", () => {
+  const cases = [
+    { args: ["1d", "2026-08-05"], header: /WED 05 AUG 2026 · 1 DAY/ },
+    { args: ["month", "2026-08-05"], header: /JUL 07–AUG 05 · 30D/ },
+    { args: ["90d", "2026-08-05"], header: /MAY 08–AUG 05 · 90D/ },
+    { args: ["all"], header: /JUL 30 – AUG 05 2026 · ALL/ },
+  ];
+  for (const { args, header } of cases) {
+    const result = runCli([
+      ...args,
+      "--input",
+      fixturePath,
+      "--static",
+      "--plain",
+      "--raw-projects",
+      "--width",
+      "100",
+      "--tz",
+      "UTC",
+    ]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout.split("\n")[0], header);
+  }
 });
 
 test("CLI empty state explains local scope and points to the latest activity", () => {
