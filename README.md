@@ -65,6 +65,7 @@ Useful options:
 --codex-home <dir>   Read another Codex data directory
 --no-archived        Skip archived sessions during collection
 --raw-projects       Keep singleton project labels separate
+-anon                Show Project 1, Project 2, etc. instead of project names
 --static             Print once instead of opening the interactive view
 --plain              Print once without ANSI color
 --ascii              Use ASCII bars
@@ -94,7 +95,8 @@ workers; unchanged runs read the existing cache. Token Ledger makes no network
 requests and excludes
 message bodies, reasoning text, tool payloads, credentials, and full local
 paths from the cache. Project labels can still reveal local context, so keep
-snapshots private unless you have reviewed them. Reset-cycle burn
+snapshots private unless you have reviewed them. Use `-anon` to hide project
+names in terminal output; it does not rewrite the cached snapshot. Reset-cycle burn
 is an estimate, not official quota or billing data.
 
 ## Develop

@@ -256,6 +256,7 @@ test("every retained option maps to the intended setting", () => {
     "--width",
     "80",
     "--raw-projects",
+    "-anon",
     "--no-archived",
     "--plain",
     "--ascii",
@@ -274,6 +275,7 @@ test("every retained option maps to the intended setting", () => {
       top: options.top,
       width: options.width,
       rawProjects: options.rawProjects,
+      anonymizeProjects: options.anonymizeProjects,
       plain: options.plain,
       ascii: options.ascii,
       static: options.static,
@@ -290,6 +292,7 @@ test("every retained option maps to the intended setting", () => {
       top: 3,
       width: 80,
       rawProjects: true,
+      anonymizeProjects: true,
       plain: true,
       ascii: true,
       static: true,
@@ -581,6 +584,7 @@ test("CLI help lists the complete self-contained command surface", () => {
       "--top",
       "--width",
       "--raw-projects",
+      "-anon",
       "--no-archived",
       "--plain",
       "--ascii",
@@ -616,6 +620,28 @@ test("CLI renders explicit snapshots through week, day, plain, ASCII, top, width
   assert.doesNotMatch(week.stdout, /sample-drift/);
   assert.doesNotMatch(week.stdout, /\u001b/);
   assert.ok(week.stdout.trimEnd().split("\n").every((line) => line.length <= 100));
+
+  const anonymous = runCli([
+    "week",
+    "2026-08-05",
+    "--input",
+    fixturePath,
+    "--static",
+    "--plain",
+    "--raw-projects",
+    "-anon",
+    "--top",
+    "3",
+    "--width",
+    "100",
+    "--tz",
+    "UTC",
+  ]);
+  assert.equal(anonymous.status, 0, anonymous.stderr);
+  assert.match(anonymous.stdout, /1\. Project 1/);
+  assert.match(anonymous.stdout, /2\. Project 2/);
+  assert.match(anonymous.stdout, /3\. Project 3/);
+  assert.doesNotMatch(anonymous.stdout, /sample-(?:atlas|beacon|cascade)/);
 
   const day = runCli([
     "day",

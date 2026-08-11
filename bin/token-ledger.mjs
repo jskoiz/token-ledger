@@ -50,6 +50,7 @@ Options:
   --top <number>       Number of projects to show (default: 10)
   --width <number>     Terminal layout width in columns
   --raw-projects       Keep singleton thread labels instead of grouping them
+  -anon                Replace project names with Project 1, Project 2, and so on
   --no-archived        Skip archived_sessions when refreshing
   --plain              Disable terminal colors
   --ascii              Use ASCII bars instead of Unicode blocks
@@ -111,6 +112,7 @@ export function parseArgs(argv) {
     top: DEFAULT_TOP,
     width: null,
     rawProjects: false,
+    anonymizeProjects: false,
     plain: false,
     ascii: false,
     static: false,
@@ -155,6 +157,8 @@ export function parseArgs(argv) {
       index += 1;
     } else if (argument === "--raw-projects") {
       options.rawProjects = true;
+    } else if (argument === "-anon") {
+      options.anonymizeProjects = true;
     } else if (argument === "--no-archived") {
       options.includeArchived = false;
     } else if (argument === "--plain") {
@@ -480,7 +484,13 @@ export function aggregateProjects(snapshot, events, options = {}) {
         return right.totalTokens - left.totalTokens;
       }
       return left.project.localeCompare(right.project);
-    });
+    })
+    .map((row, index) => ({
+      ...row,
+      displayProject: options.anonymizeProjects
+        ? `Project ${index + 1}`
+        : row.displayProject,
+    }));
 }
 
 function sourceLabel(snapshotPath, snapshot) {
