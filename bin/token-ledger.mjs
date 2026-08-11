@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 
 import { renderTerminal } from "./token-ledger-terminal.mjs";
 import { startInteractive } from "./token-ledger-tui.mjs";
+import { modelDisplayName } from "../lib/token-ledger-models.mjs";
 
 export const DEFAULT_SNAPSHOT = resolve(
   homedir(),
@@ -414,13 +415,7 @@ export function oneOffProjects(snapshot) {
 
 function modelLabel(value) {
   const model = cleanLabel(value, "Unknown model");
-  const lower = model.toLowerCase();
-  if (lower.includes("sol")) return "Sol";
-  if (lower.includes("luna")) return "Luna";
-  if (lower.includes("terra")) return "Terra";
-  if (lower === "gpt-5.5") return "GPT-5.5";
-  if (lower === "gpt-5.4") return "GPT-5.4";
-  return model;
+  return modelDisplayName(model);
 }
 
 export function filterDayEvents(snapshot, bounds) {

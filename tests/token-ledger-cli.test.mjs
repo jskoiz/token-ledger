@@ -33,6 +33,10 @@ import {
   renderTerminal,
 } from "../bin/token-ledger-terminal.mjs";
 import { sourceFingerprint } from "../lib/token-ledger-collector.mjs";
+import {
+  modelColorKey,
+  modelDisplayName,
+} from "../lib/token-ledger-models.mjs";
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 const cliPath = resolve(testDirectory, "../bin/token-ledger.mjs");
@@ -350,6 +354,57 @@ test("project aggregation groups singleton labels and strips terminal controls",
   assert.equal(raw[0].threads, 2);
   assert.deepEqual(raw[0].models.map((model) => model.model), ["Sol", "Luna"]);
   assert.equal(sanitizeTerminalText("safe\u001b[31m red\u0007"), "safe red ");
+});
+
+test("model mix names every active model instead of folding models into Other", () => {
+  assert.equal(modelDisplayName("gpt-daybreak-blue-latest"), "Daybreak Blue");
+  assert.equal(modelDisplayName("gpt-5.3-codex"), "GPT-5.3 Codex");
+  assert.equal(modelDisplayName("nova-model"), "nova-model");
+  assert.equal(modelDisplayName("unknown"), "Unknown model");
+  assert.equal(modelColorKey("Daybreak Blue"), "daybreakBlue");
+
+  const bounds = dayBounds("2026-08-05", "UTC");
+  const base = {
+    timestamp: "2026-08-05T12:00:00.000Z",
+    project: "synthetic-model-project",
+    threadId: "synthetic-model-thread",
+    useType: "interactive",
+  };
+  const events = [
+    { ...base, id: "daybreak", model: "gpt-daybreak-blue-latest", totalTokens: 500 },
+    { ...base, id: "codex", model: "gpt-5.3-codex", totalTokens: 300 },
+    { ...base, id: "custom", model: "nova-model", totalTokens: 200 },
+  ];
+  const snapshot = {
+    events,
+    threads: [{ id: base.threadId, project: base.project }],
+  };
+  const allRows = aggregateProjects(snapshot, events, { rawProjects: true });
+  assert.deepEqual(
+    allRows[0].models.map((model) => model.model),
+    ["Daybreak Blue", "GPT-5.3 Codex", "nova-model"],
+  );
+
+  const output = stripAnsi(renderTerminal({
+    options: {
+      range: "day",
+      plain: true,
+      ascii: true,
+      static: true,
+      width: 120,
+    },
+    snapshot,
+    bounds,
+    events,
+    rows: allRows,
+    allRows,
+  }));
+
+  assert.match(output, /Daybreak Blue\s+50\.0%/);
+  assert.match(output, /GPT-5\.3 Codex\s+30\.0%/);
+  assert.match(output, /nova-model\s+20\.0%/);
+  assert.doesNotMatch(output, /■ Other\s/);
+  assert.doesNotMatch(output, /Terra\s+0\.00%/);
 });
 
 test("renderer supports static widths and interactive selection without false keys", () => {

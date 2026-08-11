@@ -1,3 +1,8 @@
+import {
+  modelColorKey,
+  modelDisplayName,
+} from "../lib/token-ledger-models.mjs";
+
 const RESET = "\u001b[0m";
 const DIM = [38, 5, 245];
 const TEAL = [38, 5, 80];
@@ -6,6 +11,7 @@ export const MODEL_COLORS = {
   luna: [38, 5, 80],
   terra: [38, 5, 179],
   gpt: [38, 5, 176],
+  daybreakBlue: [38, 5, 69],
   autoReview: [38, 5, 153],
   other: [38, 5, 60],
 };
@@ -95,23 +101,11 @@ function plural(value, singular, pluralForm = `${singular}s`) {
 
 function modelLabel(value) {
   const model = sanitizeText(value) || "Unknown model";
-  const lower = model.toLowerCase().replaceAll("_", "-");
-  if (lower === "codex-auto-review" || lower.startsWith("codex-auto-review-")) {
-    return "Auto Review";
-  }
-  if (lower.includes("sol")) return "Sol";
-  if (lower.includes("luna")) return "Luna";
-  if (lower.includes("terra")) return "Terra";
-  if (lower.includes("gpt-5.5") || lower.includes("gpt-5.4")) return "GPT";
-  return "Other";
+  return modelDisplayName(model);
 }
 
 function modelColor(model) {
-  const key = String(model || "")
-    .toLowerCase()
-    .replace(/[\s_-]+/g, "-");
-  if (key === "auto-review") return MODEL_COLORS.autoReview;
-  return MODEL_COLORS[key] ?? MODEL_COLORS.other;
+  return MODEL_COLORS[modelColorKey(model)] ?? MODEL_COLORS.other;
 }
 
 function usageTypeLabel(value) {
@@ -352,21 +346,11 @@ function summary(events) {
 }
 
 function modelLegendItems(models, totalTokens) {
-  const known = new Map();
-  for (const model of models) {
-    const key = ["Sol", "Luna", "Terra", "GPT", "Auto Review"].includes(model.model)
-      ? model.model
-      : "Other";
-    known.set(key, (known.get(key) ?? 0) + model.totalTokens);
-  }
-  const order = ["Luna", "Sol", "Terra", "GPT"];
-  if ((known.get("Auto Review") ?? 0) > 0) order.push("Auto Review");
-  order.push("Other");
-  return order
+  return models
+    .filter((model) => model.totalTokens > 0)
     .map((model) => ({
-      model,
-      totalTokens: known.get(model) ?? 0,
-      share: totalTokens > 0 ? ((known.get(model) ?? 0) / totalTokens) * 100 : 0,
+      ...model,
+      share: totalTokens > 0 ? (model.totalTokens / totalTokens) * 100 : 0,
     }));
 }
 
@@ -495,9 +479,11 @@ function sidebarLines(stats, panelWidth, enabled, options = {}, quota = null) {
   const heading = (value) => colorize(value, TEAL, enabled);
   push(heading("MODEL MIX"));
   if (!compactSidebar) push();
+  const modelShareWidth = 6;
+  const modelNameWidth = Math.max(1, contentWidth - modelShareWidth - 2);
   for (const item of modelLegendItems(stats.models, stats.totalTokens)) {
     const swatch = colorize("■", modelColor(item.model), enabled);
-    push(`${swatch} ${fit(item.model, Math.max(1, contentWidth - 10))}${fit(percent(item.share), 8, "right")}`);
+    push(`${swatch} ${fit(item.model, modelNameWidth)}${fit(percent(item.share), modelShareWidth, "right")}`);
     if (item.model === "Auto Review" && stats.autoReview.present) {
       const turnLabel = stats.autoReview.turns === 1 ? "turn" : "turns";
       push(`  ${compact(stats.autoReview.turns)} ${turnLabel} · ${percent(stats.autoReview.turnShare)}`);
