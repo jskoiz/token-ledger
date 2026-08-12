@@ -1,3 +1,8 @@
+import {
+  modelColorKey,
+  modelDisplayName,
+} from "../lib/token-ledger-models.mjs";
+
 const RESET = "\u001b[0m";
 const DIM = [38, 5, 245];
 const TEAL = [38, 5, 80];
@@ -6,6 +11,7 @@ export const MODEL_COLORS = {
   luna: [38, 5, 80],
   terra: [38, 5, 179],
   gpt: [38, 5, 176],
+  daybreakBlue: [38, 5, 69],
   autoReview: [38, 5, 153],
   other: [38, 5, 60],
 };
@@ -95,23 +101,11 @@ function plural(value, singular, pluralForm = `${singular}s`) {
 
 function modelLabel(value) {
   const model = sanitizeText(value) || "Unknown model";
-  const lower = model.toLowerCase().replaceAll("_", "-");
-  if (lower === "codex-auto-review" || lower.startsWith("codex-auto-review-")) {
-    return "Auto Review";
-  }
-  if (lower.includes("sol")) return "Sol";
-  if (lower.includes("luna")) return "Luna";
-  if (lower.includes("terra")) return "Terra";
-  if (lower.includes("gpt-5.5") || lower.includes("gpt-5.4")) return "GPT";
-  return "Other";
+  return modelDisplayName(model);
 }
 
 function modelColor(model) {
-  const key = String(model || "")
-    .toLowerCase()
-    .replace(/[\s_-]+/g, "-");
-  if (key === "auto-review") return MODEL_COLORS.autoReview;
-  return MODEL_COLORS[key] ?? MODEL_COLORS.other;
+  return MODEL_COLORS[modelColorKey(model)] ?? MODEL_COLORS.other;
 }
 
 function usageTypeLabel(value) {
@@ -352,21 +346,11 @@ function summary(events) {
 }
 
 function modelLegendItems(models, totalTokens) {
-  const known = new Map();
-  for (const model of models) {
-    const key = ["Sol", "Luna", "Terra", "GPT", "Auto Review"].includes(model.model)
-      ? model.model
-      : "Other";
-    known.set(key, (known.get(key) ?? 0) + model.totalTokens);
-  }
-  const order = ["Luna", "Sol", "Terra", "GPT"];
-  if ((known.get("Auto Review") ?? 0) > 0) order.push("Auto Review");
-  order.push("Other");
-  return order
+  return models
+    .filter((model) => model.totalTokens > 0)
     .map((model) => ({
-      model,
-      totalTokens: known.get(model) ?? 0,
-      share: totalTokens > 0 ? ((known.get(model) ?? 0) / totalTokens) * 100 : 0,
+      ...model,
+      share: totalTokens > 0 ? (model.totalTokens / totalTokens) * 100 : 0,
     }));
 }
 
@@ -442,6 +426,7 @@ function panelLines(rows, allRows, totalTokens, panelWidth, options, enabled) {
     panelWidth - labelWidth - shareWidth - totalWidth - 1 - rightPadding,
   );
   const maxTokens = allRows[0]?.totalTokens ?? 0;
+  const rowOffset = Number.isInteger(options.rowOffset) ? options.rowOffset : 0;
   const lines = [];
   const heading = colorize("TOKENS BY PROJECT", TEAL, enabled);
   const barHeaderWidth = barWidth;
@@ -456,13 +441,14 @@ function panelLines(rows, allRows, totalTokens, panelWidth, options, enabled) {
   lines.push(colorize("─".repeat(panelWidth), DIM, enabled));
 
   for (const [index, row] of rows.entries()) {
+    const rankValue = rowOffset + index + 1;
     const share = totalTokens > 0 ? (row.totalTokens / totalTokens) * 100 : 0;
     const selected = !options.static && index === (options.selectedIndex ?? 0);
     const caretValue = selected ? (options.ascii ? ">" : "▶") : " ";
-    const prefix = `${caretValue} ${index + 1}. `;
+    const prefix = `${caretValue} ${rankValue}. `;
     const projectText = truncateText(displayProject(row), labelWidth - prefix.length);
     const caret = selected ? colorize(caretValue, [1, ...TEAL], enabled) : caretValue;
-    const rank = colorize(`${index + 1}.`, TITLE_STYLE, enabled);
+    const rank = colorize(`${rankValue}.`, TITLE_STYLE, enabled);
     const title = `${caret} ${rank} ${colorize(projectText, TITLE_STYLE, enabled)}`;
     const label = fit(title, labelWidth);
     const metrics = `${fit(compact(row.totalTokens), totalWidth, "right")}${fit(percent(share), shareWidth, "right")}${" ".repeat(rightPadding)}`;
@@ -495,14 +481,25 @@ function sidebarLines(stats, panelWidth, enabled, options = {}, quota = null) {
   const heading = (value) => colorize(value, TEAL, enabled);
   push(heading("MODEL MIX"));
   if (!compactSidebar) push();
-  for (const item of modelLegendItems(stats.models, stats.totalTokens)) {
+  const modelShareWidth = 6;
+  const modelNameWidth = Math.max(1, contentWidth - modelShareWidth - 2);
+  const modelItems = modelLegendItems(stats.models, stats.totalTokens);
+  const modelLimit = Number.isInteger(options.modelLimit)
+    ? Math.max(0, options.modelLimit)
+    : modelItems.length;
+  const visibleModelItems = modelItems.slice(0, modelLimit);
+  for (const item of visibleModelItems) {
     const swatch = colorize("■", modelColor(item.model), enabled);
-    push(`${swatch} ${fit(item.model, Math.max(1, contentWidth - 10))}${fit(percent(item.share), 8, "right")}`);
+    push(`${swatch} ${fit(item.model, modelNameWidth)}${fit(percent(item.share), modelShareWidth, "right")}`);
     if (item.model === "Auto Review" && stats.autoReview.present) {
       const turnLabel = stats.autoReview.turns === 1 ? "turn" : "turns";
       push(`  ${compact(stats.autoReview.turns)} ${turnLabel} · ${percent(stats.autoReview.turnShare)}`);
       push(`  ${compact(stats.autoReview.totalTokens)} · ${percent(stats.autoReview.cachedInputShare)} cached`);
     }
+  }
+  const hiddenModelCount = modelItems.length - visibleModelItems.length;
+  if (hiddenModelCount > 0) {
+    push(colorize(`… ${plural(hiddenModelCount, "more model")}`, DIM, enabled));
   }
   if (!compactSidebar) push();
   divider();
@@ -669,30 +666,84 @@ export function renderFullscreen({ options, snapshot, bounds, events, rows, allR
   const columns = Math.max(40, Number(width) || Number(process.stdout.columns) || 120);
   const screenHeight = Math.max(1, Number(height) || Number(process.stdout.rows) || 32);
   const frameWidth = Math.max(38, Math.min(158, columns - 4));
+  const forceSideBySide = frameWidth >= 84;
+  const staticBudget = Math.max(0, screenHeight - 1);
+  let visibleRows = rows;
+  let fullscreenOptions = {
+    ...options,
+    forceColor: enabled,
+    forceSideBySide,
+    highlight: false,
+    compactSidebar: true,
+    hideHelp: true,
+    width: frameWidth + 2,
+  };
+
+  if (forceSideBySide && staticBudget >= 3) {
+    const stats = summary(events);
+    const quota = quotaCycleSummary(snapshot, events);
+    const panelContentBudget = Math.max(1, staticBudget - 3);
+    const visibleRowCount = Math.min(
+      rows.length,
+      Math.max(1, Math.floor((panelContentBudget - 2) / 2)),
+    );
+    const selectedIndex = Math.max(
+      0,
+      Math.min(rows.length - 1, Number(options.selectedIndex) || 0),
+    );
+    const rowOffset = Math.min(
+      Math.max(0, selectedIndex - visibleRowCount + 1),
+      Math.max(0, rows.length - visibleRowCount),
+    );
+    visibleRows = rows.slice(rowOffset, rowOffset + visibleRowCount);
+
+    const sideWidth = stats.autoReview.present ? 28 : 26;
+    let modelLimit = modelLegendItems(stats.models, stats.totalTokens).length;
+    while (
+      modelLimit > 0 &&
+      sidebarLines(
+        stats,
+        sideWidth,
+        enabled,
+        { ...fullscreenOptions, modelLimit },
+        quota,
+      ).length > panelContentBudget
+    ) {
+      modelLimit -= 1;
+    }
+
+    fullscreenOptions = {
+      ...fullscreenOptions,
+      modelLimit,
+      rowOffset,
+      selectedIndex: selectedIndex - rowOffset,
+    };
+  }
+
   const staticOutput = renderTerminal({
-    options: {
-      ...options,
-      forceColor: enabled,
-      forceSideBySide: frameWidth >= 84,
-      highlight: false,
-      compactSidebar: true,
-      hideHelp: true,
-      width: frameWidth + 2,
-    },
+    options: fullscreenOptions,
     snapshot,
     bounds,
     events,
-    rows,
+    rows: visibleRows,
     allRows,
   });
-  const staticLines = staticOutput.split("\n");
+  let staticLines = staticOutput.split("\n");
   if (staticLines.at(-1) === "") staticLines.pop();
-  const summaryLine = staticLines.shift() ?? "";
   const help = colorize("↑/↓ move   •   j/k move   •   q/esc quit", DIM, enabled);
+  const includeSpacer = staticLines.length + 2 <= screenHeight;
+  const availableStaticLines = Math.max(
+    0,
+    screenHeight - 1 - (includeSpacer ? 1 : 0),
+  );
+  staticLines = staticLines.slice(0, availableStaticLines);
+  const summaryLine = staticLines.shift();
   const content = [
-    { line: summaryLine, background: SCREEN_BASE },
+    ...(summaryLine === undefined
+      ? []
+      : [{ line: summaryLine, background: SCREEN_BASE }]),
     ...staticLines.map((line) => ({ line, background: PANEL_BASE })),
-    { line: "", background: SCREEN_BASE },
+    ...(includeSpacer ? [{ line: "", background: SCREEN_BASE }] : []),
     { line: help, background: SCREEN_BASE },
   ];
   const topPadding = Math.max(0, Math.floor((screenHeight - content.length) / 2));

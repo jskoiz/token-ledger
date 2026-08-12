@@ -46,7 +46,9 @@ function execute(command, args, options = {}) {
 }
 
 function runCli(bin, args, options = {}) {
-  const result = execute(bin, args, options);
+  const result = process.platform === "win32"
+    ? execute(bin, args, options)
+    : execute(process.execPath, [bin, ...args], options);
   assert.equal(
     result.status,
     options.expectedStatus ?? 0,
@@ -205,14 +207,21 @@ try {
     "--top",
     "--width",
     "--raw-projects",
+    "-anon",
     "--no-archived",
     "--plain",
     "--ascii",
     "--static",
+    "--version",
     "--help",
   ]) {
     assert.ok(help.stdout.includes(option), option);
   }
+
+  const version = runCli(bin, ["--version"]);
+  const shortVersion = runCli(bin, ["-v"]);
+  assert.equal(version.stdout, `${installedPackage.version}\n`);
+  assert.equal(shortVersion.stdout, version.stdout);
 
   const bare = runCli(bin, [
     "--input",
@@ -244,7 +253,30 @@ try {
   assert.match(week.stdout, /sample-atlas/);
   assert.match(week.stdout, /sample-beacon/);
   assert.doesNotMatch(week.stdout, /sample-cascade/);
+  assert.match(week.stdout, /Daybreak Blue/);
+  assert.match(week.stdout, /other-model/);
   assert.ok(week.stdout.trimEnd().split("\n").every((line) => line.length <= 80));
+
+  const anonymous = runCli(bin, [
+    "week",
+    "2026-08-05",
+    "--input",
+    fixture,
+    "--static",
+    "--plain",
+    "--raw-projects",
+    "-anon",
+    "--top",
+    "3",
+    "--width",
+    "100",
+    "--tz",
+    "UTC",
+  ]);
+  assert.match(anonymous.stdout, /1\. Project 1/);
+  assert.match(anonymous.stdout, /2\. Project 2/);
+  assert.match(anonymous.stdout, /3\. Project 3/);
+  assert.doesNotMatch(anonymous.stdout, /sample-(?:atlas|beacon|cascade)/);
 
   const day = runCli(bin, [
     "day",

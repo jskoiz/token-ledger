@@ -25,6 +25,7 @@ import {
   rollingBounds,
   sanitizeTerminalText,
   snapshotNeedsRefresh,
+  VERSION,
   weekBounds,
 } from "../bin/token-ledger.mjs";
 import {
@@ -33,6 +34,11 @@ import {
   renderTerminal,
 } from "../bin/token-ledger-terminal.mjs";
 import { sourceFingerprint } from "../lib/token-ledger-collector.mjs";
+import {
+  modelColorKey,
+  modelDisplayName,
+  normalizeModelIdentifier,
+} from "../lib/token-ledger-models.mjs";
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 const cliPath = resolve(testDirectory, "../bin/token-ledger.mjs");
@@ -252,6 +258,7 @@ test("every retained option maps to the intended setting", () => {
     "--width",
     "80",
     "--raw-projects",
+    "-anon",
     "--no-archived",
     "--plain",
     "--ascii",
@@ -270,6 +277,7 @@ test("every retained option maps to the intended setting", () => {
       top: options.top,
       width: options.width,
       rawProjects: options.rawProjects,
+      anonymizeProjects: options.anonymizeProjects,
       plain: options.plain,
       ascii: options.ascii,
       static: options.static,
@@ -286,6 +294,7 @@ test("every retained option maps to the intended setting", () => {
       top: 3,
       width: 80,
       rawProjects: true,
+      anonymizeProjects: true,
       plain: true,
       ascii: true,
       static: true,
@@ -294,6 +303,8 @@ test("every retained option maps to the intended setting", () => {
   assert.equal(parseArgs(["--refresh"]).refresh, true);
   assert.equal(parseArgs(["--help"]).help, true);
   assert.equal(parseArgs(["-h"]).help, true);
+  assert.equal(parseArgs(["--version"]).version, true);
+  assert.equal(parseArgs(["-v"]).version, true);
 });
 
 test("argument failures are explicit and bounded", () => {
@@ -350,6 +361,61 @@ test("project aggregation groups singleton labels and strips terminal controls",
   assert.equal(raw[0].threads, 2);
   assert.deepEqual(raw[0].models.map((model) => model.model), ["Sol", "Luna"]);
   assert.equal(sanitizeTerminalText("safe\u001b[31m red\u0007"), "safe red ");
+});
+
+test("model mix names every active model instead of folding models into Other", () => {
+  assert.equal(modelDisplayName("gpt-daybreak-blue-latest"), "Daybreak Blue");
+  assert.equal(modelDisplayName("gpt-5.3-codex"), "GPT-5.3 Codex");
+  assert.equal(modelDisplayName("nova-model"), "nova-model");
+  assert.equal(modelDisplayName("unknown"), "Unknown model");
+  assert.equal(modelColorKey("Daybreak Blue"), "daybreakBlue");
+  assert.equal(normalizeModelIdentifier("gpt-daybreak-blue-latest"), "gpt-daybreak-blue");
+  assert.equal(modelDisplayName("gpt-daybreak-blueberry"), "gpt-daybreak-blueberry");
+  assert.equal(modelDisplayName("gpt-5.6-solar"), "gpt-5.6-solar");
+  assert.equal(modelDisplayName("gpt-5.5-cybernetic"), "GPT-5.5");
+
+  const bounds = dayBounds("2026-08-05", "UTC");
+  const base = {
+    timestamp: "2026-08-05T12:00:00.000Z",
+    project: "synthetic-model-project",
+    threadId: "synthetic-model-thread",
+    useType: "interactive",
+  };
+  const events = [
+    { ...base, id: "daybreak", model: "gpt-daybreak-blue-latest", totalTokens: 500 },
+    { ...base, id: "codex", model: "gpt-5.3-codex", totalTokens: 300 },
+    { ...base, id: "custom", model: "nova-model", totalTokens: 200 },
+  ];
+  const snapshot = {
+    events,
+    threads: [{ id: base.threadId, project: base.project }],
+  };
+  const allRows = aggregateProjects(snapshot, events, { rawProjects: true });
+  assert.deepEqual(
+    allRows[0].models.map((model) => model.model),
+    ["Daybreak Blue", "GPT-5.3 Codex", "nova-model"],
+  );
+
+  const output = stripAnsi(renderTerminal({
+    options: {
+      range: "day",
+      plain: true,
+      ascii: true,
+      static: true,
+      width: 120,
+    },
+    snapshot,
+    bounds,
+    events,
+    rows: allRows,
+    allRows,
+  }));
+
+  assert.match(output, /Daybreak Blue\s+50\.0%/);
+  assert.match(output, /GPT-5\.3 Codex\s+30\.0%/);
+  assert.match(output, /nova-model\s+20\.0%/);
+  assert.doesNotMatch(output, /■ Other\s/);
+  assert.doesNotMatch(output, /Terra\s+0\.00%/);
 });
 
 test("renderer supports static widths and interactive selection without false keys", () => {
@@ -505,7 +571,57 @@ test("fullscreen renderer applies the terminal theme and selected row", () => {
   assert.match(output, /\u001b\[48;2;5;5;6m/);
   assert.match(stripAnsi(output), /▶ 3\./);
   assert.match(stripAnsi(output), /└─+┴─+┘/);
+  assert.match(stripAnsi(output), /q\/esc quit/);
   assert.doesNotMatch(output, /inspect|d\/w\/m/);
+});
+
+test("fullscreen renderer budgets project and model rows without clipping controls", () => {
+  const bounds = weekBounds("2026-08-05", "UTC");
+  const events = Array.from({ length: 15 }, (_, index) => ({
+    id: `many-model-${index + 1}`,
+    timestamp: "2026-08-05T12:00:00.000Z",
+    project: `synthetic-project-${index + 1}`,
+    threadId: `synthetic-thread-${index + 1}`,
+    model: `synthetic-model-${index + 1}`,
+    useType: "interactive",
+    inputTokens: 100 - index,
+    cachedInputTokens: 80 - index,
+    outputTokens: 10,
+    totalTokens: 110 - index,
+  }));
+  const snapshot = {
+    events,
+    threads: events.map((event) => ({ id: event.threadId, project: event.project })),
+  };
+  const allRows = aggregateProjects(snapshot, events, { rawProjects: true });
+  const output = stripAnsi(renderFullscreen({
+    options: { range: "week", forceColor: false, selectedIndex: 9 },
+    snapshot,
+    bounds,
+    events,
+    rows: allRows.slice(0, 10),
+    allRows,
+    width: 120,
+    height: 24,
+  }));
+
+  assert.equal(output.split("\n").length, 24);
+  assert.match(output, /▶ 10\./);
+  assert.match(output, /… \d+ more models?/);
+  assert.match(output, /CACHE · INPUT/);
+  assert.match(output, /└─+┴─+┘/);
+  assert.match(output, /q\/esc quit/);
+});
+
+test("CLI reports the installed package version without reading usage data", () => {
+  for (const flag of ["--version", "-v"]) {
+    const result = runCli([flag], {
+      env: { HOME: resolve(tmpdir(), "missing-tledger-home") },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, `${VERSION}\n`);
+    assert.equal(result.stderr, "");
+  }
 });
 
 test("CLI help lists the complete self-contained command surface", () => {
@@ -526,10 +642,12 @@ test("CLI help lists the complete self-contained command surface", () => {
       "--top",
       "--width",
       "--raw-projects",
+      "-anon",
       "--no-archived",
       "--plain",
       "--ascii",
       "--static",
+      "--version",
       "--help",
     ]) {
       assert.match(result.stdout, new RegExp(option.replace("--", "\\-\\-")));
@@ -561,6 +679,28 @@ test("CLI renders explicit snapshots through week, day, plain, ASCII, top, width
   assert.doesNotMatch(week.stdout, /sample-drift/);
   assert.doesNotMatch(week.stdout, /\u001b/);
   assert.ok(week.stdout.trimEnd().split("\n").every((line) => line.length <= 100));
+
+  const anonymous = runCli([
+    "week",
+    "2026-08-05",
+    "--input",
+    fixturePath,
+    "--static",
+    "--plain",
+    "--raw-projects",
+    "-anon",
+    "--top",
+    "3",
+    "--width",
+    "100",
+    "--tz",
+    "UTC",
+  ]);
+  assert.equal(anonymous.status, 0, anonymous.stderr);
+  assert.match(anonymous.stdout, /1\. Project 1/);
+  assert.match(anonymous.stdout, /2\. Project 2/);
+  assert.match(anonymous.stdout, /3\. Project 3/);
+  assert.doesNotMatch(anonymous.stdout, /sample-(?:atlas|beacon|cascade)/);
 
   const day = runCli([
     "day",

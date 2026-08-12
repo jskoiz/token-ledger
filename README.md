@@ -1,9 +1,10 @@
 # Token Ledger
 
 Token Ledger is a lightweight, local-only terminal dashboard for Codex token
-usage. It ranks projects, shows model and cache mix, and adds reset-cycle
-context without sending usage data anywhere. Codex Auto Review is shown
-separately with its token total, distinct-turn share, and cached-input share.
+usage. It ranks projects, names every active model—including Daybreak Blue—and
+shows cache and reset-cycle context without sending usage data anywhere. Codex
+Auto Review is shown separately with its token total, distinct-turn share, and
+cached-input share.
 
 Token Ledger reads Codex history stored on the computer where it runs. It does
 not sign in, fetch account-wide usage, or combine activity from other machines.
@@ -29,7 +30,7 @@ Token Ledger has no runtime npm dependencies and runs no installation script.
 
 ```bash
 npm install --global tledger
-tledger --help
+tledger --version
 ```
 
 ## Use
@@ -65,11 +66,13 @@ Useful options:
 --codex-home <dir>   Read another Codex data directory
 --no-archived        Skip archived sessions during collection
 --raw-projects       Keep singleton project labels separate
+-anon                Show Project 1, Project 2, etc. instead of project names
 --static             Print once instead of opening the interactive view
 --plain              Print once without ANSI color
 --ascii              Use ASCII bars
 --width <40-200>     Set the static layout width
 --date <day>         Set today, yesterday, or YYYY-MM-DD
+-v, --version        Show the installed version
 --help               Show complete CLI help
 ```
 
@@ -77,6 +80,7 @@ Useful options:
 
 ```bash
 npm install --global tledger@latest
+tledger --version
 npm uninstall --global tledger
 ```
 
@@ -94,15 +98,16 @@ workers; unchanged runs read the existing cache. Token Ledger makes no network
 requests and excludes
 message bodies, reasoning text, tool payloads, credentials, and full local
 paths from the cache. Project labels can still reveal local context, so keep
-snapshots private unless you have reviewed them. Reset-cycle burn
-is an estimate, not official quota or billing data.
+snapshots private unless you have reviewed them. Use `-anon` to hide project
+names in terminal output; it does not rewrite the cached snapshot. Reset-cycle
+burn is an estimate, not official quota or billing data.
 
 ## Develop
 
 ```bash
 npm test
 npm run demo
-npm pack --dry-run
+npm run verify:release
 ```
 
 ## License

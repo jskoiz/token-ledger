@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { existsSync, realpathSync } from "node:fs";
+import { createRequire } from "node:module";
 import {
   readFile,
   stat,
@@ -11,6 +12,10 @@ import { fileURLToPath } from "node:url";
 
 import { renderTerminal } from "./token-ledger-terminal.mjs";
 import { startInteractive } from "./token-ledger-tui.mjs";
+import { modelDisplayName } from "../lib/token-ledger-models.mjs";
+
+const require = createRequire(import.meta.url);
+export const VERSION = require("../package.json").version;
 
 export const DEFAULT_SNAPSHOT = resolve(
   homedir(),
@@ -49,10 +54,12 @@ Options:
   --top <number>       Number of projects to show (default: 10)
   --width <number>     Terminal layout width in columns
   --raw-projects       Keep singleton thread labels instead of grouping them
+  -anon                Replace project names with Project 1, Project 2, and so on
   --no-archived        Skip archived_sessions when refreshing
   --plain              Disable terminal colors
   --ascii              Use ASCII bars instead of Unicode blocks
   --static             Print once instead of opening the interactive dashboard
+  -v, --version        Show the installed version
   --help               Show this help
 
 The default view is the seven-day window ending today. Token Ledger never
@@ -110,9 +117,11 @@ export function parseArgs(argv) {
     top: DEFAULT_TOP,
     width: null,
     rawProjects: false,
+    anonymizeProjects: false,
     plain: false,
     ascii: false,
     static: false,
+    version: false,
     help: false,
   };
 
@@ -121,6 +130,8 @@ export function parseArgs(argv) {
     const argument = argv[index];
     if (argument === "--help" || argument === "-h") {
       options.help = true;
+    } else if (argument === "--version" || argument === "-v") {
+      options.version = true;
     } else if (argument === "--date") {
       options.date = readOption(argv, index, "--date");
       index += 1;
@@ -154,6 +165,8 @@ export function parseArgs(argv) {
       index += 1;
     } else if (argument === "--raw-projects") {
       options.rawProjects = true;
+    } else if (argument === "-anon") {
+      options.anonymizeProjects = true;
     } else if (argument === "--no-archived") {
       options.includeArchived = false;
     } else if (argument === "--plain") {
@@ -169,16 +182,16 @@ export function parseArgs(argv) {
     }
   }
 
-  if (!options.help && options.range === "all" && options.date) {
+  if (!options.help && !options.version && options.range === "all" && options.date) {
     throw new Error("The all range does not accept an end day.");
   }
-  if (!options.help && !options.date && options.range !== "all") {
+  if (!options.help && !options.version && !options.date && options.range !== "all") {
     options.date = "today";
   }
-  if (!options.help && options.refresh && !options.autoRefresh) {
+  if (!options.help && !options.version && options.refresh && !options.autoRefresh) {
     throw new Error("--refresh cannot be combined with --no-refresh.");
   }
-  if (!options.help && options.refresh && options.inputExplicit) {
+  if (!options.help && !options.version && options.refresh && options.inputExplicit) {
     throw new Error("--refresh cannot be combined with --input.");
   }
   return options;
@@ -414,13 +427,7 @@ export function oneOffProjects(snapshot) {
 
 function modelLabel(value) {
   const model = cleanLabel(value, "Unknown model");
-  const lower = model.toLowerCase();
-  if (lower.includes("sol")) return "Sol";
-  if (lower.includes("luna")) return "Luna";
-  if (lower.includes("terra")) return "Terra";
-  if (lower === "gpt-5.5") return "GPT-5.5";
-  if (lower === "gpt-5.4") return "GPT-5.4";
-  return model;
+  return modelDisplayName(model);
 }
 
 export function filterDayEvents(snapshot, bounds) {
@@ -485,7 +492,13 @@ export function aggregateProjects(snapshot, events, options = {}) {
         return right.totalTokens - left.totalTokens;
       }
       return left.project.localeCompare(right.project);
-    });
+    })
+    .map((row, index) => ({
+      ...row,
+      displayProject: options.anonymizeProjects
+        ? `Project ${index + 1}`
+        : row.displayProject,
+    }));
 }
 
 function sourceLabel(snapshotPath, snapshot) {
@@ -686,6 +699,10 @@ async function main() {
     options = parseArgs(process.argv.slice(2));
     if (options.help) {
       process.stdout.write(`${usage()}\n`);
+      return;
+    }
+    if (options.version) {
+      process.stdout.write(`${VERSION}\n`);
       return;
     }
     if (shouldUseInteractive(options)) {

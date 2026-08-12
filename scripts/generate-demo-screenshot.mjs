@@ -48,6 +48,12 @@ if (allRows.length < 10 || projectSubtitles.length < 10) {
 if (!visibleTerminal.includes("Auto Review")) {
   throw new Error("Synthetic demo must show Auto Review usage");
 }
+if (!visibleTerminal.includes("Daybreak Blue")) {
+  throw new Error("Synthetic demo must show Daybreak Blue usage");
+}
+if (!visibleTerminal.includes("other-model")) {
+  throw new Error("Synthetic demo must show an unrecognized model by name");
+}
 const forbidden = [
   /\/(?:Users|home)\//i,
   /[A-Z]:\\/i,
@@ -176,7 +182,7 @@ ${textRows}
 </svg>
 `;
 
-for (const modelColor of ["#5fd7d7", "#5f87af", "#d7af5f", "#d787d7", "#afd7ff", "#5f5f87"]) {
+for (const modelColor of ["#5fd7d7", "#5f87af", "#d7af5f", "#d787d7", "#5f87ff", "#afd7ff", "#5f5f87"]) {
   if (!svg.includes(`fill="${modelColor}"`)) {
     throw new Error(`Synthetic demo is missing model color ${modelColor}`);
   }
@@ -188,5 +194,13 @@ if (/\u001b/.test(svg)) {
   throw new Error("Synthetic demo SVG contains an unparsed ANSI escape");
 }
 
-await writeFile(outputUrl, svg, "utf8");
-process.stdout.write(`Generated ${outputUrl.pathname}\n`);
+if (process.argv.includes("--check")) {
+  const committed = await readFile(outputUrl, "utf8");
+  if (committed !== svg) {
+    throw new Error("Synthetic demo is out of date. Run npm run demo.");
+  }
+  process.stdout.write("Synthetic demo is current.\n");
+} else {
+  await writeFile(outputUrl, svg, "utf8");
+  process.stdout.write(`Generated ${outputUrl.pathname}\n`);
+}
