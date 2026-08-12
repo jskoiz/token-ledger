@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { existsSync, realpathSync } from "node:fs";
+import { createRequire } from "node:module";
 import {
   readFile,
   stat,
@@ -12,6 +13,9 @@ import { fileURLToPath } from "node:url";
 import { renderTerminal } from "./token-ledger-terminal.mjs";
 import { startInteractive } from "./token-ledger-tui.mjs";
 import { modelDisplayName } from "../lib/token-ledger-models.mjs";
+
+const require = createRequire(import.meta.url);
+export const VERSION = require("../package.json").version;
 
 export const DEFAULT_SNAPSHOT = resolve(
   homedir(),
@@ -55,6 +59,7 @@ Options:
   --plain              Disable terminal colors
   --ascii              Use ASCII bars instead of Unicode blocks
   --static             Print once instead of opening the interactive dashboard
+  -v, --version        Show the installed version
   --help               Show this help
 
 The default view is the seven-day window ending today. Token Ledger never
@@ -116,6 +121,7 @@ export function parseArgs(argv) {
     plain: false,
     ascii: false,
     static: false,
+    version: false,
     help: false,
   };
 
@@ -124,6 +130,8 @@ export function parseArgs(argv) {
     const argument = argv[index];
     if (argument === "--help" || argument === "-h") {
       options.help = true;
+    } else if (argument === "--version" || argument === "-v") {
+      options.version = true;
     } else if (argument === "--date") {
       options.date = readOption(argv, index, "--date");
       index += 1;
@@ -174,16 +182,16 @@ export function parseArgs(argv) {
     }
   }
 
-  if (!options.help && options.range === "all" && options.date) {
+  if (!options.help && !options.version && options.range === "all" && options.date) {
     throw new Error("The all range does not accept an end day.");
   }
-  if (!options.help && !options.date && options.range !== "all") {
+  if (!options.help && !options.version && !options.date && options.range !== "all") {
     options.date = "today";
   }
-  if (!options.help && options.refresh && !options.autoRefresh) {
+  if (!options.help && !options.version && options.refresh && !options.autoRefresh) {
     throw new Error("--refresh cannot be combined with --no-refresh.");
   }
-  if (!options.help && options.refresh && options.inputExplicit) {
+  if (!options.help && !options.version && options.refresh && options.inputExplicit) {
     throw new Error("--refresh cannot be combined with --input.");
   }
   return options;
@@ -691,6 +699,10 @@ async function main() {
     options = parseArgs(process.argv.slice(2));
     if (options.help) {
       process.stdout.write(`${usage()}\n`);
+      return;
+    }
+    if (options.version) {
+      process.stdout.write(`${VERSION}\n`);
       return;
     }
     if (shouldUseInteractive(options)) {
