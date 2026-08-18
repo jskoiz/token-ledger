@@ -1,23 +1,25 @@
 import {
-  modelColorKey,
-  modelDisplayName,
-} from "../lib/token-ledger-models.mjs";
+  normalizeQuotaTimeline,
+  weeklyQuotaObservations,
+} from "./token-ledger-trend.mjs";
 
 const RESET = "\u001b[0m";
-const DIM = [38, 5, 245];
-const TEAL = [38, 5, 80];
+const PRIMARY_STYLE = [38, 2, 255, 255, 255];
+const SECONDARY_STYLE = [38, 2, 155, 155, 155];
+const ACCENT_STYLE = [38, 2, 51, 156, 255];
+const BORDER_STYLE = [38, 2, 88, 88, 88];
+const TRACK_STYLE = [38, 2, 59, 59, 59];
 export const MODEL_COLORS = {
-  sol: [38, 5, 67],
-  luna: [38, 5, 80],
-  terra: [38, 5, 179],
-  gpt: [38, 5, 176],
-  daybreakBlue: [38, 5, 69],
-  autoReview: [38, 5, 153],
-  other: [38, 5, 60],
+  sol: [38, 2, 120, 185, 242],
+  luna: ACCENT_STYLE,
+  terra: [38, 2, 214, 168, 95],
+  gpt: [38, 2, 174, 139, 219],
+  other: [38, 2, 116, 125, 144],
 };
-const TEXT_STYLE = [38, 5, 255];
-const TITLE_STYLE = [1, 38, 5, 255];
-const SUBTITLE_STYLE = [38, 5, 245];
+const TEXT_STYLE = PRIMARY_STYLE;
+const TITLE_STYLE = [1, ...PRIMARY_STYLE];
+const SUBTITLE_STYLE = SECONDARY_STYLE;
+const SELECTED_BACKGROUND = "\u001b[48;2;42;42;42m";
 
 function colorsEnabled(options) {
   return options.forceColor ?? (!options.plain && !process.env.NO_COLOR && Boolean(process.stdout.isTTY));
@@ -29,16 +31,7 @@ function colorize(value, code, enabled) {
 }
 
 function stripAnsi(value) {
-  return String(value)
-    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "")
-    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
-}
-
-function sanitizeText(value) {
-  return stripAnsi(value)
-    .replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  return String(value).replace(/\u001b\[[0-9;]*m/g, "");
 }
 
 function visibleLength(value) {
@@ -100,16 +93,23 @@ function plural(value, singular, pluralForm = `${singular}s`) {
 }
 
 function modelLabel(value) {
-  const model = sanitizeText(value) || "Unknown model";
-  return modelDisplayName(model);
+  const model = String(value || "Unknown model");
+  const lower = model.toLowerCase();
+  if (lower.includes("sol")) return "Sol";
+  if (lower.includes("luna")) return "Luna";
+  if (lower.includes("terra")) return "Terra";
+  if (lower.includes("gpt-5.5") || lower.includes("gpt-5.4")) return "GPT";
+  return "Other";
 }
 
 function modelColor(model) {
-  return MODEL_COLORS[modelColorKey(model)] ?? MODEL_COLORS.other;
+  const key = String(model || "").toLowerCase();
+  return MODEL_COLORS[key] ?? MODEL_COLORS.other;
 }
 
 function usageTypeLabel(value) {
-  const words = (sanitizeText(value) || "unknown")
+  const words = String(value || "unknown")
+    .trim()
     .replace(/[_-]+/g, " ")
     .split(/\s+/)
     .filter(Boolean);
@@ -124,11 +124,11 @@ function usageTypeLabel(value) {
 }
 
 function displayProject(row) {
-  return sanitizeText(row.displayProject || row.project) || "Unlabelled activity";
+  return row.displayProject || row.project || "Unlabelled activity";
 }
 
 function dateLabel(bounds, range = "day") {
-  if (range !== "day" && bounds.rangeDays !== 1 && bounds.startDateString && bounds.endDateString) {
+  if (range === "week" && bounds.startDateString && bounds.endDateString) {
     const startParts = bounds.startDateString.split("-").map(Number);
     const endParts = bounds.endDateString.split("-").map(Number);
     const monthNames = [
@@ -137,12 +137,7 @@ function dateLabel(bounds, range = "day") {
     ];
     const start = `${monthNames[startParts[1] - 1]} ${String(startParts[2]).padStart(2, "0")}`;
     const end = `${monthNames[endParts[1] - 1]} ${String(endParts[2]).padStart(2, "0")}`;
-    if (bounds.startDateString === bounds.endDateString) {
-      return `${end} ${endParts[0]}`;
-    }
-    return startParts[0] === endParts[0]
-      ? `${start} – ${end} ${endParts[0]}`
-      : `${start} ${startParts[0]} – ${end} ${endParts[0]}`;
+    return `${start} – ${end} ${endParts[0]}`;
   }
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: bounds.timeZone,
@@ -159,13 +154,6 @@ function dateLabel(bounds, range = "day") {
   return `${values.weekday} ${values.day} ${values.month} ${values.year}`.toUpperCase();
 }
 
-function rangeModeLabel(bounds, range = "day", compact = false) {
-  if (range === "all") return "ALL";
-  if (range === "day") return "DAY";
-  const days = bounds.rangeDays ?? 1;
-  return compact ? `${days}D` : `${days} ${days === 1 ? "DAY" : "DAYS"}`;
-}
-
 function modelTotals(events) {
   const totals = new Map();
   for (const event of events) {
@@ -180,9 +168,7 @@ function modelTotals(events) {
 function usageTypeTotals(events) {
   const totals = new Map();
   for (const event of events) {
-    const key = modelLabel(event.model) === "Auto Review"
-      ? "auto-review"
-      : String(event.useType || "unknown").trim().toLowerCase() || "unknown";
+    const key = String(event.useType || "unknown").trim().toLowerCase() || "unknown";
     totals.set(key, (totals.get(key) ?? 0) + (Number(event.totalTokens) || 0));
   }
   return [...totals.entries()]
@@ -194,22 +180,17 @@ function usageTypeTotals(events) {
     .sort((left, right) => right.totalTokens - left.totalTokens);
 }
 
-function latestWeeklyQuotaObservation(observations) {
-  const weekly = (observations ?? []).filter(
-    (item) => Number(item.windowMinutes) === 10_080,
-  );
-  const accountWide = weekly.filter((item) => item.scope !== "named");
-  const candidates = accountWide.length ? accountWide : weekly;
-  return [...candidates]
-    .sort(
-      (left, right) =>
-        new Date(left.timestamp).getTime() - new Date(right.timestamp).getTime(),
-    )
-    .at(-1) ?? null;
+function latestWeeklyQuotaObservation(snapshot) {
+  // The epoch-keyed timeline drops stale readings from superseded windows,
+  // so the last entry is the newest reading of the currently-live window.
+  const normalized = normalizeQuotaTimeline(weeklyQuotaObservations(snapshot));
+  const latest = normalized.at(-1);
+  if (!latest) return null;
+  return { ...latest, usedPercent: latest.normalizedUsedPercent };
 }
 
 export function quotaCycleSummary(snapshot = {}, displayedEvents = []) {
-  const observation = latestWeeklyQuotaObservation(snapshot.quotaObservations);
+  const observation = latestWeeklyQuotaObservation(snapshot);
   if (!observation) {
     return {
       available: false,
@@ -297,32 +278,6 @@ function summary(events) {
     const cached = Math.max(0, Number(event.cachedInputTokens) || 0);
     return sum + Math.min(input, cached);
   }, 0);
-  const turnCount = (rows) => {
-    const keys = new Set();
-    for (const [index, event] of rows.entries()) {
-      const turnId = String(event.turnId || "").trim();
-      keys.add(turnId ? `turn:${turnId}` : `event:${event.id || index}`);
-    }
-    return keys.size;
-  };
-  const totalTurns = turnCount(events);
-  const autoReviewEvents = events.filter(
-    (event) => modelLabel(event.model) === "Auto Review",
-  );
-  const autoReviewTokens = autoReviewEvents.reduce(
-    (sum, event) => sum + (Number(event.totalTokens) || 0),
-    0,
-  );
-  const autoReviewInputTokens = autoReviewEvents.reduce(
-    (sum, event) => sum + Math.max(0, Number(event.inputTokens) || 0),
-    0,
-  );
-  const autoReviewCachedInputTokens = autoReviewEvents.reduce((sum, event) => {
-    const input = Math.max(0, Number(event.inputTokens) || 0);
-    const cached = Math.max(0, Number(event.cachedInputTokens) || 0);
-    return sum + Math.min(input, cached);
-  }, 0);
-  const autoReviewTurns = turnCount(autoReviewEvents);
   return {
     totalTokens,
     calls,
@@ -333,46 +288,23 @@ function summary(events) {
     uncachedInputTokens: Math.max(0, inputTokens - cachedInputTokens),
     models: modelTotals(events),
     usageTypes: usageTypeTotals(events),
-    autoReview: {
-      present: autoReviewEvents.length > 0,
-      totalTokens: autoReviewTokens,
-      turns: autoReviewTurns,
-      turnShare: totalTurns > 0 ? (autoReviewTurns / totalTurns) * 100 : 0,
-      cachedInputShare: autoReviewInputTokens > 0
-        ? (autoReviewCachedInputTokens / autoReviewInputTokens) * 100
-        : 0,
-    },
   };
 }
 
 function modelLegendItems(models, totalTokens) {
-  return models
-    .filter((model) => model.totalTokens > 0)
-    .map((model) => ({
-      ...model,
-      share: totalTokens > 0 ? (model.totalTokens / totalTokens) * 100 : 0,
-    }));
-}
-
-function visibleUsageTypeItems(items, limit = 5) {
-  if (items.length <= limit) return items;
-  const visible = items.slice(0, limit - 1);
-  const autoReview = items.find((item) => item.key === "auto-review");
-  if (autoReview && !visible.includes(autoReview)) {
-    visible[visible.length - 1] = autoReview;
-    visible.sort((left, right) => right.totalTokens - left.totalTokens);
+  const known = new Map();
+  for (const model of models) {
+    const key = ["Sol", "Luna", "Terra", "GPT"].includes(model.model)
+      ? model.model
+      : "Other";
+    known.set(key, (known.get(key) ?? 0) + model.totalTokens);
   }
-  const visibleKeys = new Set(visible.map((item) => item.key));
-  return [
-    ...visible,
-    {
-      key: "other",
-      label: "Other",
-      totalTokens: items
-        .filter((item) => !visibleKeys.has(item.key))
-        .reduce((sum, item) => sum + item.totalTokens, 0),
-    },
-  ];
+  return ["Luna", "Sol", "Terra", "GPT", "Other"]
+    .map((model) => ({
+      model,
+      totalTokens: known.get(model) ?? 0,
+      share: totalTokens > 0 ? ((known.get(model) ?? 0) / totalTokens) * 100 : 0,
+    }));
 }
 
 function stackedBar(row, width, maximumTokens, options, enabled) {
@@ -404,7 +336,7 @@ function stackedBar(row, width, maximumTokens, options, enabled) {
     .join("");
   const blank = colorize(
     trackSymbol.repeat(Math.max(0, width - visibleLength(filled))),
-    DIM,
+    TRACK_STYLE,
     enabled,
   );
   return `${filled}${blank}`;
@@ -426,9 +358,13 @@ function panelLines(rows, allRows, totalTokens, panelWidth, options, enabled) {
     panelWidth - labelWidth - shareWidth - totalWidth - 1 - rightPadding,
   );
   const maxTokens = allRows[0]?.totalTokens ?? 0;
-  const rowOffset = Number.isInteger(options.rowOffset) ? options.rowOffset : 0;
+  const totalCredits = allRows.reduce((sum, item) => sum + item.rateCardCredits, 0) || 1;
+  const selectedIndex = Math.min(
+    Math.max(0, Math.trunc(Number(options.selectedIndex) || 0)),
+    Math.max(0, rows.length - 1),
+  );
   const lines = [];
-  const heading = colorize("TOKENS BY PROJECT", TEAL, enabled);
+  const heading = colorize("TOKENS BY PROJECT", ACCENT_STYLE, enabled);
   const barHeaderWidth = barWidth;
   const maximumLabel = compactMode ? `${compact(maxTokens)} max` : `${compact(maxTokens)} (max)`;
   const axisLabel = barHeaderWidth >= maximumLabel.length + 2 ? maximumLabel : compact(maxTokens);
@@ -438,29 +374,33 @@ function panelLines(rows, allRows, totalTokens, panelWidth, options, enabled) {
   lines.push(
     `${fit(heading, labelWidth)}${fit(axisText, barHeaderWidth)}${fit("TOKENS", totalWidth, "right")}${fit("SHARE", shareWidth, "right")}${" ".repeat(rightPadding)}`,
   );
-  lines.push(colorize("─".repeat(panelWidth), DIM, enabled));
+  lines.push(colorize("─".repeat(panelWidth), BORDER_STYLE, enabled));
 
   for (const [index, row] of rows.entries()) {
-    const rankValue = rowOffset + index + 1;
     const share = totalTokens > 0 ? (row.totalTokens / totalTokens) * 100 : 0;
-    const selected = !options.static && index === (options.selectedIndex ?? 0);
+    const selected = index === selectedIndex;
     const caretValue = selected ? (options.ascii ? ">" : "▶") : " ";
-    const prefix = `${caretValue} ${rankValue}. `;
+    const prefix = `${caretValue} ${index + 1}. `;
     const projectText = truncateText(displayProject(row), labelWidth - prefix.length);
-    const caret = selected ? colorize(caretValue, [1, ...TEAL], enabled) : caretValue;
-    const rank = colorize(`${rankValue}.`, TITLE_STYLE, enabled);
+    const caret = selected ? colorize(caretValue, [1, ...ACCENT_STYLE], enabled) : caretValue;
+    const rank = colorize(`${index + 1}.`, TITLE_STYLE, enabled);
     const title = `${caret} ${rank} ${colorize(projectText, TITLE_STYLE, enabled)}`;
     const label = fit(title, labelWidth);
     const metrics = `${fit(compact(row.totalTokens), totalWidth, "right")}${fit(percent(share), shareWidth, "right")}${" ".repeat(rightPadding)}`;
     const bar = stackedBar(row, barWidth, maxTokens, options, enabled);
     const rowLine = `${label}${bar} ${metrics}`;
-    const detail = `${plural(row.threads, "thread")} · ${percent(share)} of tokens`;
+    const creditShare = row.rateCardCredits > 0 && row.rateCardCredits <= Number.MAX_SAFE_INTEGER
+      ? row.rateCardCredits
+      : 0;
+    const detail = `${plural(row.threads, "thread")} · ${percent(
+      creditShare > 0 ? (creditShare / totalCredits) * 100 : 0,
+    )}${labelWidth >= 35 ? " credits" : ""}`;
     const detailText = truncateText(detail, labelWidth - 4);
     const subtitle = colorize(detailText, SUBTITLE_STYLE, enabled);
     const detailLine = `${fit(`    ${subtitle}`, labelWidth)}${" ".repeat(barWidth + 1 + totalWidth + shareWidth + rightPadding)}`;
     if (selected && enabled && options.highlight !== false) {
-      lines.push(`\u001b[48;5;236m${fit(rowLine, panelWidth)}${RESET}`);
-      lines.push(`\u001b[48;5;236m${fit(detailLine, panelWidth)}${RESET}`);
+      lines.push(`${SELECTED_BACKGROUND}${fit(rowLine, panelWidth)}${RESET}`);
+      lines.push(`${SELECTED_BACKGROUND}${fit(detailLine, panelWidth)}${RESET}`);
     } else {
       lines.push(rowLine);
       lines.push(detailLine);
@@ -477,41 +417,36 @@ function sidebarLines(stats, panelWidth, enabled, options = {}, quota = null) {
   const push = (line = "") => {
     lines.push(`${" ".repeat(inset)}${fit(line, contentWidth)}${" ".repeat(inset)}`);
   };
-  const divider = () => push(colorize("─".repeat(contentWidth), DIM, enabled));
-  const heading = (value) => colorize(value, TEAL, enabled);
+  const divider = () => push(colorize("─".repeat(contentWidth), BORDER_STYLE, enabled));
+  const heading = (value) => colorize(value, ACCENT_STYLE, enabled);
   push(heading("MODEL MIX"));
   if (!compactSidebar) push();
-  const modelShareWidth = 6;
-  const modelNameWidth = Math.max(1, contentWidth - modelShareWidth - 2);
-  const modelItems = modelLegendItems(stats.models, stats.totalTokens);
-  const modelLimit = Number.isInteger(options.modelLimit)
-    ? Math.max(0, options.modelLimit)
-    : modelItems.length;
-  const visibleModelItems = modelItems.slice(0, modelLimit);
-  for (const item of visibleModelItems) {
+  for (const item of modelLegendItems(stats.models, stats.totalTokens)) {
     const swatch = colorize("■", modelColor(item.model), enabled);
-    push(`${swatch} ${fit(item.model, modelNameWidth)}${fit(percent(item.share), modelShareWidth, "right")}`);
-    if (item.model === "Auto Review" && stats.autoReview.present) {
-      const turnLabel = stats.autoReview.turns === 1 ? "turn" : "turns";
-      push(`  ${compact(stats.autoReview.turns)} ${turnLabel} · ${percent(stats.autoReview.turnShare)}`);
-      push(`  ${compact(stats.autoReview.totalTokens)} · ${percent(stats.autoReview.cachedInputShare)} cached`);
-    }
+    push(`${swatch} ${fit(item.model, Math.max(1, contentWidth - 10))}${fit(percent(item.share), 8, "right")}`);
   }
-  const hiddenModelCount = modelItems.length - visibleModelItems.length;
-  if (hiddenModelCount > 0) {
-    push(colorize(`… ${plural(hiddenModelCount, "more model")}`, DIM, enabled));
-  }
-  if (!compactSidebar) push();
+  push();
   divider();
   push(heading("USAGE TYPE · TOKENS"));
   if (!compactSidebar) push();
-  const usageItems = visibleUsageTypeItems(stats.usageTypes);
+  const usageItems = stats.usageTypes.length > 5
+    ? [
+        ...stats.usageTypes.slice(0, 4),
+        {
+          key: "other",
+          label: "Other",
+          totalTokens: stats.usageTypes
+            .slice(4)
+            .reduce((sum, item) => sum + item.totalTokens, 0),
+        },
+      ]
+    : stats.usageTypes;
   for (const item of usageItems) {
     const swatch = "■";
     const share = stats.totalTokens > 0 ? (item.totalTokens / stats.totalTokens) * 100 : 0;
     push(`${swatch} ${fit(item.label, Math.max(1, contentWidth - 10))}${fit(percent(share), 8, "right")}`);
   }
-  if (!compactSidebar) push();
+  push();
   divider();
   push(heading("CACHE · INPUT"));
   if (!compactSidebar) push();
@@ -525,7 +460,7 @@ function sidebarLines(stats, panelWidth, enabled, options = {}, quota = null) {
     push(`${swatch} ${fit(item.label, Math.max(1, contentWidth - 10))}${fit(percent(share), 8, "right")}`);
   }
   if (quota?.available) {
-    if (!compactSidebar) push();
+    push();
     divider();
     push(heading("RESET CYCLE"));
     if (!compactSidebar) push();
@@ -545,28 +480,29 @@ function panel(leftLines, rightLines, leftWidth, rightWidth, enabled, ascii) {
     ? { tl: "+", tr: "+", bl: "+", br: "+", h: "-", v: "|", tm: "+", bm: "+" }
     : { tl: "┌", tr: "┐", bl: "└", br: "┘", h: "─", v: "│", tm: "┬", bm: "┴" };
   const rows = Math.max(leftLines.length, rightLines?.length ?? 0);
-  const top = `${glyphs.tl}${glyphs.h.repeat(leftWidth)}${rightLines ? glyphs.tm : glyphs.tr}${rightLines ? glyphs.h.repeat(rightWidth) + glyphs.tr : ""}`;
+  const border = (value) => colorize(value, BORDER_STYLE, enabled);
+  const top = border(`${glyphs.tl}${glyphs.h.repeat(leftWidth)}${rightLines ? glyphs.tm : glyphs.tr}${rightLines ? glyphs.h.repeat(rightWidth) + glyphs.tr : ""}`);
   const body = [];
   for (let index = 0; index < rows; index += 1) {
     const left = fit(leftLines[index] ?? "", leftWidth);
     if (rightLines) {
       const right = fit(rightLines[index] ?? "", rightWidth);
-      body.push(`${glyphs.v}${left}${glyphs.v}${right}${glyphs.v}`);
+      body.push(`${border(glyphs.v)}${left}${border(glyphs.v)}${right}${border(glyphs.v)}`);
     } else {
-      body.push(`${glyphs.v}${left}${glyphs.v}`);
+      body.push(`${border(glyphs.v)}${left}${border(glyphs.v)}`);
     }
   }
-  const bottom = `${glyphs.bl}${glyphs.h.repeat(leftWidth)}${rightLines ? glyphs.bm : glyphs.br}${rightLines ? glyphs.h.repeat(rightWidth) + glyphs.br : ""}`;
+  const bottom = border(`${glyphs.bl}${glyphs.h.repeat(leftWidth)}${rightLines ? glyphs.bm : glyphs.br}${rightLines ? glyphs.h.repeat(rightWidth) + glyphs.br : ""}`);
   return [top, ...body, bottom];
 }
 
 function headerLines(stats, bounds, frameWidth, options, enabled) {
   const left = colorize("TOKEN LEDGER", TITLE_STYLE, enabled);
   const date = colorize(dateLabel(bounds, options.range), TEXT_STYLE, enabled);
-  const mode = colorize(rangeModeLabel(bounds, options.range), [1, ...TEAL], enabled);
+  const mode = colorize(options.range === "week" ? "7 DAYS" : "DAY", [1, ...ACCENT_STYLE], enabled);
   const metric = (value, label) =>
-    `${colorize(String(value), TITLE_STYLE, enabled)} ${colorize(label, DIM, enabled)}`;
-  const separator = colorize("·", DIM, enabled);
+    `${colorize(String(value), TITLE_STYLE, enabled)} ${colorize(label, SECONDARY_STYLE, enabled)}`;
+  const separator = colorize("·", SECONDARY_STYLE, enabled);
   const join = ` ${separator} `;
   const alignHeader = (line) => fit(` ${line}`, frameWidth);
   const fullLine = [
@@ -582,18 +518,14 @@ function headerLines(stats, bounds, frameWidth, options, enabled) {
     return [alignHeader(fullLine)];
   }
 
-  const crossesCalendarYear =
-    bounds.startDateString?.slice(0, 4) !== bounds.endDateString?.slice(0, 4);
-  const compactDate = (
-    crossesCalendarYear
-      ? dateLabel(bounds, options.range)
-      : dateLabel(bounds, options.range).replace(/ 20\d{2}$/, "")
-  ).replace(" – ", "–");
-  const compactMode = rangeModeLabel(bounds, options.range, true);
+  const compactDate = dateLabel(bounds, options.range)
+    .replace(/ 20\d{2}$/, "")
+    .replace(" – ", "–");
+  const compactMode = options.range === "week" ? "7D" : "DAY";
   const compactLine = [
     left,
     colorize(compactDate, TEXT_STYLE, enabled),
-    colorize(compactMode, [1, ...TEAL], enabled),
+    colorize(compactMode, [1, ...ACCENT_STYLE], enabled),
     metric(`${compact(stats.totalTokens)}`, "T"),
     metric(stats.calls.toLocaleString("en-US"), "C"),
     metric(stats.threads.toLocaleString("en-US"), "TH"),
@@ -607,7 +539,7 @@ function headerLines(stats, bounds, frameWidth, options, enabled) {
   const minimalLine = [
     minimalTitle,
     colorize(compactDate.replaceAll(" ", ""), TEXT_STYLE, enabled),
-    colorize(compactMode, [1, ...TEAL], enabled),
+    colorize(compactMode, [1, ...ACCENT_STYLE], enabled),
     compact(stats.totalTokens),
     compact(stats.calls),
     compact(stats.threads),
@@ -624,7 +556,7 @@ export function renderTerminal({ options, snapshot, bounds, events, rows, allRow
   const columns = options.width ?? (Number(process.stdout.columns) || 120);
   const frameWidth = Math.max(38, Math.min(158, columns - 2));
   const sideBySide = options.forceSideBySide ?? frameWidth >= 100;
-  const sideWidth = sideBySide ? (stats.autoReview.present ? 28 : 26) : 0;
+  const sideWidth = sideBySide ? 26 : 0;
   const leftWidth = sideBySide ? frameWidth - sideWidth - 1 : frameWidth;
   const left = panelLines(rows, allRows, stats.totalTokens, leftWidth, options, enabled);
   const right = sideBySide ? sidebarLines(stats, sideWidth, enabled, options, quota) : null;
@@ -636,23 +568,21 @@ export function renderTerminal({ options, snapshot, bounds, events, rows, allRow
     lines.push("");
     lines.push(...sidebarLines(stats, frameWidth, enabled, options, quota));
   }
-  if (!options.static && !options.hideHelp) {
-    lines.push("");
-    lines.push(
-      colorize(
-        options.ascii
-          ? "[j/k] select   [q/esc] quit"
-          : "[↑↓ or j/k] select   [q/esc] quit",
-        DIM,
-        enabled,
-      ),
-    );
-  }
+  lines.push("");
+  lines.push(
+    colorize(
+      options.ascii
+        ? "[j/k] select   [enter] inspect   [d/w/m] range   [q] quit"
+        : "[↑↓] select   [enter] inspect   [d/w/m] range   [q] quit",
+      SECONDARY_STYLE,
+      enabled,
+    ),
+  );
   return lines.join("\n");
 }
 
-export const SCREEN_BASE = "\u001b[38;5;255m\u001b[48;2;16;16;18m";
-const PANEL_BASE = "\u001b[38;5;255m\u001b[48;2;5;5;6m";
+export const SCREEN_BASE = "\u001b[38;2;255;255;255m\u001b[48;2;30;30;30m";
+const PANEL_BASE = "\u001b[38;2;255;255;255m\u001b[48;2;24;24;24m";
 
 function paintFullscreenLine(line, width, background, enabled) {
   const fitted = fit(line, width);
@@ -666,84 +596,30 @@ export function renderFullscreen({ options, snapshot, bounds, events, rows, allR
   const columns = Math.max(40, Number(width) || Number(process.stdout.columns) || 120);
   const screenHeight = Math.max(1, Number(height) || Number(process.stdout.rows) || 32);
   const frameWidth = Math.max(38, Math.min(158, columns - 4));
-  const forceSideBySide = frameWidth >= 84;
-  const staticBudget = Math.max(0, screenHeight - 1);
-  let visibleRows = rows;
-  let fullscreenOptions = {
-    ...options,
-    forceColor: enabled,
-    forceSideBySide,
-    highlight: false,
-    compactSidebar: true,
-    hideHelp: true,
-    width: frameWidth + 2,
-  };
-
-  if (forceSideBySide && staticBudget >= 3) {
-    const stats = summary(events);
-    const quota = quotaCycleSummary(snapshot, events);
-    const panelContentBudget = Math.max(1, staticBudget - 3);
-    const visibleRowCount = Math.min(
-      rows.length,
-      Math.max(1, Math.floor((panelContentBudget - 2) / 2)),
-    );
-    const selectedIndex = Math.max(
-      0,
-      Math.min(rows.length - 1, Number(options.selectedIndex) || 0),
-    );
-    const rowOffset = Math.min(
-      Math.max(0, selectedIndex - visibleRowCount + 1),
-      Math.max(0, rows.length - visibleRowCount),
-    );
-    visibleRows = rows.slice(rowOffset, rowOffset + visibleRowCount);
-
-    const sideWidth = stats.autoReview.present ? 28 : 26;
-    let modelLimit = modelLegendItems(stats.models, stats.totalTokens).length;
-    while (
-      modelLimit > 0 &&
-      sidebarLines(
-        stats,
-        sideWidth,
-        enabled,
-        { ...fullscreenOptions, modelLimit },
-        quota,
-      ).length > panelContentBudget
-    ) {
-      modelLimit -= 1;
-    }
-
-    fullscreenOptions = {
-      ...fullscreenOptions,
-      modelLimit,
-      rowOffset,
-      selectedIndex: selectedIndex - rowOffset,
-    };
-  }
-
   const staticOutput = renderTerminal({
-    options: fullscreenOptions,
+    options: {
+      ...options,
+      forceColor: enabled,
+      forceSideBySide: frameWidth >= 84,
+      highlight: false,
+      compactSidebar: true,
+      width: frameWidth + 2,
+    },
     snapshot,
     bounds,
     events,
-    rows: visibleRows,
+    rows,
     allRows,
   });
-  let staticLines = staticOutput.split("\n");
+  const staticLines = staticOutput.split("\n");
+  staticLines.pop();
   if (staticLines.at(-1) === "") staticLines.pop();
-  const help = colorize("↑/↓ move   •   j/k move   •   q/esc quit", DIM, enabled);
-  const includeSpacer = staticLines.length + 2 <= screenHeight;
-  const availableStaticLines = Math.max(
-    0,
-    screenHeight - 1 - (includeSpacer ? 1 : 0),
-  );
-  staticLines = staticLines.slice(0, availableStaticLines);
-  const summaryLine = staticLines.shift();
+  const summaryLine = staticLines.shift() ?? "";
+  const help = colorize("↑/↓ move   •   j/k move   •   q/esc quit", SECONDARY_STYLE, enabled);
   const content = [
-    ...(summaryLine === undefined
-      ? []
-      : [{ line: summaryLine, background: SCREEN_BASE }]),
+    { line: summaryLine, background: SCREEN_BASE },
     ...staticLines.map((line) => ({ line, background: PANEL_BASE })),
-    ...(includeSpacer ? [{ line: "", background: SCREEN_BASE }] : []),
+    { line: "", background: SCREEN_BASE },
     { line: help, background: SCREEN_BASE },
   ];
   const topPadding = Math.max(0, Math.floor((screenHeight - content.length) / 2));
