@@ -8,6 +8,7 @@ import {
   dayBounds,
   filterDayEvents,
   parseArgs,
+  sanitizeTerminalText,
   DEFAULT_SNAPSHOT,
   snapshotCacheIsFresh,
   snapshotNeedsRefresh,
@@ -108,6 +109,19 @@ test("aggregateProjects sorts by tokens and retains model mix", () => {
   assert.equal(rows[0].totalTokens, 1_000);
 });
 
+test("project labels remove terminal control sequences before rendering", () => {
+  const project = "\u001b]8;;https://example.test\u0007\u001b[31msecret\u001b[0m\u0000";
+  const rows = aggregateProjects(
+    { events: [], threads: [{ id: "thread-1", project }] },
+    [{ project, threadId: "thread-1", totalTokens: 1 }],
+    { rawProjects: true },
+  );
+
+  assert.equal(sanitizeTerminalText(project), "secret ");
+  assert.equal(rows[0].project, "secret");
+  assert.equal(rows[0].displayProject, "secret");
+});
+
 test("parseArgs accepts the day subcommand and date option", () => {
   const options = parseArgs([
     "day",
@@ -193,6 +207,19 @@ test("parseArgs supports opting out of the automatic JSONL freshness check", () 
   assert.throws(
     () => parseArgs(["week", "--refresh", "--no-refresh"]),
     /cannot be combined/,
+  );
+});
+
+test("parseArgs rejects refresh requests that target an explicit snapshot", () => {
+  assert.throws(
+    () => parseArgs([
+      "day",
+      "2026-08-18",
+      "--input",
+      "custom-snapshot.json",
+      "--refresh",
+    ]),
+    /--refresh cannot be combined with --input/,
   );
 });
 

@@ -241,6 +241,9 @@ export function parseArgs(argv) {
   if (!options.help && options.refresh && !options.autoRefresh) {
     throw new Error("--refresh cannot be combined with --no-refresh.");
   }
+  if (!options.help && options.refresh && options.inputExplicit) {
+    throw new Error("--refresh cannot be combined with --input.");
+  }
   if (!options.help && options.view === "trend" && options.legacyPlot) {
     throw new Error("--youplot is only available for the project view.");
   }
@@ -359,9 +362,16 @@ export function weekBounds(value, timeZone) {
   };
 }
 
+export function sanitizeTerminalText(value) {
+  return String(value ?? "")
+    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "")
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ");
+}
+
 function cleanLabel(value, fallback) {
-  const label = String(value ?? "")
-    .replace(/[\t\r\n]+/g, " ")
+  const label = sanitizeTerminalText(value)
+    .replace(/\s+/g, " ")
     .trim();
   return label || fallback;
 }
@@ -376,9 +386,10 @@ export function oneOffProjects(snapshot) {
   const threadIdsByProject = new Map();
   const add = (project, threadId) => {
     if (!project || !threadId) return;
-    const ids = threadIdsByProject.get(project) ?? new Set();
+    const normalizedProject = cleanLabel(project, "Unlabelled activity");
+    const ids = threadIdsByProject.get(normalizedProject) ?? new Set();
     ids.add(threadId);
-    threadIdsByProject.set(project, ids);
+    threadIdsByProject.set(normalizedProject, ids);
   };
   for (const event of snapshot.events ?? []) add(event.project, event.threadId);
   for (const thread of snapshot.threads ?? []) add(thread.project, thread.id);
@@ -416,7 +427,7 @@ export function aggregateProjects(snapshot, events, options = {}) {
   for (const event of events) {
     const rawProject = cleanLabel(event.project, "Unlabelled activity");
     const project =
-      !options.rawProjects && singletonProjects.has(event.project)
+      !options.rawProjects && singletonProjects.has(rawProject)
         ? "Other activity"
         : rawProject;
     const row =
@@ -633,7 +644,9 @@ async function refreshSnapshot(options) {
   if (!existsSync(options.codexHome)) {
     throw new Error(`Codex data directory not found: ${options.codexHome}`);
   }
-  const { collectUsage } = await import("../lib/token-ledger-importer.mjs");
+  const { collectUsage, writePrivateSnapshot } = await import(
+    "../lib/token-ledger-importer.mjs"
+  );
   process.stderr.write("Token Ledger: refreshing local snapshot…\n");
   const snapshot = await collectUsage(
     {
@@ -647,11 +660,7 @@ async function refreshSnapshot(options) {
     },
   );
   process.stderr.write("\n");
-  await mkdir(dirname(options.input), { recursive: true });
-  await writeFile(options.input, `${JSON.stringify(snapshot)}\n`, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
+  await writePrivateSnapshot(options.input, snapshot);
   return snapshot;
 }
 
