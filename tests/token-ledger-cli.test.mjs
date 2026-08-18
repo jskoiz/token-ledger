@@ -1,31 +1,16 @@
-import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import {
-  chmod,
-  mkdir,
-  mkdtemp,
-  readFile,
-  rm,
-  stat,
-  writeFile,
-} from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
-import { dirname, resolve } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import assert from "node:assert/strict";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
 
 import {
   aggregateProjects,
-  allBounds,
   dayBounds,
-  DEFAULT_SNAPSHOT,
   filterDayEvents,
-  monthBounds,
   parseArgs,
-  rollingBounds,
-  sanitizeTerminalText,
+  DEFAULT_SNAPSHOT,
+  snapshotCacheIsFresh,
   snapshotNeedsRefresh,
-  VERSION,
   weekBounds,
 } from "../bin/token-ledger.mjs";
 import {
@@ -33,166 +18,36 @@ import {
   renderFullscreen,
   renderTerminal,
 } from "../bin/token-ledger-terminal.mjs";
-import { sourceFingerprint } from "../lib/token-ledger-collector.mjs";
 import {
-  modelColorKey,
-  modelDisplayName,
-  normalizeModelIdentifier,
-} from "../lib/token-ledger-models.mjs";
+  buildBurnDayBins,
+  buildUsageTrend,
+  multiDayBounds,
+  normalizeQuotaTimeline,
+  weeklyQuotaObservations,
+} from "../bin/token-ledger-trend.mjs";
+import { creditsForUsage } from "../bin/token-ledger-rates.mjs";
+import { renderTrendImage } from "../bin/token-ledger-trend-image.mjs";
+import {
+  buildActualTokenBins,
+  renderTrendPlain,
+} from "../bin/token-ledger-trend-terminal.mjs";
 
-const testDirectory = dirname(fileURLToPath(import.meta.url));
-const cliPath = resolve(testDirectory, "../bin/token-ledger.mjs");
-const fixturePath = resolve(
-  testDirectory,
-  "fixtures/demo-snapshot.json",
-);
-const fixture = JSON.parse(await readFile(fixturePath, "utf8"));
-
-function runCli(args, options = {}) {
-  return spawnSync(process.execPath, [cliPath, ...args], {
-    encoding: "utf8",
-    timeout: 15_000,
-    env: {
-      ...process.env,
-      ...options.env,
-    },
-  });
-}
-
-function stripAnsi(value) {
-  return String(value)
-    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "")
-    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
-}
-
-function tokenEvent({ timestamp, turnId, totalTokens, model = "gpt-5.6-sol" }) {
-  return {
-    timestamp,
-    type: "event_msg",
-    payload: {
-      type: "token_count",
-      info: {
-        total_token_usage: {
-          input_tokens: totalTokens - 10,
-          cached_input_tokens: Math.max(0, totalTokens - 20),
-          output_tokens: 10,
-          reasoning_output_tokens: 2,
-          total_tokens: totalTokens,
-        },
-        last_token_usage: {
-          input_tokens: totalTokens - 10,
-          cached_input_tokens: Math.max(0, totalTokens - 20),
-          output_tokens: 10,
-          reasoning_output_tokens: 2,
-          total_tokens: totalTokens,
-        },
-        model_context_window: 128000,
-      },
-    },
-    model,
-    turnId,
-  };
-}
-
-async function writeSyntheticCodexHome(root, options = {}) {
-  const threadId = options.threadId ?? "11111111-1111-4111-8111-111111111111";
-  const turnId = options.turnId ?? `turn-${options.totalTokens ?? 100}`;
-  const target = options.archived ? "archived_sessions" : "sessions";
-  const directory = resolve(root, target, "2026", "08", "05");
-  await mkdir(directory, { recursive: true });
-  await mkdir(resolve(root, "sessions"), { recursive: true });
-  const timestamp = "2026-08-05T12:00:00.000Z";
-  const rows = [
-    {
-      timestamp,
-      type: "session_meta",
-      payload: {
-        id: threadId,
-        cwd: `/workspace/${options.project ?? "synthetic-source"}`,
-        source: "exec",
-      },
-    },
-    {
-      timestamp,
-      type: "event_msg",
-      payload: {
-        type: "task_started",
-        turn_id: turnId,
-        started_at: Date.parse(timestamp) / 1000,
-      },
-    },
-    {
-      timestamp,
-      type: "turn_context",
-      payload: {
-        turn_id: turnId,
-        model: "gpt-5.6-sol",
-        effort: "medium",
-        cwd: `/workspace/${options.project ?? "synthetic-source"}`,
-      },
-    },
-    tokenEvent({
-      timestamp: "2026-08-05T12:00:02.000Z",
-      turnId,
-      totalTokens: options.totalTokens ?? 100,
-    }),
-  ];
-  const file = resolve(directory, `rollout-2026-08-05-${threadId}.jsonl`);
-  await writeFile(file, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`);
-  return file;
-}
-
-test("day and week bounds honor explicit local calendar timezones", () => {
-  const day = dayBounds("2026-08-01", "Pacific/Honolulu");
-  assert.equal(day.start.toISOString(), "2026-08-01T10:00:00.000Z");
-  assert.equal(day.end.toISOString(), "2026-08-02T10:00:00.000Z");
-
-  const week = weekBounds("2026-08-03", "Pacific/Honolulu");
-  assert.equal(week.startDateString, "2026-07-28");
-  assert.equal(week.endDateString, "2026-08-03");
-  assert.equal(week.start.toISOString(), "2026-07-28T10:00:00.000Z");
-  assert.equal(week.end.toISOString(), "2026-08-04T10:00:00.000Z");
+test("dayBounds uses local calendar midnights for an explicit timezone", () => {
+  const bounds = dayBounds("2026-08-01", "Pacific/Honolulu");
+  assert.equal(bounds.start.toISOString(), "2026-08-01T10:00:00.000Z");
+  assert.equal(bounds.end.toISOString(), "2026-08-02T10:00:00.000Z");
 });
 
-test("month, custom, and all ranges use inclusive local calendar bounds", () => {
-  const month = monthBounds("2026-08-03", "Pacific/Honolulu");
-  assert.equal(month.startDateString, "2026-07-05");
-  assert.equal(month.endDateString, "2026-08-03");
-  assert.equal(month.rangeDays, 30);
-
-  const ninetyDays = rollingBounds("2026-08-03", "Pacific/Honolulu", 90);
-  assert.equal(ninetyDays.startDateString, "2026-05-06");
-  assert.equal(ninetyDays.endDateString, "2026-08-03");
-  assert.equal(ninetyDays.start.toISOString(), "2026-05-06T10:00:00.000Z");
-  assert.equal(ninetyDays.end.toISOString(), "2026-08-04T10:00:00.000Z");
-
-  const snapshot = {
-    events: [
-      { timestamp: "not-a-date" },
-      { timestamp: null },
-      { timestamp: "2026-06-01T10:00:00.000Z" },
-      { timestamp: "2026-08-04T09:59:59.999Z" },
-    ],
-  };
-  const all = allBounds(snapshot, "Pacific/Honolulu");
-  assert.equal(all.startDateString, "2026-06-01");
-  assert.equal(all.endDateString, "2026-08-03");
-  assert.equal(all.start.toISOString(), "2026-06-01T10:00:00.000Z");
-  assert.equal(all.end.toISOString(), "2026-08-04T10:00:00.000Z");
-  assert.equal(all.rangeDays, null);
-  assert.equal(filterDayEvents(snapshot, all).length, 2);
+test("weekBounds covers seven local calendar days ending on the selected day", () => {
+  const bounds = weekBounds("2026-08-03", "Pacific/Honolulu");
+  assert.equal(bounds.startDateString, "2026-07-28");
+  assert.equal(bounds.endDateString, "2026-08-03");
+  assert.equal(bounds.start.toISOString(), "2026-07-28T10:00:00.000Z");
+  assert.equal(bounds.end.toISOString(), "2026-08-04T10:00:00.000Z");
+  assert.equal(bounds.rangeDays, 7);
 });
 
-test("today and yesterday resolve in the selected timezone", () => {
-  const today = dayBounds("today", "Pacific/Honolulu");
-  const yesterday = dayBounds("yesterday", "Pacific/Honolulu");
-  assert.equal(
-    (today.start.getTime() - yesterday.start.getTime()) / 86_400_000,
-    1,
-  );
-});
-
-test("filterDayEvents includes the start and excludes the end boundary", () => {
+test("filterDayEvents keeps the start and excludes the end boundary", () => {
   const snapshot = {
     events: [
       { id: "before", timestamp: "2026-08-01T09:59:59.999Z" },
@@ -201,767 +56,895 @@ test("filterDayEvents includes the start and excludes the end boundary", () => {
       { id: "end", timestamp: "2026-08-02T10:00:00.000Z" },
     ],
   };
-  const events = filterDayEvents(
-    snapshot,
-    dayBounds("2026-08-01", "Pacific/Honolulu"),
-  );
+  const events = filterDayEvents(snapshot, dayBounds("2026-08-01", "Pacific/Honolulu"));
   assert.deepEqual(events.map((event) => event.id), ["start", "inside"]);
 });
 
-test("bare execution and week default to the current seven-day window", () => {
-  for (const argv of [[], ["week"]]) {
-    const options = parseArgs(argv);
-    assert.equal(options.range, "week");
-    assert.equal(options.date, "today");
-    assert.equal(options.top, 10);
-    assert.equal(options.autoRefresh, true);
-    assert.equal(options.timeZone, Intl.DateTimeFormat().resolvedOptions().timeZone);
-    assert.equal(options.input, resolve(homedir(), ".token-ledger", "token-ledger-snapshot.json"));
-    assert.equal(options.input, DEFAULT_SNAPSHOT);
-  }
-  assert.equal(parseArgs(["day"]).date, "today");
-  assert.equal(parseArgs(["day", "yesterday"]).date, "yesterday");
-});
-
-test("month, all, and arbitrary day commands map to their ranges", () => {
-  const month = parseArgs(["month"]);
-  assert.equal(month.range, "month");
-  assert.equal(month.rangeDays, 30);
-  assert.equal(month.date, "today");
-
-  const custom = parseArgs(["90d", "2026-08-05"]);
-  assert.equal(custom.range, "90d");
-  assert.equal(custom.rangeDays, 90);
-  assert.equal(custom.date, "2026-08-05");
-
-  const all = parseArgs(["all"]);
-  assert.equal(all.range, "all");
-  assert.equal(all.rangeDays, null);
-  assert.equal(all.date, null);
-});
-
-test("every retained option maps to the intended setting", () => {
-  const codexHome = resolve(tmpdir(), "synthetic-codex-home");
-  const options = parseArgs([
-    "week",
-    "--date",
-    "2026-08-05",
-    "--input",
-    fixturePath,
-    "--no-refresh",
-    "--codex-home",
-    codexHome,
-    "--tz",
-    "UTC",
-    "--top",
-    "3",
-    "--width",
-    "80",
-    "--raw-projects",
-    "-anon",
-    "--no-archived",
-    "--plain",
-    "--ascii",
-    "--static",
-  ]);
-  assert.deepEqual(
-    {
-      range: options.range,
-      date: options.date,
-      input: options.input,
-      inputExplicit: options.inputExplicit,
-      autoRefresh: options.autoRefresh,
-      codexHome: options.codexHome,
-      includeArchived: options.includeArchived,
-      timeZone: options.timeZone,
-      top: options.top,
-      width: options.width,
-      rawProjects: options.rawProjects,
-      anonymizeProjects: options.anonymizeProjects,
-      plain: options.plain,
-      ascii: options.ascii,
-      static: options.static,
-    },
-    {
-      range: "week",
-      date: "2026-08-05",
-      input: fixturePath,
-      inputExplicit: true,
-      autoRefresh: false,
-      codexHome,
-      includeArchived: false,
-      timeZone: "UTC",
-      top: 3,
-      width: 80,
-      rawProjects: true,
-      anonymizeProjects: true,
-      plain: true,
-      ascii: true,
-      static: true,
-    },
-  );
-  assert.equal(parseArgs(["--refresh"]).refresh, true);
-  assert.equal(parseArgs(["--help"]).help, true);
-  assert.equal(parseArgs(["-h"]).help, true);
-  assert.equal(parseArgs(["--version"]).version, true);
-  assert.equal(parseArgs(["-v"]).version, true);
-});
-
-test("argument failures are explicit and bounded", () => {
-  assert.throws(() => parseArgs(["unknown"]), /Unknown command/);
-  assert.throws(() => parseArgs(["week", "2026-08-05", "extra"]), /Unknown option/);
-  for (const option of ["--date", "--input", "--codex-home", "--tz", "--top", "--width"]) {
-    assert.throws(() => parseArgs([option]), /requires a value/);
-  }
-  assert.throws(() => parseArgs(["--top", "0"]), /1 to 100/);
-  assert.throws(() => parseArgs(["--top", "101"]), /1 to 100/);
-  assert.throws(() => parseArgs(["--width", "39"]), /40 to 200/);
-  assert.throws(() => parseArgs(["--width", "201"]), /40 to 200/);
-  assert.throws(() => parseArgs(["0d"]), /integer from 1/);
-  assert.throws(() => parseArgs(["all", "2026-08-05"]), /does not accept an end day/);
-  assert.throws(() => parseArgs(["--refresh", "--no-refresh"]), /cannot be combined/);
-  assert.throws(() => parseArgs(["--refresh", "--input", fixturePath]), /cannot be combined/);
-  assert.throws(() => dayBounds("2026-02-30", "UTC"), /Invalid calendar day/);
-  assert.throws(() => dayBounds("not-a-day", "UTC"), /Day must be/);
-  assert.throws(() => dayBounds("2026-08-05", "Mars\/Base"), /Unknown IANA timezone/);
-});
-
-test("snapshot freshness includes source identity as well as mtime", () => {
-  const one = sourceFingerprint(resolve(tmpdir(), "synthetic-one"));
-  const two = sourceFingerprint(resolve(tmpdir(), "synthetic-two"));
-  assert.notEqual(
-    sourceFingerprint(resolve(tmpdir(), "synthetic-one"), true),
-    sourceFingerprint(resolve(tmpdir(), "synthetic-one"), false),
-  );
-  assert.equal(snapshotNeedsRefresh(100, 101, one, one, 2, 2), true);
-  assert.equal(snapshotNeedsRefresh(100, 100, one, one, 2, 2), false);
-  assert.equal(snapshotNeedsRefresh(100, 99, one, one, 2, 2), false);
-  assert.equal(snapshotNeedsRefresh(100, 99, one, two, 2, 2), true);
-  assert.equal(snapshotNeedsRefresh(100, 99, one, one, 2, 1), true);
-});
-
-test("project aggregation groups singleton labels and strips terminal controls", () => {
+test("aggregateProjects sorts by tokens and retains model mix", () => {
   const snapshot = {
     events: [],
     threads: [
-      { id: "alpha-1", project: "synthetic-alpha" },
-      { id: "alpha-2", project: "synthetic-alpha" },
-      { id: "beta-1", project: "synthetic-beta" },
+      { id: "alpha-1", project: "alpha" },
+      { id: "alpha-2", project: "alpha" },
+      { id: "beta-1", project: "beta" },
     ],
   };
   const events = [
-    { project: "synthetic-alpha", threadId: "alpha-1", model: "gpt-5.6-sol", totalTokens: 900 },
-    { project: "synthetic-alpha", threadId: "alpha-2", model: "gpt-5.6-luna", totalTokens: 100 },
-    { project: "\u001b]8;;invalid\u0007synthetic-beta\u001b]8;;\u0007", threadId: "beta-1", model: "gpt-5.5", totalTokens: 500 },
+    {
+      project: "alpha",
+      threadId: "alpha-1",
+      model: "gpt-5.6-sol",
+      totalTokens: 900,
+      outputTokens: 90,
+      toolCalls: 2,
+      rateCardCredits: 4,
+    },
+    {
+      project: "alpha",
+      threadId: "alpha-2",
+      model: "gpt-5.6-luna",
+      totalTokens: 100,
+      outputTokens: 10,
+      toolCalls: 1,
+      rateCardCredits: 1,
+    },
+    {
+      project: "beta",
+      threadId: "beta-1",
+      model: "gpt-5.5",
+      totalTokens: 500,
+      outputTokens: 50,
+      toolCalls: 1,
+      rateCardCredits: null,
+    },
   ];
-  const grouped = aggregateProjects(snapshot, events);
-  assert.deepEqual(grouped.map((row) => row.project), ["synthetic-alpha", "Other activity"]);
-  const raw = aggregateProjects(snapshot, events, { rawProjects: true });
-  assert.equal(raw[1].project, "synthetic-beta");
-  assert.equal(raw[0].threads, 2);
-  assert.deepEqual(raw[0].models.map((model) => model.model), ["Sol", "Luna"]);
-  assert.equal(sanitizeTerminalText("safe\u001b[31m red\u0007"), "safe red ");
+  const rows = aggregateProjects(snapshot, events, { rawProjects: true });
+  assert.deepEqual(rows.map((row) => row.project), ["alpha", "beta"]);
+  assert.equal(rows[0].threads, 2);
+  assert.deepEqual(
+    rows[0].models.map((model) => model.model),
+    ["Sol", "Luna"],
+  );
+  assert.equal(rows[0].totalTokens, 1_000);
 });
 
-test("model mix names every active model instead of folding models into Other", () => {
-  assert.equal(modelDisplayName("gpt-daybreak-blue-latest"), "Daybreak Blue");
-  assert.equal(modelDisplayName("gpt-5.3-codex"), "GPT-5.3 Codex");
-  assert.equal(modelDisplayName("nova-model"), "nova-model");
-  assert.equal(modelDisplayName("unknown"), "Unknown model");
-  assert.equal(modelColorKey("Daybreak Blue"), "daybreakBlue");
-  assert.equal(normalizeModelIdentifier("gpt-daybreak-blue-latest"), "gpt-daybreak-blue");
-  assert.equal(modelDisplayName("gpt-daybreak-blueberry"), "gpt-daybreak-blueberry");
-  assert.equal(modelDisplayName("gpt-5.6-solar"), "gpt-5.6-solar");
-  assert.equal(modelDisplayName("gpt-5.5-cybernetic"), "GPT-5.5");
+test("parseArgs accepts the day subcommand and date option", () => {
+  const options = parseArgs([
+    "day",
+    "--date",
+    "2026-08-01",
+    "--top",
+    "5",
+    "--raw-projects",
+  ]);
+  assert.equal(options.date, "2026-08-01");
+  assert.equal(options.top, 5);
+  assert.equal(options.rawProjects, true);
+});
 
-  const bounds = dayBounds("2026-08-05", "UTC");
-  const base = {
-    timestamp: "2026-08-05T12:00:00.000Z",
-    project: "synthetic-model-project",
-    threadId: "synthetic-model-thread",
-    useType: "interactive",
-  };
-  const events = [
-    { ...base, id: "daybreak", model: "gpt-daybreak-blue-latest", totalTokens: 500 },
-    { ...base, id: "codex", model: "gpt-5.3-codex", totalTokens: 300 },
-    { ...base, id: "custom", model: "nova-model", totalTokens: 200 },
-  ];
-  const snapshot = {
-    events,
-    threads: [{ id: base.threadId, project: base.project }],
-  };
-  const allRows = aggregateProjects(snapshot, events, { rawProjects: true });
-  assert.deepEqual(
-    allRows[0].models.map((model) => model.model),
-    ["Daybreak Blue", "GPT-5.3 Codex", "nova-model"],
+test("parseArgs defaults the week end day to today", () => {
+  const options = parseArgs(["week", "--top", "5"]);
+  assert.equal(options.range, "week");
+  assert.equal(options.date, "today");
+  assert.equal(options.top, 5);
+  assert.equal(options.autoRefresh, true);
+  assert.equal(options.inputExplicit, false);
+  assert.equal(
+    options.timeZone,
+    Intl.DateTimeFormat().resolvedOptions().timeZone,
+  );
+  assert.equal(
+    options.input,
+    resolve(homedir(), ".token-ledger", "token-ledger-snapshot.json"),
+  );
+  assert.equal(options.input, DEFAULT_SNAPSHOT);
+});
+
+test("parseArgs supports the 7d, 14d, and 30d trend windows", () => {
+  const positional = parseArgs(["trend", "14d", "--static"]);
+  assert.equal(positional.view, "trend");
+  assert.equal(positional.range, "trend");
+  assert.equal(positional.trendDays, 14);
+  assert.equal(positional.date, "today");
+
+  const option = parseArgs(["trend", "--period", "30d", "--date", "2026-08-15"]);
+  assert.equal(option.trendDays, 30);
+  assert.equal(option.date, "2026-08-15");
+  assert.throws(() => parseArgs(["trend", "10d"]), /7d, 14d, or 30d/);
+  assert.throws(
+    () => parseArgs(["trend", "7d", "--period", "14d"]),
+    /only be specified once/,
+  );
+  assert.throws(
+    () => parseArgs(["week", "--period", "14d"]),
+    /only available for the trend view/,
   );
 
-  const output = stripAnsi(renderTerminal({
-    options: {
-      range: "day",
-      plain: true,
-      ascii: true,
-      static: true,
-      width: 120,
-    },
-    snapshot,
-    bounds,
-    events,
-    rows: allRows,
-    allRows,
-  }));
-
-  assert.match(output, /Daybreak Blue\s+50\.0%/);
-  assert.match(output, /GPT-5\.3 Codex\s+30\.0%/);
-  assert.match(output, /nova-model\s+20\.0%/);
-  assert.doesNotMatch(output, /■ Other\s/);
-  assert.doesNotMatch(output, /Terra\s+0\.00%/);
+  const image = parseArgs([
+    "trend",
+    "7d",
+    "--image",
+    "--image-output",
+    "artifacts/trend.svg",
+    "--image-width",
+    "1400",
+  ]);
+  assert.equal(image.image, true);
+  assert.equal(image.imageOutput, resolve("artifacts/trend.svg"));
+  assert.equal(image.imageWidth, 1400);
+  assert.throws(
+    () => parseArgs(["day", "2026-08-15", "--image"]),
+    /only available for the trend view/,
+  );
+  assert.throws(
+    () => parseArgs(["trend", "7d", "--image-output", "trend.png"]),
+    /must end in .svg/,
+  );
 });
 
-test("renderer supports static widths and interactive selection without false keys", () => {
-  const bounds = weekBounds("2026-08-05", "UTC");
-  const events = filterDayEvents(fixture, bounds);
-  const allRows = aggregateProjects(fixture, events, { rawProjects: true });
-  const staticOutput = renderTerminal({
-    options: { range: "week", plain: true, ascii: true, static: true, width: 40 },
-    snapshot: fixture,
-    bounds,
-    events,
-    rows: allRows.slice(0, 3),
-    allRows,
-  });
-  assert.ok(staticOutput.split("\n").every((line) => line.length <= 40));
-  assert.doesNotMatch(staticOutput, /select|inspect|range|quit/);
-  assert.doesNotMatch(staticOutput, /> 1\./);
-
-  const interactive = renderTerminal({
-    options: {
-      range: "week",
-      plain: true,
-      ascii: true,
-      static: false,
-      selectedIndex: 1,
-      width: 90,
-    },
-    snapshot: fixture,
-    bounds,
-    events,
-    rows: allRows,
-    allRows,
-  });
-  assert.match(interactive, /> 2\./);
-  assert.match(interactive, /\d+ threads · \d+\.\d+% of tokens/);
-  assert.doesNotMatch(interactive, /> 1\./);
-  assert.match(interactive, /\[j\/k\] select\s+\[q\/esc\] quit/);
-  assert.doesNotMatch(interactive, /inspect|d\/w\/m/);
+test("parseArgs supports static output mode", () => {
+  const options = parseArgs(["week", "--static"]);
+  assert.equal(options.static, true);
 });
 
-test("renderer surfaces auto review turns, tokens, and cache share", () => {
-  const bounds = weekBounds("2026-08-05", "UTC");
-  const base = {
-    timestamp: "2026-08-05T12:00:00.000Z",
-    project: "synthetic-review-project",
-    threadId: "synthetic-review-thread",
-    reasoningTokens: 0,
-    toolCalls: 0,
-  };
-  const event = ({ totalTokens, ...values }) => ({
-    ...base,
-    ...values,
-    inputTokens: totalTokens * 0.9,
-    cachedInputTokens: totalTokens * 0.8,
-    outputTokens: totalTokens * 0.1,
-    totalTokens,
-  });
-  const events = [
-    event({ id: "auto-1a", turnId: "auto-turn-1", model: "codex-auto-review", useType: "subagent", totalTokens: 50 }),
-    event({ id: "auto-1b", turnId: "auto-turn-1", model: "codex-auto-review", useType: "subagent", totalTokens: 50 }),
-    event({ id: "auto-2", turnId: "auto-turn-2", model: "codex-auto-review", useType: "subagent", totalTokens: 100 }),
-    event({ id: "regular-1", turnId: "regular-1", model: "gpt-5.6-sol", useType: "interactive", totalTokens: 800 }),
-    event({ id: "regular-2", turnId: "regular-2", model: "gpt-5.6-sol", useType: "subagent", totalTokens: 700 }),
-    event({ id: "regular-3", turnId: "regular-3", model: "gpt-5.6-sol", useType: "automation", totalTokens: 600 }),
-    event({ id: "regular-4", turnId: "regular-4", model: "gpt-5.6-sol", useType: "cli", totalTokens: 500 }),
-    event({ id: "regular-5", turnId: "regular-5", model: "gpt-5.6-sol", useType: "voice", totalTokens: 400 }),
-    event({ id: "regular-6", turnId: "regular-6", model: "gpt-5.6-sol", useType: "tool", totalTokens: 300 }),
-  ];
+test("parseArgs supports opting out of the automatic JSONL freshness check", () => {
+  const options = parseArgs(["week", "--no-refresh"]);
+  assert.equal(options.autoRefresh, false);
+  assert.throws(
+    () => parseArgs(["week", "--refresh", "--no-refresh"]),
+    /cannot be combined/,
+  );
+});
+
+test("snapshot freshness follows the newest local source mtime", () => {
+  assert.equal(snapshotNeedsRefresh(100, 101), true);
+  assert.equal(snapshotNeedsRefresh(100, 100), false);
+  assert.equal(snapshotNeedsRefresh(100, 99), false);
+});
+
+test("recent snapshots skip the automatic source freshness walk", () => {
+  const now = 1_000_000;
+  assert.equal(snapshotCacheIsFresh(now, now), true);
+  assert.equal(snapshotCacheIsFresh(now - 60 * 60 * 1000 + 1, now), true);
+  assert.equal(snapshotCacheIsFresh(now - 60 * 60 * 1000, now), false);
+  assert.equal(snapshotCacheIsFresh(now - 60 * 60 * 1000 - 1, now), false);
+  assert.equal(snapshotCacheIsFresh(now + 1, now), false);
+});
+
+test("terminal renderer produces the dashboard layout and scaled bars", () => {
   const snapshot = {
-    events,
-    threads: [{ id: base.threadId, project: base.project }],
-    quotaObservations: [{
-      timestamp: base.timestamp,
-      usedPercent: 25,
-      windowMinutes: 10_080,
-      resetsAt: Date.parse("2026-08-08T00:00:00.000Z") / 1000,
-    }],
+    events: [],
+    threads: [
+      { id: "alpha-1", project: "alpha" },
+      { id: "alpha-2", project: "alpha" },
+    ],
   };
-  const allRows = aggregateProjects(snapshot, events, { rawProjects: true });
-  const output = stripAnsi(renderTerminal({
+  const events = [
+    {
+      project: "alpha",
+      threadId: "alpha-1",
+      model: "gpt-5.6-sol",
+      inputTokens: 900,
+      cachedInputTokens: 450,
+      totalTokens: 1_000,
+      outputTokens: 100,
+      toolCalls: 1,
+      useType: "sdk",
+      rateCardCredits: 2,
+    },
+    {
+      project: "alpha",
+      threadId: "alpha-2",
+      model: "gpt-5.6-luna",
+      inputTokens: 200,
+      cachedInputTokens: 100,
+      totalTokens: 250,
+      outputTokens: 25,
+      toolCalls: 1,
+      useType: "tool",
+      rateCardCredits: 1,
+    },
+  ];
+  const rows = aggregateProjects(snapshot, events, { rawProjects: true });
+  const output = renderTerminal({
+    options: { plain: true, ascii: true, width: 80 },
+    bounds: dayBounds("2026-08-01", "Pacific/Honolulu"),
+    events,
+    rows,
+    allRows: rows,
+  });
+  assert.match(output, /TOKENS BY PROJECT/);
+  assert.match(output, /MODEL MIX/);
+  assert.match(output, /USAGE TYPE · TOKENS/);
+  assert.match(output, /SDK\s+80\.0%/);
+  assert.match(output, /Tool\s+20\.0%/);
+  assert.match(output, /CACHE · INPUT/);
+  assert.match(output, /Cached\s+50\.0%/);
+  assert.match(output, /Uncached\s+50\.0%/);
+  assert.doesNotMatch(output, /THIS WINDOW|TOP 3 SHARE|CREDIT LEADER|BUSIEST PROJECT/);
+  assert.match(output, /alpha\s+#+\s+1\.25K/);
+  assert.doesNotMatch(output, /\|#+\|/);
+  assert.match(output, /\[j\/k\] select/);
+  assert.match(output, /2 threads · 100\.0% credits/);
+  assert.doesNotMatch(output, /2 threads · 2 calls/);
+  const compactHeader = output.split("\n")[0];
+  assert.match(compactHeader, /TOKEN LEDGER · SAT 01 AUG · DAY · 1\.25K T · 2 C · 2 TH · 1 P/);
+  assert.match(output.split("\n")[1], /^\+/);
+
+  const weekOutput = renderTerminal({
+    options: { plain: true, ascii: true, width: 80, range: "week" },
+    bounds: weekBounds("2026-08-03", "Pacific/Honolulu"),
+    events,
+    rows,
+    allRows: rows,
+  });
+  assert.match(weekOutput, /JUL 28–AUG 03/);
+  assert.match(weekOutput, /7D/);
+  const weekHeader = weekOutput.split("\n")[0];
+  assert.match(weekHeader, /TOKEN LEDGER · JUL 28–AUG 03 · 7D · 1\.25K T · 2 C · 2 TH · 1 P/);
+
+  const narrowOutput = renderTerminal({
+    options: { plain: true, ascii: true, width: 64 },
+    bounds: dayBounds("2026-08-01", "Pacific/Honolulu"),
+    events,
+    rows,
+    allRows: rows,
+  });
+  assert.ok(narrowOutput.split("\n").every((line) => line.length <= 64));
+  assert.match(narrowOutput, /0\s+1\.25K/);
+});
+
+test("terminal renderer moves the selected project cursor", () => {
+  const events = [
+    {
+      project: "alpha",
+      threadId: "alpha-1",
+      model: "gpt-5.6-luna",
+      inputTokens: 100,
+      cachedInputTokens: 0,
+      totalTokens: 100,
+      outputTokens: 0,
+      useType: "sdk",
+      rateCardCredits: 1,
+    },
+    {
+      project: "beta",
+      threadId: "beta-1",
+      model: "gpt-5.6-sol",
+      inputTokens: 50,
+      cachedInputTokens: 0,
+      totalTokens: 50,
+      outputTokens: 0,
+      useType: "sdk",
+      rateCardCredits: 1,
+    },
+  ];
+  const snapshot = { events, threads: [] };
+  const rows = aggregateProjects(snapshot, events, { rawProjects: true });
+  const output = renderTerminal({
     options: {
-      range: "week",
       plain: true,
       ascii: true,
-      static: true,
-      width: 120,
+      width: 102,
+      selectedIndex: 1,
     },
     snapshot,
-    bounds,
+    bounds: dayBounds("2026-08-01", "Pacific/Honolulu"),
     events,
-    rows: allRows,
-    allRows,
-  }));
+    rows,
+    allRows: rows,
+  });
 
-  assert.equal((output.match(/Auto Review/g) ?? []).length, 2);
-  assert.match(output, /Auto Review\s+5\.71%/);
-  assert.match(output, /2 turns · 25\.0%/);
-  assert.match(output, /200 · 88\.9% cached/);
-  assert.match(output, /Subagent\s+20\.0%/);
-
-  const fullscreen = stripAnsi(renderFullscreen({
-    options: { range: "week", forceColor: false, selectedIndex: 0 },
-    snapshot,
-    bounds,
-    events,
-    rows: allRows,
-    allRows,
-    width: 100,
-    height: 30,
-  }));
-  assert.equal(fullscreen.split("\n").length, 30);
-  assert.match(fullscreen, /Auto Review/);
-  assert.match(fullscreen, /RESET CYCLE/);
-  assert.match(fullscreen, /q\/esc quit/);
+  assert.match(output, /\|  1\. alpha/);
+  assert.match(output, /\|> 2\. beta/);
 });
 
 test("quota context maps the selected range to reset-cycle burn", () => {
   const observation = {
     timestamp: "2026-08-02T00:00:00.000Z",
     usedPercent: 25,
-    windowMinutes: 10080,
-    resetsAt: Date.parse("2026-08-07T00:00:00.000Z") / 1000,
+    windowMinutes: 10_080,
+    resetsAt: Date.parse("2026-08-07T00:00:00.000Z") / 1_000,
   };
   const events = [
     { timestamp: "2026-08-01T00:00:00.000Z", totalTokens: 800 },
     { timestamp: "2026-08-01T12:00:00.000Z", totalTokens: 200 },
-    { timestamp: "2026-08-03T00:00:00.000Z", totalTokens: 1000 },
+    { timestamp: "2026-08-03T00:00:00.000Z", totalTokens: 1_000 },
   ];
-  const quota = quotaCycleSummary({ events, quotaObservations: [observation] }, [events[0]]);
+  const snapshot = { events, quotaObservations: [observation] };
+  const quota = quotaCycleSummary(snapshot, [events[0]]);
+
   assert.equal(quota.usedPercent, 25);
   assert.equal(quota.remainingPercent, 75);
-  assert.equal(quota.cycleTokens, 1000);
+  assert.equal(quota.cycleTokens, 1_000);
   assert.equal(quota.displayedTokens, 800);
+  assert.equal(quota.displayedSharePercent, 80);
   assert.equal(quota.estimatedDisplayedBurnPercent, 20);
+
+  const rows = [{
+    project: "alpha",
+    displayProject: "alpha",
+    totalTokens: 800,
+    outputTokens: 0,
+    reasoningTokens: 0,
+    toolCalls: 0,
+    events: 1,
+    threadIds: new Set(["alpha-1"]),
+    threads: 1,
+    rateCardCredits: 0,
+    knownCreditTokens: 0,
+    models: [],
+  }];
+  const output = renderTerminal({
+    options: { plain: true, ascii: true, width: 102 },
+    snapshot,
+    bounds: weekBounds("2026-08-03", "Pacific/Honolulu"),
+    events: [events[0]],
+    rows,
+    allRows: rows,
+  });
+  assert.match(output, /RESET CYCLE/);
+  assert.match(output, /Used\s+25\.0%/);
+  assert.match(output, /Remaining\s+75\.0%/);
+  assert.match(output, /View burn\s+~20\.0 pts/);
 });
 
-test("fullscreen renderer applies the terminal theme and selected row", () => {
-  const bounds = weekBounds("2026-08-05", "UTC");
-  const events = filterDayEvents(fixture, bounds);
-  const allRows = aggregateProjects(fixture, events, { rawProjects: true });
-  const output = renderFullscreen({
-    options: { range: "week", forceColor: true, selectedIndex: 2 },
-    snapshot: fixture,
+test("quota normalization is monotone inside cycles and marks resets", () => {
+  const resetOne = Date.parse("2026-08-11T10:00:00.000Z") / 1_000;
+  const observations = normalizeQuotaTimeline([
+    {
+      timestampMs: Date.parse("2026-08-09T12:00:00.000Z"),
+      resetsAt: resetOne,
+      usedPercent: 20,
+    },
+    {
+      timestampMs: Date.parse("2026-08-10T12:00:00.000Z"),
+      resetsAt: resetOne,
+      usedPercent: 30,
+    },
+    {
+      timestampMs: Date.parse("2026-08-11T12:00:00.000Z"),
+      resetsAt: resetOne,
+      usedPercent: 24,
+    },
+    {
+      timestampMs: Date.parse("2026-08-12T12:00:00.000Z"),
+      resetsAt: resetOne + 10_080 * 60,
+      usedPercent: 5,
+    },
+  ]);
+  assert.deepEqual(
+    observations.map((observation) => observation.normalizedUsedPercent),
+    [20, 30, 30, 5],
+  );
+  assert.deepEqual(
+    observations.map((observation) => observation.reset),
+    [false, false, false, true],
+  );
+  assert.deepEqual(
+    observations.map((observation) => observation.cycle),
+    [0, 0, 0, 1],
+  );
+});
+
+test("combo trend bins actual tokens and overlays an explicit reset marker", () => {
+  const bounds = multiDayBounds("2026-08-15", "Pacific/Honolulu", 7);
+  const resetOne = Date.parse("2026-08-11T10:00:00.000Z") / 1_000;
+  const snapshot = {
+    events: [
+      {
+        timestamp: "2026-08-09T12:00:00.000Z",
+        model: "gpt-5.6-luna",
+        totalTokens: 1_000,
+        inputTokens: 900,
+        outputTokens: 100,
+      },
+      {
+        timestamp: "2026-08-10T12:00:00.000Z",
+        model: "gpt-5.6-sol",
+        totalTokens: 2_000,
+        inputTokens: 1_800,
+        outputTokens: 200,
+      },
+    ],
+    quotaObservations: [
+      {
+        timestamp: "2026-08-09T12:00:00.000Z",
+        usedPercent: 20,
+        windowMinutes: 10_080,
+        resetsAt: resetOne,
+      },
+      {
+        timestamp: "2026-08-10T12:00:00.000Z",
+        usedPercent: 30,
+        windowMinutes: 10_080,
+        resetsAt: resetOne,
+      },
+      {
+        timestamp: "2026-08-12T12:00:00.000Z",
+        usedPercent: 5,
+        windowMinutes: 10_080,
+        resetsAt: resetOne + 10_080 * 60,
+      },
+    ],
+  };
+  const bins = buildActualTokenBins(snapshot, bounds, 7, 96);
+  assert.equal(bins.binSize, 1);
+  assert.equal(bins.bins[0].totalTokens, 1_000);
+  assert.equal(bins.bins[1].totalTokens, 2_000);
+  assert.equal(bins.totals.get("Luna"), 1_000);
+  assert.equal(bins.totals.get("Sol"), 2_000);
+
+  const trend = buildUsageTrend(snapshot, bounds);
+  const output = renderTrendPlain({
+    snapshot,
     bounds,
+    trend,
+    days: 7,
+    options: { width: 96 },
+  });
+  assert.match(output, /ACTUAL TOKENS \+ WEEKLY QUOTA/);
+  assert.match(output, /-% row = observed drain/);
+  assert.match(output, /LEFT AXIS/);
+  assert.match(output, /RIGHT AXIS/);
+  assert.match(output, /CALENDAR DAY · -% = OBSERVED METER DROP/);
+  assert.match(output, /■ Luna 1\.00K/);
+  assert.match(output, /■ Sol 2\.00K/);
+  assert.match(output, /-20%~/);
+  assert.match(output, /-10%/);
+  assert.match(output, /-5%/);
+  assert.doesNotMatch(output, /-0%/);
+  assert.match(output, /↟ reset marker returns the line to 100%/);
+  assert.ok(output.split("\n").every((line) => line.length <= 96));
+
+  const drainOutput = renderTrendPlain({
+    snapshot,
+    bounds,
+    trend,
+    days: 7,
+    options: { width: 96, drain: true },
+  });
+  assert.match(drainOutput, /OBSERVED LIMIT DRAIN \+ WEEKLY METER/);
+  assert.match(drainOutput, /one percent scale/);
+  assert.match(drainOutput, /■ Luna 20\.0% of limit · 1\.00K tok/);
+  assert.match(drainOutput, /■ Sol 10\.0% of limit · 2\.00K tok/);
+  assert.match(drainOutput, /■ Unattributed 5\.00% of limit/);
+  assert.match(drainOutput, /Columns sum to observed meter drops/);
+});
+
+test("image trend renderer emits stacked model bars and a quota line", () => {
+  const bounds = multiDayBounds("2026-08-15", "Pacific/Honolulu", 7);
+  const resetOne = Date.parse("2026-08-11T10:00:00.000Z") / 1_000;
+  const snapshot = {
+    events: [
+      {
+        timestamp: "2026-08-09T12:00:00.000Z",
+        model: "gpt-5.6-luna",
+        totalTokens: 1_000,
+      },
+      {
+        timestamp: "2026-08-10T12:00:00.000Z",
+        model: "gpt-5.6-sol",
+        totalTokens: 2_000,
+        serviceTier: "priority",
+      },
+      {
+        timestamp: "2026-08-11T12:00:00.000Z",
+        model: "auto-review",
+        totalTokens: 500,
+      },
+    ],
+    quotaObservations: [
+      {
+        timestamp: "2026-08-09T12:00:00.000Z",
+        usedPercent: 20,
+        windowMinutes: 10_080,
+        resetsAt: resetOne,
+      },
+      {
+        timestamp: "2026-08-10T12:00:00.000Z",
+        usedPercent: 30,
+        windowMinutes: 10_080,
+        resetsAt: resetOne,
+      },
+      {
+        timestamp: "2026-08-12T12:00:00.000Z",
+        usedPercent: 5,
+        windowMinutes: 10_080,
+        resetsAt: resetOne + 10_080 * 60,
+      },
+    ],
+  };
+  const svg = renderTrendImage({
+    snapshot,
+    bounds,
+    trend: buildUsageTrend(snapshot, bounds),
+    days: 7,
+    options: { imageWidth: 1_000 },
+  });
+  assert.match(svg, /<title[^>]*>Token Ledger · 7-day trend<\/title>/);
+  assert.match(svg, /fill="#3b82f6"/);
+  assert.match(svg, /fill="#10a394"/);
+  assert.match(svg, /ACTUAL TOKEN VOLUME/);
+  assert.match(svg, /WEEKLY METER REMAINING/);
+  assert.match(svg, /meter dropped 35\.0%/);
+  assert.match(svg, /Rate-card estimate/);
+  assert.match(svg, /stroke="#f6b73c"/);
+  assert.match(svg, /Luna/);
+  assert.match(svg, /Sol/);
+  // The fixture's second window follows a genuine weekly expiry.
+  assert.match(svg, /RESET 100%/);
+  // The all-fast Sol segment gets the darker fast-mode shade, and the Fast
+  // Mode stat card explains it.
+  assert.match(svg, /fill="#0a655c"/);
+  assert.match(svg, /Fast Mode/);
+  assert.match(svg, /1\.50× rate/);
+  assert.match(svg, /Darker segment shad/);
+  assert.match(svg, /prior 7d/);
+  assert.ok((svg.match(/<rect /g) ?? []).length >= 4);
+
+  const drainSvg = renderTrendImage({
+    snapshot,
+    bounds,
+    trend: buildUsageTrend(snapshot, bounds),
+    days: 7,
+    options: { imageWidth: 1_000, drain: true },
+  });
+  assert.match(drainSvg, /OBSERVED LIMIT DRAIN/);
+  assert.match(drainSvg, /Bars = observed li/);
+  assert.match(drainSvg, /Bars = observed meter dro/);
+});
+
+test("30-day trend bins use readable multi-day columns", () => {
+  const bounds = multiDayBounds("2026-08-15", "Pacific/Honolulu", 30);
+  const snapshot = {
+    events: [
+      {
+        timestamp: "2026-07-20T12:00:00.000Z",
+        model: "gpt-5.6-luna",
+        totalTokens: 1,
+      },
+    ],
+  };
+  const narrow = buildActualTokenBins(snapshot, bounds, 30, 96);
+  const wide = buildActualTokenBins(snapshot, bounds, 30, 120);
+  assert.equal(narrow.binSize, 3);
+  assert.equal(wide.binSize, 2);
+  assert.equal(narrow.binCount, 10);
+  assert.equal(wide.binCount, 15);
+});
+
+test("fullscreen renderer applies the Codex Blue terminal theme", () => {
+  const snapshot = { events: [] };
+  const events = [
+    {
+      project: "alpha",
+      threadId: "alpha-1",
+      model: "gpt-5.6-sol",
+      inputTokens: 800,
+      cachedInputTokens: 400,
+      totalTokens: 1_000,
+      outputTokens: 200,
+      rateCardCredits: 2,
+      useType: "sdk",
+    },
+  ];
+  const rows = aggregateProjects(snapshot, events, { rawProjects: true });
+  const output = renderFullscreen({
+    options: { range: "day", plain: false, ascii: false, forceColor: true },
+    bounds: dayBounds("2026-08-01", "Pacific/Honolulu"),
     events,
-    rows: allRows,
-    allRows,
+    rows,
+    allRows: rows,
     width: 100,
     height: 30,
   });
   assert.equal(output.split("\n").length, 30);
-  assert.match(output, /\u001b\[48;2;16;16;18m/);
-  assert.match(output, /\u001b\[48;2;5;5;6m/);
-  assert.match(stripAnsi(output), /▶ 3\./);
-  assert.match(stripAnsi(output), /└─+┴─+┘/);
-  assert.match(stripAnsi(output), /q\/esc quit/);
-  assert.doesNotMatch(output, /inspect|d\/w\/m/);
+  assert.doesNotMatch(output, /TOKEN LEDGER — USAGE/);
+  assert.doesNotMatch(output, /●/);
+  assert.match(output, /\u001b\[38;2;255;255;255m/);
+  assert.match(output, /\u001b\[38;2;51;156;255m/);
+  assert.match(output, /\u001b\[38;2;120;185;242m/);
+  assert.match(output, /\u001b\[38;2;214;168;95m/);
+  assert.match(output, /\u001b\[38;2;174;139;219m/);
+  assert.match(output, /\u001b\[38;2;116;125;144m/);
+  assert.match(output, /\u001b\[38;2;155;155;155m/);
+  assert.match(output, /\u001b\[38;2;88;88;88m/);
+  assert.match(output, /\u001b\[38;2;59;59;59m/);
+  assert.match(output, /\u001b\[48;2;30;30;30m/);
+  assert.match(output, /\u001b\[48;2;24;24;24m/);
+  assert.doesNotMatch(output, /\u001b\[(?:38|48);5;/);
 });
 
-test("fullscreen renderer budgets project and model rows without clipping controls", () => {
-  const bounds = weekBounds("2026-08-05", "UTC");
-  const events = Array.from({ length: 15 }, (_, index) => ({
-    id: `many-model-${index + 1}`,
-    timestamp: "2026-08-05T12:00:00.000Z",
-    project: `synthetic-project-${index + 1}`,
-    threadId: `synthetic-thread-${index + 1}`,
-    model: `synthetic-model-${index + 1}`,
-    useType: "interactive",
-    inputTokens: 100 - index,
-    cachedInputTokens: 80 - index,
-    outputTokens: 10,
-    totalTokens: 110 - index,
-  }));
-  const snapshot = {
-    events,
-    threads: events.map((event) => ({ id: event.threadId, project: event.project })),
-  };
-  const allRows = aggregateProjects(snapshot, events, { rawProjects: true });
-  const output = stripAnsi(renderFullscreen({
-    options: { range: "week", forceColor: false, selectedIndex: 9 },
-    snapshot,
-    bounds,
-    events,
-    rows: allRows.slice(0, 10),
-    allRows,
-    width: 120,
-    height: 24,
-  }));
-
-  assert.equal(output.split("\n").length, 24);
-  assert.match(output, /▶ 10\./);
-  assert.match(output, /… \d+ more models?/);
-  assert.match(output, /CACHE · INPUT/);
-  assert.match(output, /└─+┴─+┘/);
-  assert.match(output, /q\/esc quit/);
-});
-
-test("CLI reports the installed package version without reading usage data", () => {
-  for (const flag of ["--version", "-v"]) {
-    const result = runCli([flag], {
-      env: { HOME: resolve(tmpdir(), "missing-tledger-home") },
-    });
-    assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout, `${VERSION}\n`);
-    assert.equal(result.stderr, "");
-  }
-});
-
-test("CLI help lists the complete self-contained command surface", () => {
-  for (const flag of ["--help", "-h"]) {
-    const result = runCli([flag]);
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /tledger week \[end-day\]/);
-    assert.match(result.stdout, /tledger month \[end-day\]/);
-    assert.match(result.stdout, /tledger <number>d \[end-day\]/);
-    assert.match(result.stdout, /tledger all/);
-    for (const option of [
-      "--date",
-      "--input",
-      "--refresh",
-      "--no-refresh",
-      "--codex-home",
-      "--tz",
-      "--top",
-      "--width",
-      "--raw-projects",
-      "-anon",
-      "--no-archived",
-      "--plain",
-      "--ascii",
-      "--static",
-      "--version",
-      "--help",
-    ]) {
-      assert.match(result.stdout, new RegExp(option.replace("--", "\\-\\-")));
-    }
-  }
-});
-
-test("CLI renders explicit snapshots through week, day, plain, ASCII, top, width, and raw paths", () => {
-  const week = runCli([
-    "week",
-    "2026-08-05",
-    "--input",
-    fixturePath,
-    "--static",
-    "--plain",
-    "--raw-projects",
-    "--top",
-    "3",
-    "--width",
-    "100",
-    "--tz",
-    "UTC",
+test("epoch-keyed cycles split limit restarts and classify reset kinds", () => {
+  const epochOne = Date.parse("2026-08-10T00:00:00.000Z") / 1_000;
+  const epochTwo = Date.parse("2026-08-12T00:00:00.000Z") / 1_000;
+  const observations = normalizeQuotaTimeline([
+    {
+      timestampMs: Date.parse("2026-08-04T00:00:00.000Z"),
+      resetsAt: epochOne,
+      usedPercent: 50,
+    },
+    {
+      timestampMs: Date.parse("2026-08-04T12:00:00.000Z"),
+      resetsAt: epochOne,
+      usedPercent: 90,
+    },
+    // A fresh window starts days before the old one expires: a limit restart,
+    // not a weekly reset, and never a continuation of the old cycle.
+    {
+      timestampMs: Date.parse("2026-08-05T00:00:00.000Z"),
+      resetsAt: epochTwo,
+      usedPercent: 0,
+    },
+    {
+      timestampMs: Date.parse("2026-08-05T12:00:00.000Z"),
+      resetsAt: epochTwo,
+      usedPercent: 30,
+    },
   ]);
-  assert.equal(week.status, 0, week.stderr);
-  assert.match(week.stdout, /TOKEN LEDGER/);
-  assert.match(week.stdout, /sample-atlas/);
-  assert.match(week.stdout, /sample-beacon/);
-  assert.match(week.stdout, /sample-cascade/);
-  assert.doesNotMatch(week.stdout, /sample-drift/);
-  assert.doesNotMatch(week.stdout, /\u001b/);
-  assert.ok(week.stdout.trimEnd().split("\n").every((line) => line.length <= 100));
-
-  const anonymous = runCli([
-    "week",
-    "2026-08-05",
-    "--input",
-    fixturePath,
-    "--static",
-    "--plain",
-    "--raw-projects",
-    "-anon",
-    "--top",
-    "3",
-    "--width",
-    "100",
-    "--tz",
-    "UTC",
-  ]);
-  assert.equal(anonymous.status, 0, anonymous.stderr);
-  assert.match(anonymous.stdout, /1\. Project 1/);
-  assert.match(anonymous.stdout, /2\. Project 2/);
-  assert.match(anonymous.stdout, /3\. Project 3/);
-  assert.doesNotMatch(anonymous.stdout, /sample-(?:atlas|beacon|cascade)/);
-
-  const day = runCli([
-    "day",
-    "--date",
-    "2026-08-05",
-    "--input",
-    fixturePath,
-    "--plain",
-    "--ascii",
-    "--raw-projects",
-    "--width",
-    "80",
-    "--tz",
-    "UTC",
-  ]);
-  assert.equal(day.status, 0, day.stderr);
-  assert.match(day.stdout, /DAY/);
-  assert.match(day.stdout, /#+/);
-  assert.doesNotMatch(day.stdout, /█/);
-
-  const noColor = runCli([
-    "week",
-    "2026-08-05",
-    "--input",
-    fixturePath,
-    "--static",
-  ], { env: { NO_COLOR: "1", TZ: "UTC" } });
-  assert.equal(noColor.status, 0, noColor.stderr);
-  assert.doesNotMatch(noColor.stdout, /\u001b/);
-});
-
-test("CLI renders month, arbitrary-day, and all-time ranges", () => {
-  const cases = [
-    { args: ["1d", "2026-08-05"], header: /WED 05 AUG 2026 · 1 DAY/ },
-    { args: ["month", "2026-08-05"], header: /JUL 07–AUG 05 · 30D/ },
-    { args: ["90d", "2026-08-05"], header: /MAY 08–AUG 05 · 90D/ },
-    { args: ["all"], header: /JUL 30 – AUG 05 2026 · ALL/ },
-  ];
-  for (const { args, header } of cases) {
-    const result = runCli([
-      ...args,
-      "--input",
-      fixturePath,
-      "--static",
-      "--plain",
-      "--raw-projects",
-      "--width",
-      "100",
-      "--tz",
-      "UTC",
-    ]);
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout.split("\n")[0], header);
-  }
-});
-
-test("CLI empty state explains local scope and points to the latest activity", () => {
-  const empty = runCli([
-    "week",
-    "2026-08-12",
-    "--input",
-    fixturePath,
-    "--static",
-    "--plain",
-    "--tz",
-    "UTC",
-  ]);
-  assert.equal(empty.status, 0, empty.stderr);
-  assert.match(
-    empty.stdout,
-    /No model-call events found for 2026-08-06 through 2026-08-12 \(UTC\)\./,
+  assert.deepEqual(
+    observations.map((observation) => observation.cycle),
+    [0, 0, 1, 1],
   );
-  assert.match(empty.stdout, /reads only Codex history stored on this computer/);
-  assert.match(empty.stdout, /Latest local activity: August 5, 2026\./);
-  assert.match(empty.stdout, /Try: tledger week 2026-08-05/);
+  assert.equal(observations[2].reset, true);
+  assert.equal(observations[2].resetKind, "restart");
+  assert.deepEqual(
+    observations.map((observation) => observation.normalizedUsedPercent),
+    [50, 90, 0, 30],
+  );
 });
 
-test("CLI empty state resolves the latest date in the selected timezone", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-empty-timezone-"));
-  try {
-    const snapshot = resolve(root, "snapshot.json");
-    await writeFile(snapshot, JSON.stringify({
-      generatedAt: "2026-08-06T22:47:08.714Z",
-      events: [{ timestamp: "2026-07-29T06:33:43.754Z" }],
-    }));
-    const empty = runCli([
-      "week",
-      "2026-08-06",
-      "--input",
-      snapshot,
-      "--static",
-      "--plain",
-      "--tz",
-      "Pacific/Honolulu",
-    ]);
-    assert.equal(empty.status, 0, empty.stderr);
-    assert.match(empty.stdout, /Latest local activity: July 28, 2026\./);
-    assert.match(empty.stdout, /Try: tledger week 2026-07-28/);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
+test("stale readings from a superseded window are dropped", () => {
+  const epochOne = Date.parse("2026-08-10T00:00:00.000Z") / 1_000;
+  const epochTwo = Date.parse("2026-08-12T00:00:00.000Z") / 1_000;
+  const observations = normalizeQuotaTimeline([
+    {
+      timestampMs: Date.parse("2026-08-04T00:00:00.000Z"),
+      resetsAt: epochOne,
+      usedPercent: 50,
+    },
+    {
+      timestampMs: Date.parse("2026-08-05T00:00:00.000Z"),
+      resetsAt: epochTwo,
+      usedPercent: 5,
+    },
+    // A long-lived session still echoing the superseded window must not fold
+    // its reading into the new cycle.
+    {
+      timestampMs: Date.parse("2026-08-05T06:00:00.000Z"),
+      resetsAt: epochOne,
+      usedPercent: 95,
+    },
+    {
+      timestampMs: Date.parse("2026-08-05T12:00:00.000Z"),
+      resetsAt: epochTwo,
+      usedPercent: 20,
+    },
+  ]);
+  assert.equal(observations.length, 3);
+  assert.deepEqual(
+    observations.map((observation) => observation.normalizedUsedPercent),
+    [50, 5, 20],
+  );
 });
 
-test("CLI failure messages cover invalid input without terminal injection", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-errors-"));
-  try {
-    const missing = resolve(root, "missing.json");
-    const missingResult = runCli(["week", "--input", missing, "--static"]);
-    assert.equal(missingResult.status, 1);
-    assert.match(missingResult.stderr, /Snapshot not found/);
-
-    const malformed = resolve(root, "malformed.json");
-    await writeFile(malformed, "{not-json}\n");
-    const malformedResult = runCli(["week", "--input", malformed, "--static"]);
-    assert.equal(malformedResult.status, 1);
-    assert.match(malformedResult.stderr, /Could not read snapshot/);
-
-    const invalidShape = resolve(root, "invalid-shape.json");
-    await writeFile(invalidShape, "{}\n");
-    const shapeResult = runCli(["week", "--input", invalidShape, "--static"]);
-    assert.equal(shapeResult.status, 1);
-    assert.match(shapeResult.stderr, /missing its events array/);
-
-    const badZone = runCli(["week", "--input", fixturePath, "--tz", "Mars/Base", "--static"]);
-    assert.equal(badZone.status, 1);
-    assert.match(badZone.stderr, /Unknown IANA timezone/);
-
-    const badDate = runCli(["day", "2026-02-30", "--input", fixturePath, "--static"]);
-    assert.equal(badDate.status, 1);
-    assert.match(badDate.stderr, /Invalid calendar day/);
-
-    const unknown = runCli(["unknown"]);
-    assert.equal(unknown.status, 1);
-    assert.match(unknown.stderr, /Unknown command/);
-    assert.doesNotMatch(unknown.stderr, /\u001b/);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
+test("a transient branch window inside a live cycle is ignored", () => {
+  const epochOne = Date.parse("2026-08-10T00:00:00.000Z") / 1_000;
+  const phantom = Date.parse("2026-08-14T00:00:00.000Z") / 1_000;
+  const observations = normalizeQuotaTimeline([
+    {
+      timestampMs: Date.parse("2026-08-04T00:00:00.000Z"),
+      resetsAt: epochOne,
+      usedPercent: 20,
+    },
+    {
+      timestampMs: Date.parse("2026-08-05T00:00:00.000Z"),
+      resetsAt: phantom,
+      usedPercent: 0,
+    },
+    {
+      timestampMs: Date.parse("2026-08-06T00:00:00.000Z"),
+      resetsAt: epochOne,
+      usedPercent: 40,
+    },
+    {
+      timestampMs: Date.parse("2026-08-07T00:00:00.000Z"),
+      resetsAt: epochOne,
+      usedPercent: 60,
+    },
+  ]);
+  assert.deepEqual(
+    observations.map((observation) => observation.cycle),
+    [0, 0, 0],
+  );
+  assert.deepEqual(
+    observations.map((observation) => observation.normalizedUsedPercent),
+    [20, 40, 60],
+  );
 });
 
-test("automatic refresh is source-bound, atomic, private, and cached-only when requested", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-refresh-"));
-  try {
-    const home = resolve(root, "home");
-    const sourceOne = resolve(root, "source-one");
-    const sourceTwo = resolve(root, "source-two");
-    await mkdir(home, { recursive: true });
-    await writeSyntheticCodexHome(sourceOne, {
-      project: "synthetic-one",
-      totalTokens: 100,
-      threadId: "11111111-1111-4111-8111-111111111111",
-    });
-    await writeSyntheticCodexHome(sourceTwo, {
-      project: "synthetic-two",
-      totalTokens: 200,
-      threadId: "22222222-2222-4222-8222-222222222222",
-    });
-
-    const first = runCli([
-      "week",
-      "2026-08-05",
-      "--codex-home",
-      sourceOne,
-      "--static",
-      "--plain",
-      "--raw-projects",
-      "--tz",
-      "UTC",
-    ], { env: { HOME: home, CODEX_HOME: sourceOne } });
-    assert.equal(first.status, 0, first.stderr);
-    assert.match(first.stderr, /refreshing local snapshot/);
-    assert.match(first.stdout, /synthetic-one/);
-
-    const cache = resolve(home, ".token-ledger", "token-ledger-snapshot.json");
-    const firstSnapshot = JSON.parse(await readFile(cache, "utf8"));
-    assert.equal(firstSnapshot.coverage.observedTokens, 100);
-    assert.equal(firstSnapshot.provenance.sourceFingerprint, sourceFingerprint(sourceOne));
-    assert.equal((await stat(cache)).mode & 0o777, 0o600);
-    assert.equal((await readFile(cache, "utf8")).includes("/workspace/"), false);
-
-    await chmod(cache, 0o644);
-    const switched = runCli([
-      "week",
-      "2026-08-05",
-      "--codex-home",
-      sourceTwo,
-      "--static",
-      "--plain",
-      "--raw-projects",
-      "--tz",
-      "UTC",
-    ], { env: { HOME: home, CODEX_HOME: sourceTwo } });
-    assert.equal(switched.status, 0, switched.stderr);
-    assert.match(switched.stderr, /refreshing local snapshot/);
-    assert.match(switched.stdout, /synthetic-two/);
-    const switchedSnapshot = JSON.parse(await readFile(cache, "utf8"));
-    assert.equal(switchedSnapshot.coverage.observedTokens, 200);
-    assert.equal(switchedSnapshot.provenance.sourceFingerprint, sourceFingerprint(sourceTwo));
-    assert.equal((await stat(cache)).mode & 0o777, 0o600);
-
-    const cachedOnly = runCli([
-      "week",
-      "2026-08-05",
-      "--codex-home",
-      sourceOne,
-      "--no-refresh",
-      "--static",
-      "--plain",
-      "--raw-projects",
-      "--tz",
-      "UTC",
-    ], { env: { HOME: home, CODEX_HOME: sourceOne } });
-    assert.equal(cachedOnly.status, 0, cachedOnly.stderr);
-    assert.doesNotMatch(cachedOnly.stderr, /refreshing local snapshot/);
-    assert.match(cachedOnly.stdout, /synthetic-two/);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
+test("named limit buckets are not stitched into the account meter", () => {
+  const accountEpoch = Date.parse("2026-08-16T00:00:00.000Z") / 1_000;
+  const namedEpoch = Date.parse("2026-08-18T00:00:00.000Z") / 1_000;
+  const snapshot = {
+    quotaObservations: [
+      {
+        timestamp: "2026-08-12T00:00:00.000Z",
+        usedPercent: 10,
+        windowMinutes: 10_080,
+        resetsAt: accountEpoch,
+        limitKey: "aaa",
+      },
+      {
+        timestamp: "2026-08-12T01:00:00.000Z",
+        usedPercent: 50,
+        windowMinutes: 10_080,
+        resetsAt: namedEpoch,
+        limitKey: "bbb",
+        limitName: "GPT-5.3-Codex-Spark",
+      },
+      {
+        timestamp: "2026-08-12T02:00:00.000Z",
+        usedPercent: 20,
+        windowMinutes: 10_080,
+        resetsAt: accountEpoch,
+        limitKey: "aaa",
+      },
+    ],
+  };
+  const observations = weeklyQuotaObservations(snapshot);
+  assert.deepEqual(
+    observations.map((observation) => observation.usedPercent),
+    [10, 20],
+  );
 });
 
-test("forced refresh and archived-session exclusion are deterministic", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-archived-"));
-  try {
-    const home = resolve(root, "home");
-    const source = resolve(root, "source");
-    await mkdir(home, { recursive: true });
-    await writeSyntheticCodexHome(source, {
-      archived: true,
-      project: "synthetic-archived",
-      totalTokens: 300,
-      threadId: "33333333-3333-4333-8333-333333333333",
-    });
-    const env = { HOME: home, CODEX_HOME: source };
-    const excluded = runCli([
-      "week",
-      "2026-08-05",
-      "--refresh",
-      "--no-archived",
-      "--static",
-      "--plain",
-      "--raw-projects",
-      "--tz",
-      "UTC",
-    ], { env });
-    assert.equal(excluded.status, 0, excluded.stderr);
-    assert.match(excluded.stdout, /No model-call events found/);
-    assert.doesNotMatch(excluded.stdout, /synthetic-archived/);
+test("burn day bins place observed drops on days in meter percent units", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+  const resetsAt = Date.parse("2026-08-16T00:00:00.000Z") / 1_000;
+  const snapshot = {
+    events: [
+      {
+        // Bogus stored credits must lose to recomputation under the current
+        // rate card: 2.5M uncached Luna input = 12.5 credits.
+        timestamp: "2026-08-12T09:00:00.000Z",
+        model: "gpt-5.6-luna",
+        totalTokens: 2_500_000,
+        inputTokens: 2_500_000,
+        cachedInputTokens: 0,
+        outputTokens: 0,
+        rateCardCredits: 9_999,
+      },
+      {
+        // 100K uncached Sol input = 12.5 credits.
+        timestamp: "2026-08-12T12:00:00.000Z",
+        model: "gpt-5.6-sol",
+        totalTokens: 100_000,
+        inputTokens: 100_000,
+        cachedInputTokens: 0,
+        outputTokens: 0,
+      },
+    ],
+    quotaObservations: [
+      {
+        timestamp: "2026-08-12T06:00:00.000Z",
+        usedPercent: 0,
+        windowMinutes: 10_080,
+        resetsAt,
+      },
+      {
+        timestamp: "2026-08-12T18:00:00.000Z",
+        usedPercent: 20,
+        windowMinutes: 10_080,
+        resetsAt,
+      },
+      {
+        timestamp: "2026-08-15T00:00:00.000Z",
+        usedPercent: 40,
+        windowMinutes: 10_080,
+        resetsAt,
+      },
+    ],
+  };
+  const trend = buildUsageTrend(snapshot, bounds);
+  const burn = buildBurnDayBins(trend, bounds, { days: 7, binSize: 1 });
+  const approximately = (actual, expected) =>
+    assert.ok(
+      Math.abs(actual - expected) < 0.01,
+      `expected ${expected}, got ${actual}`,
+    );
 
-    const included = runCli([
-      "week",
-      "2026-08-05",
-      "--refresh",
-      "--static",
-      "--plain",
-      "--raw-projects",
-      "--tz",
-      "UTC",
-    ], { env });
-    assert.equal(included.status, 0, included.stderr);
-    assert.match(included.stdout, /synthetic-archived/);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
+  const day12 = burn.bins[3];
+  assert.equal(day12.startDateString, "2026-08-12");
+  approximately(day12.values.get("Luna"), 10);
+  approximately(day12.values.get("Sol"), 10);
+  // The eventless 54-hour drop is spread across its span by duration and
+  // flagged approximate: 6h on Aug 12, 24h each on Aug 13 and Aug 14.
+  approximately(day12.values.get("Unattributed"), 20 * (6 / 54));
+  approximately(burn.bins[4].values.get("Unattributed"), 20 * (24 / 54));
+  approximately(burn.bins[5].values.get("Unattributed"), 20 * (24 / 54));
+  assert.equal(burn.bins[5].approximate, true);
+  approximately(burn.totalPercent, 40);
+  approximately(burn.totals.get("Luna"), 10);
+  approximately(burn.totals.get("Sol"), 10);
+  approximately(burn.totals.get("Unattributed"), 20);
+});
+
+test("rate card prices Luna at the current published credit rates", () => {
+  const credits = creditsForUsage("gpt-5.6-luna", {
+    totalTokens: 2_000_000,
+    inputTokens: 1_000_000,
+    cachedInputTokens: 0,
+    outputTokens: 1_000_000,
+  });
+  assert.equal(credits, 35);
+});
+
+test("fast-mode turns weigh 1.5x in the burn allocation", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+  const resetsAt = Date.parse("2026-08-16T00:00:00.000Z") / 1_000;
+  const snapshot = {
+    events: [
+      {
+        // Sol and GPT-5.5 share identical rate-card prices and identical
+        // usage; only the service tier differs.
+        timestamp: "2026-08-12T09:00:00.000Z",
+        model: "gpt-5.6-sol",
+        totalTokens: 1_000_000,
+        inputTokens: 1_000_000,
+        cachedInputTokens: 0,
+        outputTokens: 0,
+        serviceTier: "priority",
+      },
+      {
+        timestamp: "2026-08-12T10:00:00.000Z",
+        model: "gpt-5.5",
+        totalTokens: 1_000_000,
+        inputTokens: 1_000_000,
+        cachedInputTokens: 0,
+        outputTokens: 0,
+      },
+    ],
+    quotaObservations: [
+      {
+        timestamp: "2026-08-12T06:00:00.000Z",
+        usedPercent: 0,
+        windowMinutes: 10_080,
+        resetsAt,
+      },
+      {
+        timestamp: "2026-08-12T18:00:00.000Z",
+        usedPercent: 25,
+        windowMinutes: 10_080,
+        resetsAt,
+      },
+    ],
+  };
+  const trend = buildUsageTrend(snapshot, bounds);
+  const burn = buildBurnDayBins(trend, bounds, { days: 7, binSize: 1 });
+  const day = burn.bins.find((bin) => bin.startDateString === "2026-08-12");
+  // 187.5 fast credits vs 125 normal credits: 25% splits 15 / 10.
+  assert.ok(Math.abs(day.values.get("Sol") - 15) < 0.01);
+  assert.ok(Math.abs(day.values.get("GPT-5.5") - 10) < 0.01);
+});
+
+test("the report command writes the dashboard image by default", () => {
+  const options = parseArgs(["report", "30d"]);
+  assert.equal(options.view, "trend");
+  assert.equal(options.report, true);
+  assert.equal(options.image, true);
+  assert.equal(options.trendDays, 30);
+  assert.equal(options.date, "today");
+
+  const withOutput = parseArgs([
+    "report",
+    "7d",
+    "--image-output",
+    "out/report.svg",
+  ]);
+  assert.equal(withOutput.imageOutput, resolve("out/report.svg"));
+
+  const drain = parseArgs(["report", "7d", "--drain"]);
+  assert.equal(drain.drain, true);
 });

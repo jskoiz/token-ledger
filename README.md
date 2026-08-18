@@ -1,115 +1,157 @@
 # Token Ledger
 
-Token Ledger is a lightweight, local-only terminal dashboard for Codex token
-usage. It ranks projects, names every active model—including Daybreak Blue—and
-shows cache and reset-cycle context without sending usage data anywhere. Codex
-Auto Review is shown separately with its token total, distinct-turn share, and
-cached-input share.
-
-Token Ledger reads Codex history stored on the computer where it runs. It does
-not sign in, fetch account-wide usage, or combine activity from other machines.
-
-![Token Ledger running with synthetic demo data](https://raw.githubusercontent.com/jskoiz/token-ledger/main/docs/token-ledger-demo.svg)
-
-_The screenshot is generated from an intentionally synthetic fixture._
-
-## Requirements
-
-Token Ledger requires Node.js 22.13 or newer and npm. Install a supported LTS
-release from [nodejs.org](https://nodejs.org/en/download) if either command is
-missing, then confirm the versions in a new terminal:
-
-```bash
-node --version
-npm --version
-```
+Token Ledger is a small, local-only terminal dashboard for Codex usage. It
+shows ranked project bars, model mix, usage type, cache coverage, and reset
+cycle context without sending your data anywhere.
 
 ## Install
 
-Token Ledger has no runtime npm dependencies and runs no installation script.
+Requires Node.js 22.13 or newer.
+
+Once published, install the CLI with:
 
 ```bash
-npm install --global tledger
-tledger --version
+npm install -g tledger
 ```
 
-## Use
+For a one-time run without a permanent global install:
 
 ```bash
-tledger                 # current seven-day window
-tledger week            # same default, stated explicitly
-tledger day             # today
-tledger day yesterday
-tledger week 2026-08-05
-tledger month           # rolling 30-day window
-tledger 90d             # rolling 90-day window
-tledger 90d 2026-08-05  # 90 days ending on a chosen day
-tledger all             # every dated event in the local snapshot
+npx tledger week
 ```
 
-`week`, `month`, and custom ranges such as `90d` are inclusive rolling
-calendar-day windows ending today unless an end day is supplied.
-
-The local timezone and top 10 projects are selected automatically. The default
-view is interactive in a terminal; use arrow keys or `j`/`k` to move and `q` or
-Escape to exit. If the selected period is empty, Token Ledger reports the most
-recent local activity date and prints the exact command for opening it.
-
-Useful options:
-
-```text
---tz <zone>          Use another IANA timezone
---top <1-100>        Change the project limit
---refresh            Force a fresh local scan
---no-refresh         Use the existing cache without a freshness check
---input <file>       Read an explicit privacy-reduced snapshot
---codex-home <dir>   Read another Codex data directory
---no-archived        Skip archived sessions during collection
---raw-projects       Keep singleton project labels separate
--anon                Show Project 1, Project 2, etc. instead of project names
---static             Print once instead of opening the interactive view
---plain              Print once without ANSI color
---ascii              Use ASCII bars
---width <40-200>     Set the static layout width
---date <day>         Set today, yesterday, or YYYY-MM-DD
--v, --version        Show the installed version
---help               Show complete CLI help
-```
-
-## Update or uninstall
+Until the package is published, install it from this repository:
 
 ```bash
-npm install --global tledger@latest
-tledger --version
-npm uninstall --global tledger
+git clone <repository-url>
+cd token-ledger
+npm install -g .
 ```
 
-Uninstalling the npm package leaves the privacy-reduced cache at
-`~/.token-ledger/token-ledger-snapshot.json`. Remove that directory separately
-only when you also want the next installation to perform a completely fresh
-scan.
+The published package has no runtime npm dependencies. It uses Node's built-in
+SQLite support and reads Codex data directly from the local machine.
+
+## Run
+
+The shortest useful command is:
+
+```bash
+tledger week
+```
+
+It defaults to today's seven-day window, the computer's local timezone, the
+top 10 projects, and the local Codex data directory. The default terminal view
+is interactive; press `q` or `esc` to exit.
+
+Other common views:
+
+```bash
+tledger day 2026-08-05
+tledger week --top 5
+tledger week --static
+tledger trend 7d --static
+tledger trend 7d --image --image-output artifacts/token-ledger-trend-7d.svg
+tledger report 7d
+```
+
+`tledger report [7d|14d|30d]` is the one-step report output: it writes the
+dashboard SVG (identical to `trend --image`) to
+`token-ledger-report-<period>.svg` in the current directory. It accepts the
+same flags as the trend view (`--drain`, `--date`, `--tz`, `--image-output`,
+`--image-width`).
+
+The terminal trend view is a compact approximation of the image view. For the
+full chart grammar, use `--image`: it writes an SVG with two aligned panels
+sharing one time axis — the observed weekly meter as a line on its own 0–100%
+panel on top, and calendar-day columns of local token volume stacked by model
+below, each annotated with the observed drop ("−18.1%" means the meter fell
+18.1 points across that column's days). The drain numbers come straight from
+the meter — no pricing model involved — so token volume and actual limit
+consumption can be compared per day at a glance.
+
+Turns run in fast mode (service tier "priority") are drawn as a darker shade
+at the top of their model's segment, with each model's fast share in the
+legend; fast-mode turns are weighted 1.5× in the credit estimate because they
+debit the plan limit at a higher rate.
+
+Pass `--drain` to flip the columns into limit-drain units instead: each column
+becomes the weekly limit percentage the meter dropped, stacked by model using
+rate-card credit weights (an estimate — the official card is the best
+available proxy for per-model debit, but subscription limits are not billed
+per token), on the same percent scale as the meter line.
+
+Meter windows are keyed by their server-reported reset timestamp, so a fresh
+window that starts days early (a provider-initiated limit restart) is drawn as
+its own cycle and labeled `restart`, while a true weekly expiry is labeled
+`reset`.
+Stale readings from sessions still reporting a superseded window are dropped
+instead of being fused into the line as phantom drain. Drops observed after a
+sparse meter gap (over 36 hours) are spread across the covered days and marked
+with `≈`. When a range has no usable meter drain, columns fall back to raw
+local token counts and the chart says so.
+
+`--image` defaults to `token-ledger-trend-7d.svg` in the current directory.
+Use `--image-output <file.svg>` to choose the path and `--image-width <px>` to
+choose a width from 900 to 2400 pixels.
+
+Use `trend 14d` for daily columns across two weeks. At 30 days, the terminal
+uses readable multi-day bins: three-day bins at ordinary widths and two-day
+bins on wider terminals. The image view uses the same readable multi-day
+binning at 30 days. The image also reports the separate local rate-card credit
+estimate when token breakdowns are available; that estimate is an absolute
+credit count and never rescales the observed-drain columns.
+
+The CLI automatically checks the local Codex source files before rendering. If
+they are newer than the local cache, it rebuilds the privacy-reduced snapshot.
+The first refresh may scan historical rollout files; later runs use the cache
+for one hour before checking source freshness again. Use `--refresh` when you
+need to force an immediate rebuild.
+
+Useful overrides:
+
+```bash
+# Use another timezone instead of the computer's local timezone
+tledger week --tz America/New_York
+
+# Force a complete local refresh
+tledger week --refresh
+
+# Skip the freshness check and use the existing cache
+tledger week --no-refresh
+
+# Read a specific privacy-reduced snapshot
+tledger week --input /path/to/token-ledger-snapshot.json
+```
+
+`--static` prints once for pipes, logs, or terminals without interactive input.
+`--plain` or `NO_COLOR=1` disables ANSI color. `--youplot` is an optional
+legacy renderer and is not required for the default dashboard.
 
 ## Local data and privacy
 
-By default, Token Ledger reads `CODEX_HOME` or `~/.codex` and keeps a
-privacy-reduced cache at `~/.token-ledger/token-ledger-snapshot.json`. It checks
-source freshness automatically. Fresh scans use a bounded pool of up to four
-workers; unchanged runs read the existing cache. Token Ledger makes no network
-requests and excludes
-message bodies, reasoning text, tool payloads, credentials, and full local
-paths from the cache. Project labels can still reveal local context, so keep
-snapshots private unless you have reviewed them. Use `-anon` to hide project
-names in terminal output; it does not rewrite the cached snapshot. Reset-cycle
-burn is an estimate, not official quota or billing data.
+The CLI reads from `CODEX_HOME` when set, otherwise `~/.codex`. It uses local
+Codex rollout JSONL files, the session index, and local state metadata. It
+writes its privacy-reduced cache to:
 
-## Develop
+```text
+~/.token-ledger/token-ledger-snapshot.json
+```
+
+The collector does not export message bodies, reasoning text, tool arguments or
+results, credentials, file contents, or full local paths. Display titles may
+contain user-written text. The CLI makes no network requests.
+
+## Keyboard controls
+
+In the interactive dashboard:
+
+- `↑` / `↓` or `j` / `k` moves between projects.
+- `q` or `esc` exits.
+
+## Verify from source
 
 ```bash
 npm test
-npm run demo
-npm run verify:release
+npm run lint
+npm pack --dry-run
 ```
-
-## License
-
-[MIT](LICENSE)

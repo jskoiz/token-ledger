@@ -12,6 +12,7 @@ function actionFor(input) {
   if (value.includes("\u001b[A") || value === "k") return "up";
   if (value.includes("\u001b[B") || value === "j") return "down";
   if (value === "q" || value === "Q" || value === "\u0003" || value === "\u001b") return "quit";
+  if (value === "\r" || value === "\n") return "inspect";
   return null;
 }
 
@@ -28,23 +29,19 @@ export function startInteractive(view) {
     let closed = false;
 
     const draw = () => {
-      try {
-        const width = Math.max(40, options.width || stdout.columns || 120);
-        const height = Math.max(12, stdout.rows || 32);
-        const screen = renderFullscreen({
-          options: { ...options, forceColor: true, selectedIndex },
-          snapshot,
-          bounds,
-          events,
-          rows,
-          allRows,
-          width,
-          height,
-        });
-        stdout.write(`${SCREEN_BASE}${CLEAR_SCREEN}${screen}`);
-      } catch (error) {
-        finish(error);
-      }
+      const width = Math.max(40, stdout.columns || 120);
+      const height = Math.max(12, stdout.rows || 32);
+      const screen = renderFullscreen({
+        options: { ...options, forceColor: true, selectedIndex },
+        snapshot,
+        bounds,
+        events,
+        rows,
+        allRows,
+        width,
+        height,
+      });
+      stdout.write(`${SCREEN_BASE}${CLEAR_SCREEN}${screen}`);
     };
 
     const finish = (error = null) => {
@@ -53,8 +50,6 @@ export function startInteractive(view) {
       stdin.off("data", onData);
       stdout.off("resize", draw);
       process.off("SIGINT", onSignal);
-      process.off("SIGTERM", onSignal);
-      process.off("SIGHUP", onSignal);
       if (stdin.isTTY) stdin.setRawMode(false);
       stdin.pause();
       stdout.write(`${RESET}${SHOW_CURSOR}${EXIT_ALT_SCREEN}`);
@@ -79,6 +74,7 @@ export function startInteractive(view) {
         draw();
         return;
       }
+      if (action === "inspect") draw();
     };
 
     stdin.setRawMode(true);
@@ -87,8 +83,6 @@ export function startInteractive(view) {
     stdin.on("data", onData);
     stdout.on("resize", draw);
     process.once("SIGINT", onSignal);
-    process.once("SIGTERM", onSignal);
-    process.once("SIGHUP", onSignal);
     stdout.write(`${ENTER_ALT_SCREEN}${SCREEN_BASE}${HIDE_CURSOR}${CLEAR_SCREEN}`);
     draw();
   });
