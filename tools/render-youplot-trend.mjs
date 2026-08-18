@@ -37,7 +37,7 @@ const trend = buildUsageTrend(snapshot, bounds);
 const { bins } = buildActualTokenBins(snapshot, bounds, 7, width);
 
 function runYouPlot(command, inputText, args) {
-  const result = spawnSync("youplot", [
+  const result = spawnSync("uplot", [
     command,
     "-H",
     "-o",
