@@ -1,3 +1,7 @@
+import { Buffer } from "node:buffer";
+
+import sharp from "sharp";
+
 import { buildBurnDayBins, buildUsageTrend } from "./token-ledger-trend.mjs";
 import { creditsForUsage } from "./token-ledger-rates.mjs";
 import { buildActualTokenBins } from "./token-ledger-trend-terminal.mjs";
@@ -934,4 +938,8 @@ export function renderTrendImage({
 
   elements.push("</svg>");
   return elements.join("\n");
+}
+
+export async function writeTrendPng(svg, outputPath) {
+  await sharp(Buffer.from(svg, "utf8")).png().toFile(outputPath);
 }

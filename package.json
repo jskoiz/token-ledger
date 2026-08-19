@@ -45,5 +45,8 @@
   "devDependencies": {
     "eslint": "9.39.4"
   },
-  "type": "module"
+  "type": "module",
+  "dependencies": {
+    "sharp": "^0.35.3"
+  }
 }
