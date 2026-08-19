@@ -28,8 +28,8 @@ cd token-ledger
 npm install -g .
 ```
 
-The published package has no runtime npm dependencies. It uses Node's built-in
-SQLite support and reads Codex data directly from the local machine.
+The package uses a small runtime image encoder for PNG report output, Node's
+built-in SQLite support, and reads Codex data directly from the local machine.
 
 ## Run
 
@@ -50,18 +50,18 @@ tledger day 2026-08-05
 tledger week --top 5
 tledger week --static
 tledger trend 7d --static
-tledger trend 7d --image --image-output artifacts/token-ledger-trend-7d.svg
+tledger trend 7d --image --image-output artifacts/token-ledger-trend-7d.png
 tledger report 7d
 ```
 
 `tledger report [7d|14d|30d]` is the one-step report output: it writes the
-dashboard SVG (identical to `trend --image`) to
-`token-ledger-report-<period>.svg` in the current directory. It accepts the
+dashboard PNG (identical to `trend --image`) to
+`token-ledger-report-<period>.png` in the current directory. It accepts the
 same flags as the trend view (`--drain`, `--date`, `--tz`, `--image-output`,
-`--image-width`).
+`--image-width`) and prints progress while rendering and encoding the image.
 
 The terminal trend view is a compact approximation of the image view. For the
-full chart grammar, use `--image`: it writes an SVG with two aligned panels
+full chart grammar, use `--image`: it writes a PNG with two aligned panels
 sharing one time axis — the observed weekly meter as a line on its own 0–100%
 panel on top, and calendar-day columns of local token volume stacked by model
 below, each annotated with the observed drop ("−18.1%" means the meter fell
@@ -90,8 +90,8 @@ sparse meter gap (over 36 hours) are spread across the covered days and marked
 with `≈`. When a range has no usable meter drain, columns fall back to raw
 local token counts and the chart says so.
 
-`--image` defaults to `token-ledger-trend-7d.svg` in the current directory.
-Use `--image-output <file.svg>` to choose the path and `--image-width <px>` to
+`--image` defaults to `token-ledger-trend-7d.png` in the current directory.
+Use `--image-output <file.png>` to choose the path and `--image-width <px>` to
 choose a width from 900 to 2400 pixels.
 
 Use `trend 14d` for daily columns across two weeks. At 30 days, the terminal

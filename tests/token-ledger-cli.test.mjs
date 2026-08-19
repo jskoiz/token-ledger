@@ -1,6 +1,7 @@
 import test from "node:test";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import assert from "node:assert/strict";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { resolve } from "node:path";
 
 import {
@@ -8,6 +9,7 @@ import {
   dayBounds,
   filterDayEvents,
   parseArgs,
+  run,
   sanitizeTerminalText,
   DEFAULT_SNAPSHOT,
   snapshotCacheIsFresh,
@@ -27,7 +29,10 @@ import {
   weeklyQuotaObservations,
 } from "../bin/token-ledger-trend.mjs";
 import { creditsForUsage } from "../bin/token-ledger-rates.mjs";
-import { renderTrendImage } from "../bin/token-ledger-trend-image.mjs";
+import {
+  renderTrendImage,
+  writeTrendPng,
+} from "../bin/token-ledger-trend-image.mjs";
 import {
   buildActualTokenBins,
   renderTrendPlain,
@@ -179,20 +184,20 @@ test("parseArgs supports the 7d, 14d, and 30d trend windows", () => {
     "7d",
     "--image",
     "--image-output",
-    "artifacts/trend.svg",
+    "artifacts/trend.png",
     "--image-width",
     "1400",
   ]);
   assert.equal(image.image, true);
-  assert.equal(image.imageOutput, resolve("artifacts/trend.svg"));
+  assert.equal(image.imageOutput, resolve("artifacts/trend.png"));
   assert.equal(image.imageWidth, 1400);
   assert.throws(
     () => parseArgs(["day", "2026-08-15", "--image"]),
     /only available for the trend view/,
   );
   assert.throws(
-    () => parseArgs(["trend", "7d", "--image-output", "trend.png"]),
-    /must end in .svg/,
+    () => parseArgs(["trend", "7d", "--image-output", "trend.svg"]),
+    /must end in .png/,
   );
 });
 
@@ -622,6 +627,81 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
   assert.match(drainSvg, /Bars = observed meter dro/);
 });
 
+test("PNG image output has a real PNG signature", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-png-"));
+  try {
+    const output = resolve(root, "report.png");
+    await writeTrendPng(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="16"><rect width="32" height="16" fill="#10a394"/></svg>',
+      output,
+    );
+    const bytes = await readFile(output);
+    assert.deepEqual(
+      [...bytes.subarray(0, 8)],
+      [137, 80, 78, 71, 13, 10, 26, 10],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("report emits progress while generating the PNG", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-report-"));
+  const snapshotPath = resolve(root, "snapshot.json");
+  const outputPath = resolve(root, "report.png");
+  const originalWrite = process.stderr.write;
+  const stderr = [];
+  try {
+    await writeFile(
+      snapshotPath,
+      `${JSON.stringify({
+        generatedAt: "2026-08-15T12:00:00.000Z",
+        events: [
+          {
+            timestamp: "2026-08-15T12:00:00.000Z",
+            model: "gpt-5.5",
+            totalTokens: 1_000,
+            inputTokens: 900,
+            cachedInputTokens: 0,
+            outputTokens: 100,
+            reasoningTokens: 0,
+            serviceTier: null,
+            rateCardCredits: 0.2,
+          },
+        ],
+        threads: [],
+        quotaObservations: [],
+      })}\n`,
+    );
+    process.stderr.write = (chunk) => {
+      stderr.push(String(chunk));
+      return true;
+    };
+    const result = await run(parseArgs([
+      "report",
+      "7d",
+      "--date",
+      "2026-08-15",
+      "--input",
+      snapshotPath,
+      "--image-output",
+      outputPath,
+    ]));
+    assert.match(result, /Wrote report:/);
+    assert.deepEqual(
+      [...(await readFile(outputPath)).subarray(0, 8)],
+      [137, 80, 78, 71, 13, 10, 26, 10],
+    );
+    const progress = stderr.join("");
+    assert.match(progress, /generating report PNG/);
+    assert.match(progress, /encoding report PNG/);
+    assert.match(progress, /finished report PNG/);
+  } finally {
+    process.stderr.write = originalWrite;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("30-day trend bins use readable multi-day columns", () => {
   const bounds = multiDayBounds("2026-08-15", "Pacific/Honolulu", 30);
   const snapshot = {
@@ -968,9 +1048,9 @@ test("the report command writes the dashboard image by default", () => {
     "report",
     "7d",
     "--image-output",
-    "out/report.svg",
+    "out/report.png",
   ]);
-  assert.equal(withOutput.imageOutput, resolve("out/report.svg"));
+  assert.equal(withOutput.imageOutput, resolve("out/report.png"));
 
   const drain = parseArgs(["report", "7d", "--drain"]);
   assert.equal(drain.drain, true);

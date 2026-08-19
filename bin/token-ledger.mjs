@@ -6,7 +6,6 @@ import {
   mkdir,
   readFile,
   stat,
-  writeFile,
 } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, resolve } from "node:path";
@@ -17,7 +16,10 @@ import {
   renderTerminal,
 } from "./token-ledger-terminal.mjs";
 import { buildUsageTrend, multiDayBounds } from "./token-ledger-trend.mjs";
-import { renderTrendImage } from "./token-ledger-trend-image.mjs";
+import {
+  renderTrendImage,
+  writeTrendPng,
+} from "./token-ledger-trend-image.mjs";
 import { renderTrendCombo } from "./token-ledger-trend-terminal.mjs";
 import { startInteractive } from "./token-ledger-tui.mjs";
 
@@ -66,14 +68,14 @@ Options:
   --ascii              Use ASCII bars instead of Unicode blocks
   --static             Print once instead of opening the interactive dashboard
   --drain               Trend columns show observed limit drain percent instead of token volume
-  --image               Write trend view as an SVG image
-  --image-output <file> SVG output path for trend view
-  --image-width <px>   SVG image width from 900 to 2400 pixels
+  --image               Write trend view as a PNG image
+  --image-output <file> PNG output path for trend view
+  --image-width <px>   PNG image width from 900 to 2400 pixels
   --youplot            Use the legacy single-series YouPlot renderer
   --help               Show this help
 
-The report command writes the dashboard SVG (same as trend --image) to
-token-ledger-report-<period>.svg; use --image-output to choose the path.
+The report command writes the dashboard PNG (same as trend --image) to
+token-ledger-report-<period>.png; use --image-output to choose the path.
 
 The command reads a privacy-reduced Token Ledger snapshot. It never uploads
 the snapshot or prints message bodies, tool payloads, credentials, or paths.`;
@@ -196,8 +198,8 @@ export function parseArgs(argv) {
         throw new Error("--image-output is only available for the trend view.");
       }
       const value = readOption(argv, index, "--image-output");
-      if (!value.toLowerCase().endsWith(".svg")) {
-        throw new Error("--image-output must end in .svg.");
+      if (!value.toLowerCase().endsWith(".png")) {
+        throw new Error("--image-output must end in .png.");
       }
       options.image = true;
       options.imageOutput = resolve(value);
@@ -791,15 +793,24 @@ export async function run(options) {
   }
   const allRows = aggregateProjects(snapshot, events, options);
   const rows = allRows.slice(0, options.top);
-  const output = render(options, snapshot, bounds, events, rows, allRows);
-  if (options.view === "trend" && options.image) {
-    const outputPath = options.imageOutput ??
+  const writingImage = options.view === "trend" && options.image;
+  const outputPath = writingImage
+    ? options.imageOutput ??
       resolve(
         process.cwd(),
-        `token-ledger-${options.report ? "report" : "trend"}-${options.trendDays}d.svg`,
-      );
+        `token-ledger-${options.report ? "report" : "trend"}-${options.trendDays}d.png`,
+      )
+    : null;
+  const imageLabel = options.report ? "report" : "trend image";
+  if (writingImage) {
+    process.stderr.write(`Token Ledger: generating ${imageLabel} PNG…\n`);
+  }
+  const output = render(options, snapshot, bounds, events, rows, allRows);
+  if (writingImage) {
     await mkdir(dirname(outputPath), { recursive: true });
-    await writeFile(outputPath, output, "utf8");
+    process.stderr.write(`Token Ledger: encoding ${imageLabel} PNG…\n`);
+    await writeTrendPng(output, outputPath);
+    process.stderr.write(`Token Ledger: finished ${imageLabel} PNG.\n`);
     return [
       `Wrote ${options.report ? "report" : "trend image"}: ${outputPath}`,
       `Range: ${bounds.startDateString} through ${bounds.endDateString} (${bounds.timeZone})`,
