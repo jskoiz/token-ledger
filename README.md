@@ -46,6 +46,8 @@ is interactive; press `q` or `esc` to exit.
 Other common views:
 
 ```bash
+tledger 1d
+tledger 1d --static
 tledger day 2026-08-05
 tledger week --top 5
 tledger week --static
@@ -53,6 +55,10 @@ tledger trend 7d --static
 tledger trend 7d --image --image-output artifacts/token-ledger-trend-7d.png
 tledger report 7d
 ```
+
+`tledger 1d` shows the `TOKENS BY PROJECT` breakdown for the rolling 24 hours
+ending when the command starts. It is different from `tledger day today`, which
+covers the current calendar day from local midnight.
 
 `tledger report [7d|14d|30d]` is the one-step report output: it writes the
 dashboard PNG (identical to `trend --image`) to
