@@ -713,6 +713,32 @@ export function snapshotCacheIsFresh(
   );
 }
 
+function snapshotAgeLabel(ageMs) {
+  if (ageMs < 60 * 1_000) return "now";
+  const minutes = Math.floor(ageMs / (60 * 1_000));
+  if (minutes < 60) return `${minutes}m old`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h old`;
+  return `${Math.floor(hours / 24)}d old`;
+}
+
+export function snapshotFreshness(snapshot = {}, nowMs = Date.now()) {
+  const generatedAtMs = typeof snapshot.generatedAt === "string"
+    ? Date.parse(snapshot.generatedAt)
+    : NaN;
+  if (
+    !Number.isFinite(generatedAtMs) ||
+    !Number.isFinite(nowMs) ||
+    generatedAtMs > nowMs
+  ) {
+    return { status: "unknown", ageLabel: "age unknown" };
+  }
+  return {
+    status: snapshotCacheIsFresh(generatedAtMs, nowMs) ? "fresh" : "stale",
+    ageLabel: snapshotAgeLabel(nowMs - generatedAtMs),
+  };
+}
+
 async function loadSnapshot(options) {
   if (options.refresh) {
     return refreshSnapshot(options);
@@ -743,7 +769,7 @@ async function loadSnapshot(options) {
   return readSnapshot(options.input);
 }
 
-function render(options, snapshot, bounds, events, rows, allRows) {
+function render(options, snapshot, bounds, events, rows, allRows, freshness) {
   if (options.view === "trend") {
     const trend = buildUsageTrend(snapshot, bounds);
     if (options.image) {
@@ -764,7 +790,15 @@ function render(options, snapshot, bounds, events, rows, allRows) {
     });
   }
   if (!options.legacyPlot) {
-    return renderTerminal({ options, snapshot, bounds, events, rows, allRows });
+    return renderTerminal({
+      options,
+      snapshot,
+      snapshotFreshness: freshness,
+      bounds,
+      events,
+      rows,
+      allRows,
+    });
   }
   const enabled = !options.plain && !process.env.NO_COLOR && Boolean(process.stdout.isTTY);
   const summary = totalSummary(events);
@@ -852,7 +886,15 @@ export async function run(options) {
   if (writingImage) {
     process.stderr.write(`Token Ledger: generating ${imageLabel} PNG…\n`);
   }
-  const output = render(options, snapshot, bounds, events, rows, allRows);
+  const output = render(
+    options,
+    snapshot,
+    bounds,
+    events,
+    rows,
+    allRows,
+    snapshotFreshness(snapshot),
+  );
   if (writingImage) {
     await mkdir(dirname(outputPath), { recursive: true });
     process.stderr.write(`Token Ledger: encoding ${imageLabel} PNG…\n`);
@@ -894,6 +936,7 @@ async function runInteractive(options) {
   await startInteractive({
     options,
     snapshot,
+    snapshotFreshness: snapshotFreshness(snapshot),
     bounds,
     events,
     rows: allRows.slice(0, options.top),

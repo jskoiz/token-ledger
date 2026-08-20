@@ -497,7 +497,14 @@ function panel(leftLines, rightLines, leftWidth, rightWidth, enabled, ascii) {
   return [top, ...body, bottom];
 }
 
-function headerLines(stats, bounds, frameWidth, options, enabled) {
+function snapshotLine(freshness, enabled) {
+  const detail = freshness?.status === "fresh" || freshness?.status === "stale"
+    ? `${freshness.status} · ${freshness.ageLabel}`
+    : "age unknown";
+  return `${colorize("SNAPSHOT", ACCENT_STYLE, enabled)} ${colorize("·", SECONDARY_STYLE, enabled)} ${colorize(detail, SECONDARY_STYLE, enabled)}`;
+}
+
+function headerLines(stats, bounds, frameWidth, options, enabled, freshness) {
   const left = colorize("TOKEN LEDGER", TITLE_STYLE, enabled);
   const date = colorize(dateLabel(bounds, options.range), TEXT_STYLE, enabled);
   const modeLabel = options.range === "rolling24h"
@@ -521,7 +528,9 @@ function headerLines(stats, bounds, frameWidth, options, enabled) {
     metric(stats.projectCount.toLocaleString("en-US"), "PROJECTS"),
   ].join(join);
   if (visibleLength(fullLine) < frameWidth) {
-    return [alignHeader(fullLine)];
+    const lines = [alignHeader(fullLine)];
+    if (options.range === "rolling24h") lines.push(alignHeader(snapshotLine(freshness, enabled)));
+    return lines;
   }
 
   const compactDate = dateLabel(bounds, options.range)
@@ -542,7 +551,9 @@ function headerLines(stats, bounds, frameWidth, options, enabled) {
     metric(stats.projectCount.toLocaleString("en-US"), "P"),
   ].join(join);
   if (visibleLength(compactLine) < frameWidth) {
-    return [alignHeader(compactLine)];
+    const lines = [alignHeader(compactLine)];
+    if (options.range === "rolling24h") lines.push(alignHeader(snapshotLine(freshness, enabled)));
+    return lines;
   }
 
   const minimalTitle = colorize(frameWidth >= 45 ? "LEDGER" : "L", TITLE_STYLE, enabled);
@@ -555,10 +566,20 @@ function headerLines(stats, bounds, frameWidth, options, enabled) {
     compact(stats.threads),
     compact(stats.projectCount),
   ].join(" ");
-  return [alignHeader(minimalLine)];
+  const lines = [alignHeader(minimalLine)];
+  if (options.range === "rolling24h") lines.push(alignHeader(snapshotLine(freshness, enabled)));
+  return lines;
 }
 
-export function renderTerminal({ options, snapshot, bounds, events, rows, allRows }) {
+export function renderTerminal({
+  options,
+  snapshot,
+  snapshotFreshness,
+  bounds,
+  events,
+  rows,
+  allRows,
+}) {
   const enabled = colorsEnabled(options);
   const stats = summary(events);
   const quota = quotaCycleSummary(snapshot, events);
@@ -571,7 +592,7 @@ export function renderTerminal({ options, snapshot, bounds, events, rows, allRow
   const left = panelLines(rows, allRows, stats.totalTokens, leftWidth, options, enabled);
   const right = sideBySide ? sidebarLines(stats, sideWidth, enabled, options, quota) : null;
   const lines = [
-    ...headerLines(stats, bounds, frameWidth, options, enabled),
+    ...headerLines(stats, bounds, frameWidth, options, enabled, snapshotFreshness),
     ...panel(left, right, leftWidth, sideWidth, enabled, options.ascii),
   ];
   if (!sideBySide) {
@@ -601,7 +622,17 @@ function paintFullscreenLine(line, width, background, enabled) {
   return `${background}${restored}${RESET}`;
 }
 
-export function renderFullscreen({ options, snapshot, bounds, events, rows, allRows, width, height }) {
+export function renderFullscreen({
+  options,
+  snapshot,
+  snapshotFreshness,
+  bounds,
+  events,
+  rows,
+  allRows,
+  width,
+  height,
+}) {
   const enabled = options.forceColor ?? colorsEnabled(options);
   const columns = Math.max(40, Number(width) || Number(process.stdout.columns) || 120);
   const screenHeight = Math.max(1, Number(height) || Number(process.stdout.rows) || 32);
@@ -616,6 +647,7 @@ export function renderFullscreen({ options, snapshot, bounds, events, rows, allR
       width: frameWidth + 2,
     },
     snapshot,
+    snapshotFreshness,
     bounds,
     events,
     rows,
