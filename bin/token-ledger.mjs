@@ -841,7 +841,7 @@ function render(options, snapshot, bounds, events, rows, allRows, freshness) {
   return `${header.join("\n")}\n\n${details.join("\n")}`;
 }
 
-function boundsForOptions(options) {
+function boundsForOptions(options, now = new Date()) {
   if (options.view === "trend") {
     return multiDayBounds(options.date, options.timeZone, options.trendDays);
   }
@@ -849,7 +849,7 @@ function boundsForOptions(options) {
     return weekBounds(options.date, options.timeZone);
   }
   if (options.range === "rolling24h") {
-    return rolling24hBounds(new Date(), options.timeZone);
+    return rolling24hBounds(now, options.timeZone);
   }
   return dayBounds(options.date, options.timeZone);
 }
@@ -862,8 +862,9 @@ function rangeDescription(options, bounds) {
   return bounds.dateString;
 }
 
-export async function run(options) {
-  const bounds = boundsForOptions(options);
+export async function run(options, { nowMs = Date.now() } = {}) {
+  const now = new Date(nowMs);
+  const bounds = boundsForOptions(options, now);
   const snapshot = await loadSnapshot(options);
   const events = filterDayEvents(snapshot, bounds);
   if (events.length === 0) {
@@ -893,7 +894,7 @@ export async function run(options) {
     events,
     rows,
     allRows,
-    snapshotFreshness(snapshot),
+    snapshotFreshness(snapshot, now.getTime()),
   );
   if (writingImage) {
     await mkdir(dirname(outputPath), { recursive: true });
