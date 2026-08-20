@@ -28,4 +28,5 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run lint
-      - run: npm pack --dry-run
+      - run: npm run verify:release
+      - run: npm pack --dry-run --json
