@@ -151,7 +151,10 @@ writes its privacy-reduced cache to:
 
 The collector does not export message bodies, reasoning text, tool arguments or
 results, credentials, file contents, or full local paths. Display titles may
-contain user-written text. The CLI makes no network requests.
+contain user-written text. CLI errors and empty-state source labels show only a
+safe filename label, not an absolute input or source path. When a PNG or report
+is written, the explicit output path is reported so you can find the file. The
+CLI makes no network requests.
 
 ## Keyboard controls
 

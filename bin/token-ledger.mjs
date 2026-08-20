@@ -80,7 +80,8 @@ The report command writes the dashboard PNG (same as trend --image) to
 token-ledger-report-<period>.png; use --image-output to choose the path.
 
 The command reads a privacy-reduced Token Ledger snapshot. It never uploads
-the snapshot or prints message bodies, tool payloads, credentials, or paths.`;
+the snapshot or prints message bodies, tool payloads, credentials, or local
+input/source paths. Explicit PNG output paths are reported after writing.`;
 }
 
 function readOption(argv, index, name) {
@@ -409,6 +410,54 @@ function cleanLabel(value, fallback) {
   return label || fallback;
 }
 
+const QUOTED_ABSOLUTE_PATH =
+  /(["'])(\/(?!\/)[^"'\r\n]*|[A-Za-z]:[\\/][^"'\r\n]*)\1/g;
+const UNQUOTED_ABSOLUTE_PATH =
+  /(^|[\s([{=:])((?:\/(?!\/)|[A-Za-z]:[\\/])[^\s"'`)\]},;]+)/g;
+
+export function safeDisplayLabel(value, fallback = "local path") {
+  const normalized = String(value ?? "").replaceAll("\\", "/");
+  const label = sanitizeTerminalText(basename(normalized))
+    .replace(/\s+/g, " ")
+    .trim();
+  return label && label !== "." && label !== ".." ? label : fallback;
+}
+
+export function redactLocalPaths(value, paths = []) {
+  let redacted = String(value ?? "");
+  const explicitPaths = new Set(
+    paths
+      .filter(Boolean)
+      .map((path) => String(path))
+      .filter((path) => path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path)),
+  );
+  const pathsToRedact = [...new Set([
+    ...explicitPaths,
+    homedir(),
+    process.cwd(),
+  ])]
+    .filter((path) => path && path !== "/")
+    .sort((left, right) => right.length - left.length);
+
+  for (const path of pathsToRedact) {
+    redacted = redacted.replaceAll(
+      path,
+      explicitPaths.has(path) ? safeDisplayLabel(path) : "[local path]",
+    );
+  }
+
+  return redacted
+    .replace(QUOTED_ABSOLUTE_PATH, (_match, quote) => `${quote}[local path]${quote}`)
+    .replace(UNQUOTED_ABSOLUTE_PATH, (_match, prefix) => `${prefix}[local path]`);
+}
+
+function safeErrorMessage(error, paths = []) {
+  return redactLocalPaths(
+    error instanceof Error ? error.message : String(error),
+    paths,
+  );
+}
+
 function displayLabel(value) {
   const label = cleanLabel(value, "Unlabelled activity");
   if (label.length <= 30) return label;
@@ -613,7 +662,7 @@ function sourceLabel(snapshotPath, snapshot) {
         timeStyle: "short",
       })
     : "unknown time";
-  return `${basename(snapshotPath)} · captured ${generated}`;
+  return `${safeDisplayLabel(snapshotPath, "snapshot")} · captured ${generated}`;
 }
 
 function runYouPlot(rows, options, dateLabel, unit) {
@@ -658,43 +707,57 @@ function runYouPlot(rows, options, dateLabel, unit) {
 }
 
 async function readSnapshot(snapshotPath) {
+  const snapshotLabel = safeDisplayLabel(snapshotPath, "snapshot");
   let parsed;
   try {
     parsed = JSON.parse(await readFile(snapshotPath, "utf8"));
   } catch (error) {
     if (error?.code === "ENOENT") {
-      throw new Error(`Snapshot not found: ${snapshotPath}`);
+      throw new Error(`Snapshot not found: ${snapshotLabel}`);
     }
-    throw new Error(`Could not read snapshot ${snapshotPath}: ${error.message}`);
+    throw new Error(
+      `Could not read snapshot ${snapshotLabel}: ${safeErrorMessage(error, [snapshotPath])}`,
+    );
   }
   if (!parsed || !Array.isArray(parsed.events)) {
-    throw new Error(`Snapshot is missing its events array: ${snapshotPath}`);
+    throw new Error(`Snapshot is missing its events array: ${snapshotLabel}`);
   }
   return parsed;
 }
 
 async function refreshSnapshot(options) {
   if (!existsSync(options.codexHome)) {
-    throw new Error(`Codex data directory not found: ${options.codexHome}`);
+    throw new Error(
+      `Codex data directory not found: ${safeDisplayLabel(options.codexHome, "Codex data directory")}`,
+    );
   }
-  const { collectUsage, writePrivateSnapshot } = await import(
-    "../lib/token-ledger-importer.mjs"
-  );
-  process.stderr.write("Token Ledger: refreshing local snapshot…\n");
-  const snapshot = await collectUsage(
-    {
-      output: options.input,
-      codexHome: options.codexHome,
-      includeArchived: options.includeArchived,
-      since: null,
-    },
-    ({ current, total }) => {
-      process.stderr.write(`\rToken Ledger: scanned ${current}/${total} rollout files`);
-    },
-  );
-  process.stderr.write("\n");
-  await writePrivateSnapshot(options.input, snapshot);
-  return snapshot;
+  let progressStarted = false;
+  try {
+    const { collectUsage, writePrivateSnapshot } = await import(
+      "../lib/token-ledger-importer.mjs"
+    );
+    process.stderr.write("Token Ledger: refreshing local snapshot…\n");
+    progressStarted = true;
+    const snapshot = await collectUsage(
+      {
+        output: options.input,
+        codexHome: options.codexHome,
+        includeArchived: options.includeArchived,
+        since: null,
+      },
+      ({ current, total }) => {
+        process.stderr.write(`\rToken Ledger: scanned ${current}/${total} rollout files`);
+      },
+    );
+    process.stderr.write("\n");
+    await writePrivateSnapshot(options.input, snapshot);
+    return snapshot;
+  } catch (error) {
+    if (progressStarted) process.stderr.write("\n");
+    throw new Error(
+      `Could not refresh local snapshot: ${safeErrorMessage(error, [options.input, options.codexHome])}`,
+    );
+  }
 }
 
 export function snapshotNeedsRefresh(snapshotMtimeMs, latestJsonlMtimeMs) {
@@ -745,7 +808,9 @@ async function loadSnapshot(options) {
   }
   if (!existsSync(options.input)) {
     if (options.inputExplicit || !options.autoRefresh) {
-      throw new Error(`Snapshot not found: ${options.input}`);
+      throw new Error(
+        `Snapshot not found: ${safeDisplayLabel(options.input, "snapshot")}`,
+      );
     }
     return refreshSnapshot(options);
   }
@@ -753,16 +818,30 @@ async function loadSnapshot(options) {
     return readSnapshot(options.input);
   }
 
-  const snapshotStat = await stat(options.input);
+  let snapshotStat;
+  try {
+    snapshotStat = await stat(options.input);
+  } catch (error) {
+    throw new Error(
+      `Could not inspect snapshot ${safeDisplayLabel(options.input, "snapshot")}: ${safeErrorMessage(error, [options.input])}`,
+    );
+  }
   if (snapshotCacheIsFresh(snapshotStat.mtimeMs)) {
     return readSnapshot(options.input);
   }
 
   const { latestSourceModifiedAt } = await import("../lib/token-ledger-importer.mjs");
-  const latestSourceMtimeMs = await latestSourceModifiedAt(
-    options.codexHome,
-    options.includeArchived,
-  );
+  let latestSourceMtimeMs;
+  try {
+    latestSourceMtimeMs = await latestSourceModifiedAt(
+      options.codexHome,
+      options.includeArchived,
+    );
+  } catch (error) {
+    throw new Error(
+      `Could not inspect local Codex source: ${safeErrorMessage(error, [options.codexHome])}`,
+    );
+  }
   if (snapshotNeedsRefresh(snapshotStat.mtimeMs, latestSourceMtimeMs)) {
     return refreshSnapshot(options);
   }
@@ -959,7 +1038,13 @@ async function main() {
       process.stdout.write(`${await run(options)}\n`);
     }
   } catch (error) {
-    process.stderr.write(`Token Ledger CLI failed: ${error.message}\n\n${usage()}\n`);
+    process.stderr.write(
+      `Token Ledger CLI failed: ${safeErrorMessage(error, [
+        options?.input,
+        options?.codexHome,
+        options?.imageOutput,
+      ])}\n\n${usage()}\n`,
+    );
     process.exitCode = 1;
   }
 }

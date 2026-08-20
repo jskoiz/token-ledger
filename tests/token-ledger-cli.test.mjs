@@ -1,5 +1,12 @@
 import test from "node:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import assert from "node:assert/strict";
 import { homedir, tmpdir } from "node:os";
 import { resolve } from "node:path";
@@ -207,6 +214,122 @@ test("rolling view describes an empty range as the last 24 hours", async () => {
       "--plain",
     ]));
     assert.match(output, /No model-call events found for the last 24 hours \(/);
+    assert.match(output, /Source: snapshot\.json/);
+    assert.ok(!output.includes(root));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("snapshot errors retain safe labels without absolute paths", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-privacy-"));
+  const missingPath = resolve(root, "missing-snapshot.json");
+  const malformedPath = resolve(root, "malformed-snapshot.json");
+  const unreadablePath = resolve(root, "unreadable-snapshot.json");
+  try {
+    await assert.rejects(
+      () => run(parseArgs([
+        "day",
+        "2026-08-20",
+        "--input",
+        missingPath,
+        "--no-refresh",
+        "--static",
+      ])),
+      (error) => {
+        assert.match(error.message, /Snapshot not found: missing-snapshot\.json/);
+        assert.ok(!error.message.includes(root));
+        return true;
+      },
+    );
+
+    await writeFile(malformedPath, JSON.stringify({ threads: [] }));
+    await assert.rejects(
+      () => run(parseArgs([
+        "day",
+        "2026-08-20",
+        "--input",
+        malformedPath,
+        "--no-refresh",
+        "--static",
+      ])),
+      (error) => {
+        assert.match(
+          error.message,
+          /Snapshot is missing its events array: malformed-snapshot\.json/,
+        );
+        assert.ok(!error.message.includes(root));
+        return true;
+      },
+    );
+
+    await mkdir(unreadablePath);
+    await assert.rejects(
+      () => run(parseArgs([
+        "day",
+        "2026-08-20",
+        "--input",
+        unreadablePath,
+        "--no-refresh",
+        "--static",
+      ])),
+      (error) => {
+        assert.match(
+          error.message,
+          /Could not read snapshot unreadable-snapshot\.json/,
+        );
+        assert.match(error.message, /EISDIR|directory|read/);
+        assert.ok(!error.message.includes(root));
+        return true;
+      },
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("refresh and source failures retain context without absolute paths", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-source-privacy-"));
+  const missingCodexHome = resolve(root, "missing-codex-home");
+  const staleSnapshotPath = resolve(root, "stale-snapshot.json");
+  const codexHome = resolve(root, "codex-home");
+  try {
+    await assert.rejects(
+      () => run(parseArgs([
+        "week",
+        "--refresh",
+        "--codex-home",
+        missingCodexHome,
+      ])),
+      (error) => {
+        assert.match(
+          error.message,
+          /Codex data directory not found: missing-codex-home/,
+        );
+        assert.ok(!error.message.includes(root));
+        return true;
+      },
+    );
+
+    await mkdir(codexHome);
+    await writeFile(resolve(codexHome, "sessions"), "not a directory");
+    await writeFile(staleSnapshotPath, JSON.stringify({ events: [] }));
+    const staleTime = new Date(Date.now() - 2 * 60 * 60 * 1_000);
+    await utimes(staleSnapshotPath, staleTime, staleTime);
+
+    const options = parseArgs(["week"]);
+    options.input = staleSnapshotPath;
+    options.inputExplicit = false;
+    options.codexHome = codexHome;
+    await assert.rejects(
+      () => run(options),
+      (error) => {
+        assert.match(error.message, /Could not inspect local Codex source/);
+        assert.match(error.message, /ENOTDIR|not a directory|scandir/);
+        assert.ok(!error.message.includes(root));
+        return true;
+      },
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
