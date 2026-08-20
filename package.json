@@ -40,7 +40,8 @@
     "usage:snapshot": "node lib/token-ledger-importer.mjs --output outputs/token-ledger-snapshot.json",
     "usage:day": "node bin/token-ledger.mjs day",
     "usage:week": "node bin/token-ledger.mjs week",
-    "prepublishOnly": "npm test"
+    "verify:release": "node tools/verify-release.mjs",
+    "prepublishOnly": "npm test && npm run verify:release"
   },
   "devDependencies": {
     "eslint": "9.39.4"

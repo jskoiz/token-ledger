@@ -170,5 +170,10 @@ In the interactive dashboard:
 ```bash
 npm test
 npm run lint
-npm pack --dry-run
+npm run verify:release
+npm pack --dry-run --json
 ```
+
+`npm run verify:release` packs the allowlisted artifact, installs that tarball
+in a clean temporary directory with no network or Codex data access, and runs
+the installed `tledger --help` and synthetic `tledger 1d --static` smoke checks.
