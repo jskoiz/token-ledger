@@ -1,4 +1,7 @@
 import { renderFullscreen, SCREEN_BASE } from "./token-ledger-terminal.mjs";
+import { actionFor } from "./token-ledger-controls.mjs";
+
+export { actionFor };
 
 const ENTER_ALT_SCREEN = "\u001b[?1049h";
 const EXIT_ALT_SCREEN = "\u001b[?1049l";
@@ -6,15 +9,6 @@ const HIDE_CURSOR = "\u001b[?25l";
 const SHOW_CURSOR = "\u001b[?25h";
 const CLEAR_SCREEN = "\u001b[2J\u001b[H";
 const RESET = "\u001b[0m";
-
-function actionFor(input) {
-  const value = String(input);
-  if (value.includes("\u001b[A") || value === "k") return "up";
-  if (value.includes("\u001b[B") || value === "j") return "down";
-  if (value === "q" || value === "Q" || value === "\u0003" || value === "\u001b") return "quit";
-  if (value === "\r" || value === "\n") return "inspect";
-  return null;
-}
 
 export function startInteractive(view) {
   const {
@@ -83,7 +77,6 @@ export function startInteractive(view) {
         draw();
         return;
       }
-      if (action === "inspect") draw();
     };
 
     stdin.setRawMode(true);

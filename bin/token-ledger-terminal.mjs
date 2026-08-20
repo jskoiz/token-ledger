@@ -2,6 +2,10 @@ import {
   normalizeQuotaTimeline,
   weeklyQuotaObservations,
 } from "./token-ledger-trend.mjs";
+import {
+  INTERACTIVE_FOOTER,
+  INTERACTIVE_HELP,
+} from "./token-ledger-controls.mjs";
 
 const RESET = "\u001b[0m";
 const PRIMARY_STYLE = [38, 2, 255, 255, 255];
@@ -602,9 +606,7 @@ export function renderTerminal({
   lines.push("");
   lines.push(
     colorize(
-      options.ascii
-        ? "[j/k] select   [enter] inspect   [d/w/m] range   [q] quit"
-        : "[↑↓] select   [enter] inspect   [d/w/m] range   [q] quit",
+      options.ascii ? INTERACTIVE_FOOTER.ascii : INTERACTIVE_FOOTER.unicode,
       SECONDARY_STYLE,
       enabled,
     ),
@@ -657,7 +659,7 @@ export function renderFullscreen({
   staticLines.pop();
   if (staticLines.at(-1) === "") staticLines.pop();
   const summaryLine = staticLines.shift() ?? "";
-  const help = colorize("↑/↓ move   •   j/k move   •   q/esc quit", SECONDARY_STYLE, enabled);
+  const help = colorize(INTERACTIVE_HELP, SECONDARY_STYLE, enabled);
   const content = [
     { line: summaryLine, background: SCREEN_BASE },
     ...staticLines.map((line) => ({ line, background: PANEL_BASE })),
