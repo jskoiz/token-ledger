@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import assert from "node:assert/strict";
 import { homedir, tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   aggregateProjects,
@@ -39,6 +40,10 @@ import {
   buildActualTokenBins,
   renderTrendPlain,
 } from "../bin/token-ledger-trend-terminal.mjs";
+
+const ROLLING_24H_FIXTURE = fileURLToPath(
+  new URL("./fixtures/rolling-24h-projects.json", import.meta.url),
+);
 
 test("dayBounds uses local calendar midnights for an explicit timezone", () => {
   const bounds = dayBounds("2026-08-01", "Pacific/Honolulu");
@@ -205,6 +210,33 @@ test("rolling view describes an empty range as the last 24 hours", async () => {
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("1d renders deterministic project totals from a rolling 24-hour fixture", async () => {
+  const nowMs = Date.parse("2026-08-20T00:00:00.000Z");
+  const output = await run(parseArgs([
+    "1d",
+    "--input",
+    ROLLING_24H_FIXTURE,
+    "--no-refresh",
+    "--static",
+    "--plain",
+    "--ascii",
+    "--tz",
+    "Pacific/Honolulu",
+    "--width",
+    "120",
+  ]), { nowMs });
+
+  assert.match(output, /LAST 24 HOURS/);
+  assert.match(output, /24 HOURS/);
+  assert.match(output, /TOKENS BY PROJECT/);
+  assert.match(output, /Alpha.*1\.20K/);
+  assert.match(output, /Beta.*800/);
+  assert.match(output, /2\.00K TOKENS/);
+  assert.match(output, /SNAPSHOT · fresh · 15m old/);
+  assert.doesNotMatch(output, /Gamma|Delta|5\.80K|10\.20K/);
+  assert.ok(!output.includes(ROLLING_24H_FIXTURE));
 });
 
 test("parseArgs supports the 7d, 14d, and 30d trend windows", () => {
