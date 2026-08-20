@@ -113,6 +113,12 @@ The first refresh may scan historical rollout files; later runs use the cache
 for one hour before checking source freshness again. Use `--refresh` when you
 need to force an immediate rebuild.
 
+The `1d` project dashboard shows a compact snapshot-age line such as
+`SNAPSHOT · fresh · 12m old`. `fresh` means the snapshot is within the
+one-hour cache window, `stale` means it is older, and `age unknown` means the
+snapshot has no usable capture-time metadata. The indicator does not print a
+local path or trigger another source scan.
+
 Useful overrides:
 
 ```bash

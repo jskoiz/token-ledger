@@ -17,7 +17,15 @@ function actionFor(input) {
 }
 
 export function startInteractive(view) {
-  const { options, snapshot, bounds, events, rows, allRows } = view;
+  const {
+    options,
+    snapshot,
+    snapshotFreshness,
+    bounds,
+    events,
+    rows,
+    allRows,
+  } = view;
   const stdin = process.stdin;
   const stdout = process.stdout;
   if (!stdin.isTTY || !stdout.isTTY || typeof stdin.setRawMode !== "function") {
@@ -34,6 +42,7 @@ export function startInteractive(view) {
       const screen = renderFullscreen({
         options: { ...options, forceColor: true, selectedIndex },
         snapshot,
+        snapshotFreshness,
         bounds,
         events,
         rows,

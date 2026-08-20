@@ -14,6 +14,7 @@ import {
   sanitizeTerminalText,
   DEFAULT_SNAPSHOT,
   snapshotCacheIsFresh,
+  snapshotFreshness,
   snapshotNeedsRefresh,
   weekBounds,
 } from "../bin/token-ledger.mjs";
@@ -290,6 +291,26 @@ test("recent snapshots skip the automatic source freshness walk", () => {
   assert.equal(snapshotCacheIsFresh(now + 1, now), false);
 });
 
+test("snapshot freshness labels the one-hour cache age without exposing paths", () => {
+  const now = Date.parse("2026-08-20T00:00:00.000Z");
+  assert.deepEqual(
+    snapshotFreshness({ generatedAt: "2026-08-19T23:45:00.000Z" }, now),
+    { status: "fresh", ageLabel: "15m old" },
+  );
+  assert.deepEqual(
+    snapshotFreshness({ generatedAt: "2026-08-19T23:00:00.000Z" }, now),
+    { status: "stale", ageLabel: "1h old" },
+  );
+  assert.deepEqual(snapshotFreshness({}, now), {
+    status: "unknown",
+    ageLabel: "age unknown",
+  });
+  assert.deepEqual(
+    snapshotFreshness({ generatedAt: "not-a-date" }, now),
+    { status: "unknown", ageLabel: "age unknown" },
+  );
+});
+
 test("terminal renderer produces the dashboard layout and scaled bars", () => {
   const snapshot = {
     events: [],
@@ -362,8 +383,18 @@ test("terminal renderer produces the dashboard layout and scaled bars", () => {
   const weekHeader = weekOutput.split("\n")[0];
   assert.match(weekHeader, /TOKEN LEDGER · JUL 28–AUG 03 · 7D · 1\.25K T · 2 C · 2 TH · 1 P/);
 
+  const rollingSnapshot = {
+    ...snapshot,
+    generatedAt: "2026-08-19T23:45:00.000Z",
+  };
+  const rollingFreshness = snapshotFreshness(
+    rollingSnapshot,
+    Date.parse("2026-08-20T00:00:00.000Z"),
+  );
   const rollingOutput = renderTerminal({
     options: { plain: true, ascii: true, width: 120, range: "rolling24h" },
+    snapshot: rollingSnapshot,
+    snapshotFreshness: rollingFreshness,
     bounds: rolling24hBounds(new Date("2026-08-19T22:15:30.000Z"), "Pacific/Honolulu"),
     events,
     rows,
@@ -373,6 +404,26 @@ test("terminal renderer produces the dashboard layout and scaled bars", () => {
     rollingOutput.split("\n")[0],
     /TOKEN LEDGER · LAST 24 HOURS · 24 HOURS · 1\.25K TOKENS · 2 CALLS · 2 THREADS · 1 PROJECTS/,
   );
+  assert.match(rollingOutput, /SNAPSHOT · fresh · 15m old/);
+  assert.doesNotMatch(rollingOutput, /token-ledger-snapshot\.json|\/Users\//);
+
+  const fullscreenRollingOutput = renderFullscreen({
+    options: {
+      range: "rolling24h",
+      plain: true,
+      ascii: true,
+      forceColor: false,
+    },
+    snapshot: rollingSnapshot,
+    snapshotFreshness: rollingFreshness,
+    bounds: rolling24hBounds(new Date("2026-08-19T22:15:30.000Z"), "Pacific/Honolulu"),
+    events,
+    rows,
+    allRows: rows,
+    width: 100,
+    height: 30,
+  });
+  assert.match(fullscreenRollingOutput, /SNAPSHOT · fresh · 15m old/);
 
   const narrowOutput = renderTerminal({
     options: { plain: true, ascii: true, width: 64 },
