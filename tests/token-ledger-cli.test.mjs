@@ -44,6 +44,12 @@ import {
   writeTrendPng,
 } from "../bin/token-ledger-trend-image.mjs";
 import {
+  INTERACTIVE_FOOTER,
+  INTERACTIVE_HELP,
+  INTERACTIVE_KEY_INPUTS,
+} from "../bin/token-ledger-controls.mjs";
+import { actionFor } from "../bin/token-ledger-tui.mjs";
+import {
   buildActualTokenBins,
   renderTrendPlain,
 } from "../bin/token-ledger-trend-terminal.mjs";
@@ -464,6 +470,62 @@ test("snapshot freshness labels the one-hour cache age without exposing paths", 
     snapshotFreshness({ generatedAt: "not-a-date" }, now),
     { status: "unknown", ageLabel: "age unknown" },
   );
+});
+
+test("interactive controls stay aligned with rendered and documented help", async () => {
+  for (const input of INTERACTIVE_KEY_INPUTS.up) assert.equal(actionFor(input), "up");
+  for (const input of INTERACTIVE_KEY_INPUTS.down) assert.equal(actionFor(input), "down");
+  for (const input of INTERACTIVE_KEY_INPUTS.quit) assert.equal(actionFor(input), "quit");
+  for (const input of ["\r", "\n", "d", "w", "m"]) {
+    assert.equal(actionFor(input), null);
+  }
+
+  const snapshot = {
+    events: [],
+    threads: [{ id: "alpha-1", project: "alpha" }],
+  };
+  const events = [{
+    project: "alpha",
+    threadId: "alpha-1",
+    model: "gpt-5.5",
+    totalTokens: 1,
+    outputTokens: 0,
+    toolCalls: 0,
+    rateCardCredits: 1,
+  }];
+  const rows = aggregateProjects(snapshot, events, { rawProjects: true });
+  const bounds = dayBounds("2026-08-01", "Pacific/Honolulu");
+  const footerOutput = renderTerminal({
+    options: { plain: true, ascii: true, width: 80 },
+    snapshot,
+    bounds,
+    events,
+    rows,
+    allRows: rows,
+  });
+  assert.ok(footerOutput.includes(INTERACTIVE_FOOTER.ascii));
+  assert.doesNotMatch(footerOutput, /inspect|range/);
+
+  const fullscreenOutput = renderFullscreen({
+    options: { plain: true, ascii: true, forceColor: false },
+    snapshot,
+    bounds,
+    events,
+    rows,
+    allRows: rows,
+    width: 120,
+    height: 32,
+  });
+  assert.ok(fullscreenOutput.includes(INTERACTIVE_HELP));
+  assert.doesNotMatch(fullscreenOutput, /inspect|range/);
+
+  const readme = await readFile(
+    fileURLToPath(new URL("../README.md", import.meta.url)),
+    "utf8",
+  );
+  assert.match(readme, /`q`, `Q`, `Esc`, or `Ctrl-C` exits\./);
+  assert.match(readme, /Enter does not inspect a project/);
+  assert.match(readme, /`d` \/ `w` \/ `m` do not change the\s+range/);
 });
 
 test("terminal renderer produces the dashboard layout and scaled bars", () => {

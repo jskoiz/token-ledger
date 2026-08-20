@@ -161,7 +161,9 @@ CLI makes no network requests.
 In the interactive dashboard:
 
 - `↑` / `↓` or `j` / `k` moves between projects.
-- `q` or `esc` exits.
+- `q`, `Q`, `Esc`, or `Ctrl-C` exits.
+- Enter does not inspect a project, and `d` / `w` / `m` do not change the
+  range; choose the desired range in the command instead.
 
 ## Verify from source
 
