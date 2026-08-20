@@ -418,7 +418,7 @@ function cleanLabel(value, fallback) {
 const QUOTED_ABSOLUTE_PATH =
   /(["'])(\/(?!\/)[^"'\r\n]*|(?:\/\/|\\\\)[^"'\r\n]+|[A-Za-z]:[\\/][^"'\r\n]*)\1/g;
 const UNQUOTED_ABSOLUTE_PATH =
-  /(^|[\s([{=:])((?:\/(?!\/)|\/\/|\\\\|[A-Za-z]:[\\/])[^\s"'`)\]},;]+)/g;
+  /(^|[\s([{=])((?:\/(?!\/)|\/\/|\\\\|[A-Za-z]:[\\/])[^\s"'`)\]},;]+)/g;
 
 function isAbsoluteLocalPath(path) {
   return (

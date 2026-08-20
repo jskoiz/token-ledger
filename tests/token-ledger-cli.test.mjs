@@ -278,6 +278,17 @@ test("redactLocalPaths preserves safe basenames for explicit UNC paths", () => {
   );
 });
 
+test("redactLocalPaths preserves URL schemes while redacting UNC paths", () => {
+  const redacted = redactLocalPaths(
+    "url=https://registry.npmjs.org/sharp; unc=//server/share/private/snapshot.json",
+  );
+
+  assert.equal(
+    redacted,
+    "url=https://registry.npmjs.org/sharp; unc=[local path]",
+  );
+});
+
 test("snapshot errors retain safe labels without absolute paths", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-privacy-"));
   const missingPath = resolve(root, "missing-snapshot.json");
