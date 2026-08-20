@@ -230,6 +230,11 @@ export function parseArgs(argv) {
       argument === "1d" &&
       !options.date
     ) {
+      if (argv[0] !== "day") {
+        throw new Error(
+          "The 1d alias is only available as `tledger 1d` or `tledger day 1d`.",
+        );
+      }
       options.range = "rolling24h";
       options.rolling24h = true;
     } else if (!argument.startsWith("-") && options.view === "trend") {
@@ -411,9 +416,17 @@ function cleanLabel(value, fallback) {
 }
 
 const QUOTED_ABSOLUTE_PATH =
-  /(["'])(\/(?!\/)[^"'\r\n]*|[A-Za-z]:[\\/][^"'\r\n]*)\1/g;
+  /(["'])(\/(?!\/)[^"'\r\n]*|(?:\/\/|\\\\)[^"'\r\n]+|[A-Za-z]:[\\/][^"'\r\n]*)\1/g;
 const UNQUOTED_ABSOLUTE_PATH =
-  /(^|[\s([{=:])((?:\/(?!\/)|[A-Za-z]:[\\/])[^\s"'`)\]},;]+)/g;
+  /(^|[\s([{=:])((?:\/(?!\/)|\/\/|\\\\|[A-Za-z]:[\\/])[^\s"'`)\]},;]+)/g;
+
+function isAbsoluteLocalPath(path) {
+  return (
+    path.startsWith("/") ||
+    path.startsWith("\\\\") ||
+    /^[A-Za-z]:[\\/]/.test(path)
+  );
+}
 
 export function safeDisplayLabel(value, fallback = "local path") {
   const normalized = String(value ?? "").replaceAll("\\", "/");
@@ -429,7 +442,7 @@ export function redactLocalPaths(value, paths = []) {
     paths
       .filter(Boolean)
       .map((path) => String(path))
-      .filter((path) => path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path)),
+      .filter(isAbsoluteLocalPath),
   );
   const pathsToRedact = [...new Set([
     ...explicitPaths,
@@ -941,8 +954,9 @@ function rangeDescription(options, bounds) {
   return bounds.dateString;
 }
 
-export async function run(options, { nowMs = Date.now() } = {}) {
-  const now = new Date(nowMs);
+export async function run(options, { nowMs } = {}) {
+  const hasInjectedNow = nowMs !== undefined;
+  const now = new Date(hasInjectedNow ? nowMs : Date.now());
   const bounds = boundsForOptions(options, now);
   const snapshot = await loadSnapshot(options);
   const events = filterDayEvents(snapshot, bounds);
@@ -973,7 +987,10 @@ export async function run(options, { nowMs = Date.now() } = {}) {
     events,
     rows,
     allRows,
-    snapshotFreshness(snapshot, now.getTime()),
+    snapshotFreshness(
+      snapshot,
+      hasInjectedNow ? now.getTime() : Date.now(),
+    ),
   );
   if (writingImage) {
     await mkdir(dirname(outputPath), { recursive: true });

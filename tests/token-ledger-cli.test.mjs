@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import test from "node:test";
 import {
   mkdir,
@@ -17,6 +18,7 @@ import {
   dayBounds,
   filterDayEvents,
   parseArgs,
+  redactLocalPaths,
   rolling24hBounds,
   run,
   sanitizeTerminalText,
@@ -56,6 +58,20 @@ import {
 
 const ROLLING_24H_FIXTURE = fileURLToPath(
   new URL("./fixtures/rolling-24h-projects.json", import.meta.url),
+);
+const CLI_ENTRYPOINT = fileURLToPath(
+  new URL("../bin/token-ledger.mjs", import.meta.url),
+);
+
+test(
+  "CLI entrypoint supports direct shebang execution",
+  { skip: process.platform === "win32" },
+  () => {
+    const result = spawnSync(CLI_ENTRYPOINT, ["--help"], { encoding: "utf8" });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /--help/);
+  },
 );
 
 test("dayBounds uses local calendar midnights for an explicit timezone", () => {
@@ -201,6 +217,10 @@ test("parseArgs accepts the bare 1d rolling project view", () => {
   assert.equal(explicit.range, "rolling24h");
   assert.equal(explicit.rolling24h, true);
   assert.throws(
+    () => parseArgs(["week", "1d"]),
+    /1d alias is only available as `tledger 1d` or `tledger day 1d`/,
+  );
+  assert.throws(
     () => parseArgs(["1d", "--date", "today"]),
     /does not accept --date/,
   );
@@ -225,6 +245,37 @@ test("rolling view describes an empty range as the last 24 hours", async () => {
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("redactLocalPaths redacts detected UNC path forms", () => {
+  const backslashPath = "\\\\server\\share\\private\\snapshot.json";
+  const normalizedPath = "//server/share/private/snapshot.json";
+  const message =
+    "unc=" +
+    backslashPath +
+    '; normalized="' +
+    normalizedPath +
+    '"';
+
+  const redacted = redactLocalPaths(message);
+
+  assert.equal(redacted, 'unc=[local path]; normalized="[local path]"');
+  assert.ok(!redacted.includes("server"));
+  assert.ok(!redacted.includes("share"));
+});
+
+test("redactLocalPaths preserves safe basenames for explicit UNC paths", () => {
+  const backslashPath = "\\\\server\\share\\private\\snapshot.json";
+  const normalizedPath = "//server/share/private/snapshot.json";
+
+  assert.equal(
+    redactLocalPaths("missing " + backslashPath, [backslashPath]),
+    "missing snapshot.json",
+  );
+  assert.equal(
+    redactLocalPaths("missing " + normalizedPath, [normalizedPath]),
+    "missing snapshot.json",
+  );
 });
 
 test("snapshot errors retain safe labels without absolute paths", async () => {
@@ -366,6 +417,56 @@ test("1d renders deterministic project totals from a rolling 24-hour fixture", a
   assert.match(output, /SNAPSHOT · fresh · 15m old/);
   assert.doesNotMatch(output, /Gamma|Delta|5\.80K|10\.20K/);
   assert.ok(!output.includes(ROLLING_24H_FIXTURE));
+});
+
+test("static freshness uses the wall clock after snapshot loading", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-post-load-time-"));
+  const snapshotPath = resolve(root, "snapshot.json");
+  const beforeLoadMs = Date.parse("2026-08-20T00:00:00.000Z");
+  const afterLoadMs = beforeLoadMs + 1_000;
+  try {
+    await writeFile(snapshotPath, JSON.stringify({
+      generatedAt: new Date(afterLoadMs).toISOString(),
+      events: [{
+        project: "alpha",
+        threadId: "alpha-1",
+        model: "gpt-5.5",
+        timestamp: "2026-08-19T12:00:00.000Z",
+        totalTokens: 1,
+        outputTokens: 0,
+        toolCalls: 0,
+        rateCardCredits: 1,
+      }],
+      threads: [{ id: "alpha-1", project: "alpha" }],
+    }));
+
+    const originalDateNow = Date.now;
+    let nowCalls = 0;
+    Date.now = () => {
+      nowCalls += 1;
+      return nowCalls === 1 ? beforeLoadMs : afterLoadMs;
+    };
+    try {
+      const output = await run(parseArgs([
+        "1d",
+        "--input",
+        snapshotPath,
+        "--no-refresh",
+        "--static",
+        "--plain",
+        "--ascii",
+        "--tz",
+        "UTC",
+      ]));
+
+      assert.match(output, /SNAPSHOT · fresh · now/);
+      assert.equal(nowCalls, 2);
+    } finally {
+      Date.now = originalDateNow;
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("parseArgs supports the 7d, 14d, and 30d trend windows", () => {

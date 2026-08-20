@@ -135,6 +135,80 @@ function assertNoForbiddenFiles(files) {
   );
 }
 
+function parentPackagePath(packagePath) {
+  const nestedPackageMarker = "/node_modules/";
+  const markerIndex = packagePath.lastIndexOf(nestedPackageMarker);
+  return markerIndex === -1 ? "" : packagePath.slice(0, markerIndex);
+}
+
+function resolvePackagePath(packages, fromPackagePath, dependencyName) {
+  let packagePath = fromPackagePath;
+  while (true) {
+    const candidate = `${packagePath ? `${packagePath}/` : ""}node_modules/${dependencyName}`;
+    if (Object.hasOwn(packages, candidate)) return candidate;
+    if (packagePath === "") return null;
+    packagePath = parentPackagePath(packagePath);
+  }
+}
+
+function dependencyEntries(packageEntry) {
+  const dependencies = new Map();
+  for (const dependencyName of Object.keys(packageEntry.dependencies ?? {})) {
+    dependencies.set(dependencyName, false);
+  }
+  for (const dependencyName of Object.keys(packageEntry.optionalDependencies ?? {})) {
+    if (!dependencies.has(dependencyName)) dependencies.set(dependencyName, true);
+  }
+  for (const dependencyName of Object.keys(packageEntry.peerDependencies ?? {})) {
+    if (!dependencies.has(dependencyName)) {
+      dependencies.set(
+        dependencyName,
+        packageEntry.peerDependenciesMeta?.[dependencyName]?.optional === true,
+      );
+    }
+  }
+  return [...dependencies.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, optional]) => ({ name, optional }));
+}
+
+export function selectProductionPackageEntries(sourceLock, packageJson) {
+  const sourcePackages = sourceLock.packages;
+  assert(sourcePackages && typeof sourcePackages === "object", "package-lock.json has no packages map.");
+
+  const selectedPackages = new Map();
+  const pendingPackages = [[`node_modules/${packageJson.name}`, packageJson]];
+  for (let index = 0; index < pendingPackages.length; index += 1) {
+    const [packagePath, packageEntry] = pendingPackages[index];
+    for (const { name: dependencyName, optional } of dependencyEntries(packageEntry)) {
+      const dependencyPath = resolvePackagePath(
+        sourcePackages,
+        packagePath,
+        dependencyName,
+      );
+      if (dependencyPath === null) {
+        if (optional) continue;
+        throw new Error(
+          `Production dependency "${dependencyName}" of "${packagePath}" is missing from package-lock.json.`,
+        );
+      }
+
+      const dependencyEntry = sourcePackages[dependencyPath];
+      assert(
+        dependencyEntry.dev !== true,
+        `Production dependency "${dependencyPath}" is marked as dev-only in package-lock.json.`,
+      );
+      if (selectedPackages.has(dependencyPath)) continue;
+      selectedPackages.set(dependencyPath, dependencyEntry);
+      pendingPackages.push([dependencyPath, dependencyEntry]);
+    }
+  }
+
+  return Object.fromEntries(
+    [...selectedPackages.entries()].sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
 async function writeSmokeFixture(path) {
   const now = Date.now();
   const hour = 60 * 60 * 1000;
@@ -215,13 +289,14 @@ async function writeCleanInstallProject(installDirectory, tarballPath, packageJs
     version: "0.0.0",
     dependencies: { [packageJson.name]: tarballSpecifier },
   };
-  const installPackages = Object.fromEntries(
-    Object.entries(sourceLock.packages).filter(([key]) => key !== ""),
-  );
+  const installPackages = selectProductionPackageEntries(sourceLock, packageJson);
   installPackages[`node_modules/${packageJson.name}`] = {
     version: packageJson.version,
     resolved: tarballSpecifier,
     dependencies: packageJson.dependencies,
+    optionalDependencies: packageJson.optionalDependencies,
+    peerDependencies: packageJson.peerDependencies,
+    peerDependenciesMeta: packageJson.peerDependenciesMeta,
     bin: packageJson.bin,
     engines: packageJson.engines,
     license: packageJson.license,
@@ -417,9 +492,11 @@ async function main() {
   }
 }
 
-try {
-  await main();
-} catch (error) {
-  console.error(error instanceof Error ? error.message : error);
-  process.exitCode = 1;
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+  try {
+    await main();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error);
+    process.exitCode = 1;
+  }
 }
