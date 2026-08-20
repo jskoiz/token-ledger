@@ -9,6 +9,7 @@ import {
   dayBounds,
   filterDayEvents,
   parseArgs,
+  rolling24hBounds,
   run,
   sanitizeTerminalText,
   DEFAULT_SNAPSHOT,
@@ -51,6 +52,15 @@ test("weekBounds covers seven local calendar days ending on the selected day", (
   assert.equal(bounds.start.toISOString(), "2026-07-28T10:00:00.000Z");
   assert.equal(bounds.end.toISOString(), "2026-08-04T10:00:00.000Z");
   assert.equal(bounds.rangeDays, 7);
+});
+
+test("rolling24hBounds covers the exact preceding 24 hours", () => {
+  const end = new Date("2026-08-19T22:15:30.000Z");
+  const bounds = rolling24hBounds(end, "Pacific/Honolulu");
+  assert.equal(bounds.start.toISOString(), "2026-08-18T22:15:30.000Z");
+  assert.equal(bounds.end.toISOString(), "2026-08-19T22:15:30.000Z");
+  assert.equal(bounds.rangeHours, 24);
+  assert.equal(bounds.timeZone, "Pacific/Honolulu");
 });
 
 test("filterDayEvents keeps the start and excludes the end boundary", () => {
@@ -157,6 +167,43 @@ test("parseArgs defaults the week end day to today", () => {
     resolve(homedir(), ".token-ledger", "token-ledger-snapshot.json"),
   );
   assert.equal(options.input, DEFAULT_SNAPSHOT);
+});
+
+test("parseArgs accepts the bare 1d rolling project view", () => {
+  const options = parseArgs(["1d", "--static", "--top", "5"]);
+  assert.equal(options.range, "rolling24h");
+  assert.equal(options.rolling24h, true);
+  assert.equal(options.view, "projects");
+  assert.equal(options.date, null);
+  assert.equal(options.static, true);
+  assert.equal(options.top, 5);
+
+  const explicit = parseArgs(["day", "1d"]);
+  assert.equal(explicit.range, "rolling24h");
+  assert.equal(explicit.rolling24h, true);
+  assert.throws(
+    () => parseArgs(["1d", "--date", "today"]),
+    /does not accept --date/,
+  );
+});
+
+test("rolling view describes an empty range as the last 24 hours", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-rolling-empty-"));
+  const snapshotPath = resolve(root, "snapshot.json");
+  try {
+    await writeFile(snapshotPath, JSON.stringify({ events: [], threads: [] }));
+    const output = await run(parseArgs([
+      "1d",
+      "--input",
+      snapshotPath,
+      "--no-refresh",
+      "--static",
+      "--plain",
+    ]));
+    assert.match(output, /No model-call events found for the last 24 hours \(/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("parseArgs supports the 7d, 14d, and 30d trend windows", () => {
@@ -314,6 +361,18 @@ test("terminal renderer produces the dashboard layout and scaled bars", () => {
   assert.match(weekOutput, /7D/);
   const weekHeader = weekOutput.split("\n")[0];
   assert.match(weekHeader, /TOKEN LEDGER · JUL 28–AUG 03 · 7D · 1\.25K T · 2 C · 2 TH · 1 P/);
+
+  const rollingOutput = renderTerminal({
+    options: { plain: true, ascii: true, width: 120, range: "rolling24h" },
+    bounds: rolling24hBounds(new Date("2026-08-19T22:15:30.000Z"), "Pacific/Honolulu"),
+    events,
+    rows,
+    allRows: rows,
+  });
+  assert.match(
+    rollingOutput.split("\n")[0],
+    /TOKEN LEDGER · LAST 24 HOURS · 24 HOURS · 1\.25K TOKENS · 2 CALLS · 2 THREADS · 1 PROJECTS/,
+  );
 
   const narrowOutput = renderTerminal({
     options: { plain: true, ascii: true, width: 64 },

@@ -31,6 +31,7 @@ export const DEFAULT_SNAPSHOT = resolve(
 const DEFAULT_TOP = 10;
 const DEFAULT_TIME_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone;
 export const SNAPSHOT_CACHE_MAX_AGE_MS = 60 * 60 * 1000;
+export const ROLLING_24_HOURS_MS = 24 * 60 * 60 * 1000;
 const ANSI_RESET = "\u001b[0m";
 const MODEL_COLORS = {
   sol: TERMINAL_MODEL_COLORS.sol,
@@ -45,6 +46,7 @@ function usage() {
   return `Token Ledger terminal usage
 
 Usage:
+  tledger 1d                 Rolling 24-hour project breakdown (ends now)
   tledger day <YYYY-MM-DD>
   tledger week [end-day]
   tledger trend [7d|14d|30d]
@@ -90,14 +92,18 @@ function readOption(argv, index, name) {
 }
 
 export function parseArgs(argv) {
-  const command = argv[0] === "week"
-    ? "week"
-    : argv[0] === "trend" || argv[0] === "report"
-      ? "trend"
-      : "day";
+  const rolling24hCommand = argv[0] === "1d";
+  const command = rolling24hCommand
+    ? "rolling24h"
+    : argv[0] === "week"
+      ? "week"
+      : argv[0] === "trend" || argv[0] === "report"
+        ? "trend"
+        : "day";
   const options = {
     range: command,
     view: command === "trend" ? "trend" : "projects",
+    rolling24h: rolling24hCommand,
     report: argv[0] === "report",
     trendDays: 7,
     date: null,
@@ -123,7 +129,7 @@ export function parseArgs(argv) {
   };
 
   let trendPeriodSeen = false;
-  let index = ["day", "week", "trend", "report"].includes(argv[0]) ? 1 : 0;
+  let index = ["1d", "day", "week", "trend", "report"].includes(argv[0]) ? 1 : 0;
   for (; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--help" || argument === "-h") {
@@ -217,6 +223,14 @@ export function parseArgs(argv) {
       index += 1;
     } else if (argument === "--youplot") {
       options.legacyPlot = true;
+    } else if (
+      !argument.startsWith("-") &&
+      options.view === "projects" &&
+      argument === "1d" &&
+      !options.date
+    ) {
+      options.range = "rolling24h";
+      options.rolling24h = true;
     } else if (!argument.startsWith("-") && options.view === "trend") {
       if (trendPeriodSeen) {
         throw new Error("Trend period can only be specified once.");
@@ -234,10 +248,13 @@ export function parseArgs(argv) {
   }
 
   if (options.report) options.image = true;
+  if (!options.help && options.rolling24h && options.date) {
+    throw new Error("1d does not accept --date; its rolling window ends now.");
+  }
   if (!options.help && !options.date && (options.range === "week" || options.view === "trend")) {
     options.date = "today";
   }
-  if (!options.help && !options.date) {
+  if (!options.help && !options.date && !options.rolling24h) {
     throw new Error("A day is required, for example: tledger day 2026-08-01");
   }
   if (!options.help && options.refresh && !options.autoRefresh) {
@@ -361,6 +378,20 @@ export function weekBounds(value, timeZone) {
     endDateString: endDay.dateString,
     start: zonedMidnight(startDateString, timeZone),
     rangeDays: 7,
+  };
+}
+
+export function rolling24hBounds(value = new Date(), timeZone = DEFAULT_TIME_ZONE) {
+  validateTimeZone(timeZone);
+  const end = value instanceof Date ? new Date(value.getTime()) : new Date(value);
+  if (!Number.isFinite(end.getTime())) {
+    throw new Error("Rolling 24-hour window requires a valid end time.");
+  }
+  return {
+    start: new Date(end.getTime() - ROLLING_24_HOURS_MS),
+    end,
+    timeZone,
+    rangeHours: 24,
   };
 }
 
@@ -738,15 +769,17 @@ function render(options, snapshot, bounds, events, rows, allRows) {
   const enabled = !options.plain && !process.env.NO_COLOR && Boolean(process.stdout.isTTY);
   const summary = totalSummary(events);
   const totalTokens = summary.totalTokens;
-  const dateLabel = options.range === "week"
-    ? `${bounds.startDateString} through ${bounds.endDateString}`
-    : new Intl.DateTimeFormat("en-US", {
-      timeZone: bounds.timeZone,
-      weekday: "short",
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-    }).format(bounds.start);
+  const dateLabel = options.range === "rolling24h"
+    ? "last 24 hours"
+    : options.range === "week"
+      ? `${bounds.startDateString} through ${bounds.endDateString}`
+      : new Intl.DateTimeFormat("en-US", {
+        timeZone: bounds.timeZone,
+        weekday: "short",
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+      }).format(bounds.start);
   const unit = chartUnit(rows[0]?.totalTokens ?? 0);
   const shares = rows.map((row) =>
     totalTokens > 0 ? (row.totalTokens / totalTokens) * 100 : 0,
@@ -774,20 +807,34 @@ function render(options, snapshot, bounds, events, rows, allRows) {
   return `${header.join("\n")}\n\n${details.join("\n")}`;
 }
 
+function boundsForOptions(options) {
+  if (options.view === "trend") {
+    return multiDayBounds(options.date, options.timeZone, options.trendDays);
+  }
+  if (options.range === "week") {
+    return weekBounds(options.date, options.timeZone);
+  }
+  if (options.range === "rolling24h") {
+    return rolling24hBounds(new Date(), options.timeZone);
+  }
+  return dayBounds(options.date, options.timeZone);
+}
+
+function rangeDescription(options, bounds) {
+  if (options.range === "rolling24h") return "the last 24 hours";
+  if (bounds.startDateString && bounds.endDateString) {
+    return `${bounds.startDateString} through ${bounds.endDateString}`;
+  }
+  return bounds.dateString;
+}
+
 export async function run(options) {
-  const bounds = options.view === "trend"
-    ? multiDayBounds(options.date, options.timeZone, options.trendDays)
-    : options.range === "week"
-      ? weekBounds(options.date, options.timeZone)
-      : dayBounds(options.date, options.timeZone);
+  const bounds = boundsForOptions(options);
   const snapshot = await loadSnapshot(options);
   const events = filterDayEvents(snapshot, bounds);
   if (events.length === 0) {
-    const rangeDescription = options.range === "week"
-      ? `${bounds.startDateString} through ${bounds.endDateString}`
-      : bounds.dateString;
     return [
-      `No model-call events found for ${rangeDescription} (${bounds.timeZone}).`,
+      `No model-call events found for ${rangeDescription(options, bounds)} (${bounds.timeZone}).`,
       `Source: ${sourceLabel(options.input, snapshot)}`,
     ].join("\n");
   }
@@ -832,17 +879,12 @@ function shouldUseInteractive(options) {
 }
 
 async function runInteractive(options) {
-  const bounds = options.range === "week"
-    ? weekBounds(options.date, options.timeZone)
-    : dayBounds(options.date, options.timeZone);
+  const bounds = boundsForOptions(options);
   const snapshot = await loadSnapshot(options);
   const events = filterDayEvents(snapshot, bounds);
   if (events.length === 0) {
-    const rangeDescription = options.range === "week"
-      ? `${bounds.startDateString} through ${bounds.endDateString}`
-      : bounds.dateString;
     process.stdout.write([
-      `No model-call events found for ${rangeDescription} (${bounds.timeZone}).`,
+      `No model-call events found for ${rangeDescription(options, bounds)} (${bounds.timeZone}).`,
       `Source: ${sourceLabel(options.input, snapshot)}`,
       "",
     ].join("\n"));

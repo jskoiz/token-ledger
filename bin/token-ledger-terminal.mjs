@@ -128,6 +128,7 @@ function displayProject(row) {
 }
 
 function dateLabel(bounds, range = "day") {
+  if (range === "rolling24h") return "LAST 24 HOURS";
   if (range === "week" && bounds.startDateString && bounds.endDateString) {
     const startParts = bounds.startDateString.split("-").map(Number);
     const endParts = bounds.endDateString.split("-").map(Number);
@@ -499,7 +500,12 @@ function panel(leftLines, rightLines, leftWidth, rightWidth, enabled, ascii) {
 function headerLines(stats, bounds, frameWidth, options, enabled) {
   const left = colorize("TOKEN LEDGER", TITLE_STYLE, enabled);
   const date = colorize(dateLabel(bounds, options.range), TEXT_STYLE, enabled);
-  const mode = colorize(options.range === "week" ? "7 DAYS" : "DAY", [1, ...ACCENT_STYLE], enabled);
+  const modeLabel = options.range === "rolling24h"
+    ? "24 HOURS"
+    : options.range === "week"
+      ? "7 DAYS"
+      : "DAY";
+  const mode = colorize(modeLabel, [1, ...ACCENT_STYLE], enabled);
   const metric = (value, label) =>
     `${colorize(String(value), TITLE_STYLE, enabled)} ${colorize(label, SECONDARY_STYLE, enabled)}`;
   const separator = colorize("·", SECONDARY_STYLE, enabled);
@@ -521,7 +527,11 @@ function headerLines(stats, bounds, frameWidth, options, enabled) {
   const compactDate = dateLabel(bounds, options.range)
     .replace(/ 20\d{2}$/, "")
     .replace(" – ", "–");
-  const compactMode = options.range === "week" ? "7D" : "DAY";
+  const compactMode = options.range === "rolling24h"
+    ? "24H"
+    : options.range === "week"
+      ? "7D"
+      : "DAY";
   const compactLine = [
     left,
     colorize(compactDate, TEXT_STYLE, enabled),
