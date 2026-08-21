@@ -1176,6 +1176,42 @@ test("30-day trend bins use readable multi-day columns", () => {
   assert.equal(wide.binSize, 2);
   assert.equal(narrow.binCount, 10);
   assert.equal(wide.binCount, 15);
+
+  const forced = buildActualTokenBins(snapshot, bounds, 30, 96, { binSize: 1 });
+  assert.equal(forced.binSize, 1);
+  assert.equal(forced.binCount, 30);
+});
+
+test("the 30-day report image draws one bar per calendar day", () => {
+  const bounds = multiDayBounds("2026-08-15", "Pacific/Honolulu", 30);
+  const snapshot = {
+    events: [
+      {
+        timestamp: "2026-07-20T12:00:00.000Z",
+        model: "gpt-5.6-luna",
+        totalTokens: 5_000_000,
+      },
+      {
+        timestamp: "2026-08-14T12:00:00.000Z",
+        model: "gpt-5.6-sol",
+        totalTokens: 7_500_000,
+      },
+    ],
+  };
+  const svg = renderTrendImage({
+    snapshot,
+    bounds,
+    trend: buildUsageTrend(snapshot, bounds),
+    days: 30,
+    options: { imageWidth: 1_280 },
+  });
+  assert.match(svg, /<title[^>]*>Token Ledger · 30-day trend<\/title>/);
+  // Weekday captions only render on per-day columns, so their presence shows
+  // the 30-day window kept daily bars instead of multi-day bins.
+  assert.match(svg, /\bTUE\b/);
+  // Per-day columns mean no multi-day range labels like "Jul 17–19" beneath
+  // the bars (the en dash in the header subtitle is surrounded by spaces).
+  assert.doesNotMatch(svg, /\d–[A-Za-z]*\s*\d/);
 });
 
 test("fullscreen renderer applies the Codex Blue terminal theme", () => {

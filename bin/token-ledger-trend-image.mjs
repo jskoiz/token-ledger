@@ -430,7 +430,9 @@ export function renderTrendImage({
   const contentRight = width - outer;
   const contentWidth = width - outer * 2;
 
-  const actual = buildActualTokenBins(snapshot, bounds, days, plotWidth);
+  // The image has no character-cell limit, so every window gets one bar per
+  // calendar day instead of the terminal's multi-day bins.
+  const actual = buildActualTokenBins(snapshot, bounds, days, plotWidth, { binSize: 1 });
   const burn = buildBurnDayBins(trend, bounds, { days, binSize: actual.binSize });
   const meterUsable = Boolean(trend.available && burn.totalPercent > 0);
   const percentMode = Boolean(options.drain) && meterUsable;
@@ -466,7 +468,7 @@ export function renderTrendImage({
     ),
     end: bounds.start,
   };
-  const priorTotals = buildActualTokenBins(snapshot, priorBounds, days, plotWidth).totals;
+  const priorTotals = buildActualTokenBins(snapshot, priorBounds, days, plotWidth, { binSize: 1 }).totals;
 
   const latestQuotaPoint = [...(trend.points ?? [])]
     .filter((point) => point.timestampMs <= bounds.end.getTime())
@@ -980,9 +982,14 @@ export function renderTrendImage({
     }
     return top;
   };
+  const labelStep = labelEvery(binCount);
+  const isLabeledColumn = (binIndex) =>
+    binIndex % labelStep === 0 || binIndex === binCount - 1;
   for (const [binIndex, { bin, centerX, topY }] of barGeometry.entries()) {
     const binTotal = binTotalOf(bin);
-    if (binTotal > 0) {
+    // Dense windows only caption the columns that carry date labels; a total
+    // on all 30 daily columns would overlap its neighbours.
+    if (binTotal > 0 && isLabeledColumn(binIndex)) {
       // The total label sits in the band just above the stack; step it above
       // the line only when the line actually crosses that band.
       const lineTop = lineTopIfCrossing(
@@ -1004,7 +1011,7 @@ export function renderTrendImage({
         anchor: "middle",
       }));
     }
-    if (binIndex % labelEvery(binCount) === 0 || binIndex === binCount - 1) {
+    if (isLabeledColumn(binIndex)) {
       const weekday = actual.binSize === 1
         ? localWeekdayLabel(bin.startDateString, bounds.timeZone).toUpperCase()
         : "";

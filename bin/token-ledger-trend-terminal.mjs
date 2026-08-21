@@ -186,8 +186,8 @@ function sortedModelEntries(values) {
     .sort(([left], [right]) => modelSort(left, right));
 }
 
-export function buildActualTokenBins(snapshot, bounds, days, width) {
-  const binSize = chooseBinSize(days, width);
+export function buildActualTokenBins(snapshot, bounds, days, width, { binSize: forcedBinSize } = {}) {
+  const binSize = forcedBinSize ?? chooseBinSize(days, width);
   const binCount = Math.ceil(days / binSize);
   const bins = Array.from({ length: binCount }, (_, index) => ({
     startDateString: shiftCalendarDate(bounds.startDateString, index * binSize),
