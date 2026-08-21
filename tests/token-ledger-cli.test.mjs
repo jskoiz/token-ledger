@@ -226,6 +226,17 @@ test("parseArgs accepts the bare 1d rolling project view", () => {
   );
 });
 
+test("parseArgs accepts --no-open for trend images and rejects it elsewhere", () => {
+  const options = parseArgs(["trend", "--image", "--no-open"]);
+  assert.equal(options.image, true);
+  assert.equal(options.openImage, false);
+  assert.equal(parseArgs(["report"]).openImage, true);
+  assert.throws(
+    () => parseArgs(["week", "--no-open"]),
+    /--no-open is only available for the trend view/,
+  );
+});
+
 test("rolling view describes an empty range as the last 24 hours", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-rolling-empty-"));
   const snapshotPath = resolve(root, "snapshot.json");
@@ -1038,20 +1049,27 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
   assert.match(svg, /fill="#10a394"/);
   assert.match(svg, /ACTUAL TOKEN VOLUME/);
   assert.match(svg, /WEEKLY METER REMAINING/);
-  assert.match(svg, /meter dropped 35\.0%/);
-  assert.match(svg, /Rate-card estimate/);
+  assert.match(svg, /35\.0 meter points/);
+  assert.match(svg, /ESTIMATED COST/);
   assert.match(svg, /stroke="#f6b73c"/);
   assert.match(svg, /Luna/);
   assert.match(svg, /Sol/);
-  // The fixture's second window follows a genuine weekly expiry.
+  // The fixture's second window follows a genuine weekly expiry, so the
+  // reset break, its dated footnote, and the plain-language reset count all
+  // appear.
   assert.match(svg, /RESET 100%/);
-  // The all-fast Sol segment gets the darker fast-mode shade, and the Fast
-  // Mode stat card explains it.
+  assert.match(svg, /1 scheduled · 0 early/);
+  assert.match(svg, /was the normal weekly reset/);
+  // The all-fast Sol segment gets the darker fast-mode shade, and the fast
+  // mode stat card explains it.
   assert.match(svg, /fill="#0a655c"/);
-  assert.match(svg, /Fast Mode/);
+  assert.match(svg, /FAST MODE/);
   assert.match(svg, /1\.50× rate/);
-  assert.match(svg, /Darker segment shad/);
-  assert.match(svg, /prior 7d/);
+  assert.match(svg, /Darker shade = fast mode/);
+  // The projects and pace row is fed from the events in range.
+  assert.match(svg, /WHERE IT WENT · TOP PROJECTS/);
+  assert.match(svg, /PACE &amp; RUNWAY/);
+  assert.match(svg, /tokens per meter point/);
   assert.ok((svg.match(/<rect /g) ?? []).length >= 4);
 
   const drainSvg = renderTrendImage({
@@ -1062,8 +1080,8 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
     options: { imageWidth: 1_000, drain: true },
   });
   assert.match(drainSvg, /OBSERVED LIMIT DRAIN/);
-  assert.match(drainSvg, /Bars = observed li/);
-  assert.match(drainSvg, /Bars = observed meter dro/);
+  assert.match(drainSvg, /Bars = observed meter drops/);
+  assert.match(drainSvg, /35\.0 meter points/);
 });
 
 test("PNG image output has a real PNG signature", async () => {

@@ -70,9 +70,10 @@ Options:
   --ascii              Use ASCII bars instead of Unicode blocks
   --static             Print once instead of opening the interactive dashboard
   --drain               Trend columns show observed limit drain percent instead of token volume
-  --image               Write trend view as a PNG image
+  --image               Write trend view as a PNG image and open it on screen
   --image-output <file> PNG output path for trend view
   --image-width <px>   PNG image width from 900 to 2400 pixels
+  --no-open            Skip opening the finished PNG in the default viewer
   --youplot            Use the legacy single-series YouPlot renderer
   --help               Show this help
 
@@ -124,6 +125,7 @@ export function parseArgs(argv) {
     image: false,
     imageOutput: null,
     imageWidth: null,
+    openImage: true,
     drain: false,
     legacyPlot: false,
     help: false,
@@ -200,6 +202,11 @@ export function parseArgs(argv) {
         throw new Error("--image is only available for the trend view.");
       }
       options.image = true;
+    } else if (argument === "--no-open") {
+      if (options.view !== "trend") {
+        throw new Error("--no-open is only available for the trend view.");
+      }
+      options.openImage = false;
     } else if (argument === "--image-output") {
       if (options.view !== "trend") {
         throw new Error("--image-output is only available for the trend view.");
@@ -871,6 +878,7 @@ function render(options, snapshot, bounds, events, rows, allRows, freshness) {
         trend,
         days: options.trendDays,
         options,
+        projectRows: allRows,
       });
     }
     return renderTrendCombo({
@@ -997,12 +1005,34 @@ export async function run(options, { nowMs } = {}) {
     process.stderr.write(`Token Ledger: encoding ${imageLabel} PNG…\n`);
     await writeTrendPng(output, outputPath);
     process.stderr.write(`Token Ledger: finished ${imageLabel} PNG.\n`);
-    return [
+    const lines = [
       `Wrote ${options.report ? "report" : "trend image"}: ${outputPath}`,
       `Range: ${bounds.startDateString} through ${bounds.endDateString} (${bounds.timeZone})`,
-    ].join("\n");
+    ];
+    // Show the finished report on screen right away instead of leaving it to
+    // be dug out of a file browser. Skipped for piped/scripted runs so
+    // automation and CI never pop windows.
+    if (options.openImage && process.stdout.isTTY) {
+      lines.push(
+        openInViewer(outputPath)
+          ? "Opened the report in your default image viewer."
+          : "Could not open a viewer automatically; open the file above to see the report.",
+      );
+    }
+    return lines.join("\n");
   }
   return output;
+}
+
+function openInViewer(path) {
+  const platform = process.platform;
+  const [command, args] = platform === "darwin"
+    ? ["open", [path]]
+    : platform === "win32"
+      ? ["cmd", ["/c", "start", "", path]]
+      : ["xdg-open", [path]];
+  const result = spawnSync(command, args, { stdio: "ignore" });
+  return result.status === 0;
 }
 
 function shouldUseInteractive(options) {

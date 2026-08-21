@@ -67,18 +67,22 @@ same flags as the trend view (`--drain`, `--date`, `--tz`, `--image-output`,
 `--image-width`) and prints progress while rendering and encoding the image.
 
 The terminal trend view is a compact approximation of the image view. For the
-full chart grammar, use `--image`: it writes a PNG with two aligned panels
-sharing one time axis — the observed weekly meter as a line on its own 0–100%
-panel on top, and calendar-day columns of local token volume stacked by model
-below, each annotated with the observed drop ("−18.1%" means the meter fell
-18.1 points across that column's days). The drain numbers come straight from
-the meter — no pricing model involved — so token volume and actual limit
-consumption can be compared per day at a glance.
+full chart grammar, use `--image`: it writes a single shareable report card as
+a PNG — model stat cards with week-over-week delta chips and share micro-bars,
+calendar-day columns of local token volume stacked by model, the observed
+weekly meter remaining overlaid as a smoothed amber line with dashed reset
+breaks and a few callout pills, a top-projects row with pace and runway
+figures, and a plain-language footnote strip (meter points burned, estimated
+cost, scheduled vs early resets, and data freshness).
+
+When run from a terminal, the finished PNG opens in the default image viewer
+automatically so the report lands on screen instead of in a file browser.
+Pass `--no-open` to skip that; piped or scripted runs never open a window.
 
 Turns run in fast mode (service tier "priority") are drawn as a darker shade
-at the top of their model's segment, with each model's fast share in the
-legend; fast-mode turns are weighted 1.5× in the credit estimate because they
-debit the plan limit at a higher rate.
+within their model's segment, with a legend entry explaining the shade;
+fast-mode turns are weighted 1.5× in the credit estimate because they debit
+the plan limit at a higher rate.
 
 Pass `--drain` to flip the columns into limit-drain units instead: each column
 becomes the weekly limit percentage the meter dropped, stacked by model using
