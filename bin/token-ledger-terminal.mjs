@@ -78,12 +78,18 @@ function compact(value) {
     [1_000_000, "M"],
     [1_000, "K"],
   ];
-  for (const [divisor, suffix] of units) {
-    if (absolute >= divisor) {
-      const scaled = value / divisor;
-      const precision = scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2;
-      return `${scaled.toFixed(precision)}${suffix}`;
+  for (let index = 0; index < units.length; index += 1) {
+    const [divisor, suffix] = units[index];
+    if (absolute < divisor) continue;
+    const scaled = value / divisor;
+    const magnitude = Math.abs(scaled);
+    const precision = magnitude >= 100 ? 0 : magnitude >= 10 ? 1 : 2;
+    // Values that round to 1000 of a unit belong to the next unit up
+    // (999,999 → 1.00M, not 1000K).
+    if (index > 0 && Number(magnitude.toFixed(precision)) >= 1_000) {
+      return compact(Math.sign(value) * divisor * 1_000);
     }
+    return `${scaled.toFixed(precision)}${suffix}`;
   }
   return Math.round(value).toLocaleString("en-US");
 }
@@ -240,22 +246,47 @@ export function quotaCycleSummary(snapshot = {}, displayedEvents = []) {
       eventMs <= observedThroughMs
     );
   };
-  const sumTokens = (events) =>
-    events.reduce((sum, event) => sum + (Number(event.totalTokens) || 0), 0);
-  const cycleTokens = sumTokens((snapshot.events ?? []).filter(inObservedCycle));
-  const displayedTokens = sumTokens(displayedEvents.filter(inObservedCycle));
+  const sumUsage = (events) =>
+    events.reduce(
+      (acc, event) => {
+        const tokens = Number(event.totalTokens) || 0;
+        acc.tokens += tokens;
+        const credits = Number(event.rateCardCredits);
+        if (
+          event.rateCardCredits !== null &&
+          event.rateCardCredits !== undefined &&
+          Number.isFinite(credits)
+        ) {
+          acc.credits += credits;
+          acc.ratedTokens += tokens;
+        }
+        return acc;
+      },
+      { tokens: 0, credits: 0, ratedTokens: 0 },
+    );
+  const cycle = sumUsage((snapshot.events ?? []).filter(inObservedCycle));
+  const displayed = sumUsage(displayedEvents.filter(inObservedCycle));
   const usedPercent = Math.min(100, Math.max(0, Number(observation.usedPercent) || 0));
-  const displayedSharePercent = cycleTokens
-    ? (displayedTokens / cycleTokens) * 100
-    : null;
+  // The weekly meter weights usage by model, token type, and fast mode;
+  // rate-card credits carry those weights. Allocate burn by credit share
+  // when every event in the cycle is rated, and fall back to raw token
+  // share otherwise.
+  const creditsUsable =
+    cycle.tokens > 0 && cycle.ratedTokens === cycle.tokens && cycle.credits > 0;
+  const displayedSharePercent = creditsUsable
+    ? (displayed.credits / cycle.credits) * 100
+    : cycle.tokens
+      ? (displayed.tokens / cycle.tokens) * 100
+      : null;
 
   return {
     available: true,
     usedPercent,
     remainingPercent: 100 - usedPercent,
-    cycleTokens,
-    displayedTokens,
+    cycleTokens: cycle.tokens,
+    displayedTokens: displayed.tokens,
     displayedSharePercent,
+    shareBasis: creditsUsable ? "credits" : "tokens",
     estimatedDisplayedBurnPercent:
       displayedSharePercent === null
         ? null

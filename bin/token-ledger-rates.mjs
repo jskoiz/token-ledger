@@ -18,10 +18,13 @@ export const RATE_CARD = {
 };
 
 export function normalizeModel(model) {
+  // Collapse underscore and whitespace separators to dashes so variants like
+  // "gpt-5.4 mini" resolve to their own rate-card entry. Keep in lockstep
+  // with normalizeModel in lib/token-ledger-importer.mjs.
   const value = String(model || "unknown")
     .trim()
     .toLowerCase()
-    .replaceAll("_", "-");
+    .replace(/[\s_]+/g, "-");
   if (RATE_CARD[value]) return value;
   if (value.startsWith("gpt-5.6-sol")) return "gpt-5.6-sol";
   if (value.startsWith("gpt-5.6-terra")) return "gpt-5.6-terra";

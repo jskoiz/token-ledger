@@ -145,6 +145,79 @@ test("empty thread settings reset the service tier for the next turn", async () 
   }
 });
 
+test("exports clamp token subsets and price whitespace model names", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
+  const threadId = "33333333-3333-4333-8333-333333333333";
+  try {
+    const rolloutDirectory = resolve(root, "sessions", "2026", "08", "19");
+    await mkdir(rolloutDirectory, { recursive: true });
+    const timestamp = "2026-08-19T09:00:00.000Z";
+    await writeFile(
+      resolve(rolloutDirectory, `rollout-${threadId}.jsonl`),
+      serialize([
+        {
+          timestamp,
+          type: "event_msg",
+          payload: {
+            type: "task_started",
+            turn_id: "turn-1",
+            started_at: Date.parse(timestamp) / 1000,
+          },
+        },
+        {
+          timestamp,
+          type: "turn_context",
+          payload: {
+            turn_id: "turn-1",
+            model: "gpt-5.4 mini",
+            effort: "medium",
+          },
+        },
+        {
+          timestamp: "2026-08-19T09:00:01.000Z",
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: {
+                input_tokens: 90,
+                cached_input_tokens: 500,
+                output_tokens: 10,
+                reasoning_output_tokens: 40,
+                total_tokens: 100,
+              },
+              last_token_usage: {
+                input_tokens: 90,
+                cached_input_tokens: 500,
+                output_tokens: 10,
+                reasoning_output_tokens: 40,
+                total_tokens: 100,
+              },
+              model_context_window: 128000,
+            },
+          },
+        },
+      ]),
+    );
+
+    const snapshot = await collectUsage({
+      output: resolve(root, "snapshot.json"),
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+    assert.equal(snapshot.events.length, 1);
+    const event = snapshot.events[0];
+    assert.equal(event.model, "gpt-5.4-mini");
+    assert.equal(event.cachedInputTokens, 90);
+    assert.equal(event.reasoningTokens, 10);
+    // Priced at the mini rate: (90 cached × 1.875 + 10 output × 113) per 1M.
+    assert.ok(Math.abs(event.rateCardCredits - 0.00129875) < 1e-9);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("private snapshots replace atomically and enforce mode 0600", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-write-"));
   try {

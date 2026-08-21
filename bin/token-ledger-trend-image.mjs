@@ -63,16 +63,23 @@ function escapeXml(value) {
 function compact(value, digits = 2) {
   if (!Number.isFinite(value)) return "—";
   const absolute = Math.abs(value);
-  for (const [divisor, suffix] of [
+  const units = [
     [1_000_000_000, "B"],
     [1_000_000, "M"],
     [1_000, "K"],
-  ]) {
-    if (absolute >= divisor) {
-      const scaled = value / divisor;
-      const precision = scaled >= 100 ? 0 : scaled >= 10 ? 1 : digits;
-      return `${scaled.toFixed(precision)}${suffix}`;
+  ];
+  for (let index = 0; index < units.length; index += 1) {
+    const [divisor, suffix] = units[index];
+    if (absolute < divisor) continue;
+    const scaled = value / divisor;
+    const magnitude = Math.abs(scaled);
+    const precision = magnitude >= 100 ? 0 : magnitude >= 10 ? 1 : digits;
+    // Values that round to 1000 of a unit belong to the next unit up
+    // (999,999 → 1.00M, not 1000K).
+    if (index > 0 && Number(magnitude.toFixed(precision)) >= 1_000) {
+      return compact(Math.sign(value) * divisor * 1_000, digits);
     }
+    return `${scaled.toFixed(precision)}${suffix}`;
   }
   return Math.round(value).toLocaleString("en-US");
 }
