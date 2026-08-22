@@ -871,6 +871,100 @@ test("quota context maps the selected range to reset-cycle burn", () => {
   assert.match(output, /View burn\s+~20\.0 pts/);
 });
 
+test("quota burn recomputes current card credits when every cycle event is rated", () => {
+  const observation = {
+    timestamp: "2026-08-02T00:00:00.000Z",
+    usedPercent: 20,
+    windowMinutes: 10_080,
+    resetsAt: Date.parse("2026-08-07T00:00:00.000Z") / 1_000,
+  };
+  const displayed = {
+    timestamp: "2026-08-01T00:00:00.000Z",
+    model: "gpt-5.6-luna",
+    inputTokens: 1_000_000,
+    outputTokens: 0,
+    totalTokens: 1_000_000,
+    rateCardCredits: 1,
+  };
+  const other = {
+    timestamp: "2026-08-01T12:00:00.000Z",
+    model: "gpt-5.6-sol",
+    inputTokens: 120_000,
+    outputTokens: 0,
+    totalTokens: 120_000,
+    rateCardCredits: 99,
+  };
+  const quota = quotaCycleSummary(
+    { events: [displayed, other], quotaObservations: [observation] },
+    [displayed],
+  );
+  assert.equal(quota.shareBasis, "credits");
+  assert.equal(quota.displayedSharePercent, 25);
+  assert.equal(quota.estimatedDisplayedBurnPercent, 5);
+
+  const fallbackDisplayed = {
+    timestamp: "2026-08-01T00:00:00.000Z",
+    totalTokens: 1_000,
+    rateCardCredits: 10,
+  };
+  const fallbackOther = {
+    timestamp: "2026-08-01T12:00:00.000Z",
+    totalTokens: 1_000,
+    rateCardCredits: null,
+  };
+  const fallback = quotaCycleSummary(
+    {
+      events: [fallbackDisplayed, fallbackOther],
+      quotaObservations: [observation],
+    },
+    [fallbackDisplayed],
+  );
+  assert.equal(fallback.shareBasis, "tokens");
+  assert.equal(fallback.displayedSharePercent, 50);
+  assert.equal(fallback.estimatedDisplayedBurnPercent, 10);
+});
+
+test("compact totals promote values that round to 1000 of a unit", () => {
+  const events = [
+    {
+      project: "alpha",
+      threadId: "alpha-1",
+      model: "gpt-5.6-sol",
+      inputTokens: 900_000,
+      cachedInputTokens: 0,
+      totalTokens: 999_999,
+      outputTokens: 99_999,
+      useType: "sdk",
+      rateCardCredits: 1,
+    },
+  ];
+  const snapshot = { events, threads: [] };
+  const rows = aggregateProjects(snapshot, events, { rawProjects: true });
+  const output = renderTerminal({
+    options: { plain: true, ascii: true, width: 102 },
+    snapshot,
+    bounds: dayBounds("2026-08-01", "Pacific/Honolulu"),
+    events,
+    rows,
+    allRows: rows,
+  });
+  assert.match(output, /1\.00M/);
+  assert.doesNotMatch(output, /1000K/);
+});
+
+test("rate lookups normalize whitespace model separators", () => {
+  const usage = {
+    inputTokens: 1_000_000,
+    cachedInputTokens: 0,
+    outputTokens: 0,
+    reasoningTokens: 0,
+    totalTokens: 1_000_000,
+  };
+  const spaced = creditsForUsage("gpt-5.4 mini", usage);
+  assert.equal(spaced, creditsForUsage("gpt-5.4-mini", usage));
+  assert.notEqual(spaced, creditsForUsage("gpt-5.4", usage));
+});
+
 test("quota normalization is monotone inside cycles and marks resets", () => {
   const resetOne = Date.parse("2026-08-11T10:00:00.000Z") / 1_000;
   const observations = normalizeQuotaTimeline([
