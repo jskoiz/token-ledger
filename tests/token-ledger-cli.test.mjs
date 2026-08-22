@@ -47,6 +47,10 @@ import {
   writeTrendPng,
 } from "../bin/token-ledger-trend-image.mjs";
 import {
+  buildCacheReportData,
+  renderCacheReportImage,
+} from "../bin/token-ledger-cache-image.mjs";
+import {
   INTERACTIVE_FOOTER,
   INTERACTIVE_HELP,
   INTERACTIVE_KEY_INPUTS,
@@ -1213,6 +1217,110 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
   assert.match(drainSvg, /35\.0 meter points/);
 });
 
+test("cache report weights cached input, clamps event values, and keeps models secondary", () => {
+  const bounds = multiDayBounds("2026-08-15", "Pacific/Honolulu", 7);
+  const snapshot = {
+    generatedAt: "2026-08-15T12:00:00.000Z",
+    events: [
+      {
+        timestamp: "2026-08-09T12:00:00.000Z",
+        model: "gpt-5.6-luna",
+        totalTokens: 1_200,
+        inputTokens: 1_000,
+        cachedInputTokens: 800,
+        outputTokens: 200,
+      },
+      {
+        timestamp: "2026-08-10T12:00:00.000Z",
+        model: "gpt-5.6-luna",
+        totalTokens: 1_100,
+        inputTokens: 1_000,
+        cachedInputTokens: 100,
+        outputTokens: 100,
+      },
+      {
+        timestamp: "2026-08-11T12:00:00.000Z",
+        model: "gpt-5.6-sol",
+        totalTokens: 600,
+        inputTokens: 500,
+        cachedInputTokens: 900,
+        outputTokens: 100,
+      },
+      {
+        timestamp: "2026-08-12T12:00:00.000Z",
+        model: "gpt-5.5",
+        totalTokens: 300,
+        inputTokens: 0,
+        cachedInputTokens: 0,
+        outputTokens: 0,
+        breakdownAvailable: false,
+      },
+      {
+        timestamp: "2026-08-02T12:00:00.000Z",
+        model: "gpt-5.6-sol",
+        totalTokens: 1_100,
+        inputTokens: 1_000,
+        cachedInputTokens: 250,
+        outputTokens: 100,
+      },
+    ],
+  };
+
+  const data = buildCacheReportData(snapshot, bounds, 7, 1_100);
+  assert.equal(data.inputTokens, 2_500);
+  assert.equal(data.cachedInputTokens, 1_400);
+  assert.equal(data.uncachedInputTokens, 1_100);
+  assert.ok(Math.abs(data.rate - 56) < 0.0001);
+  assert.equal(data.measurementCoveragePercent, 90.625);
+  assert.equal(data.inputEventCount, 3);
+  assert.equal(data.bins[0].rate, 80);
+  assert.equal(data.bins[1].rate, 10);
+  assert.equal(data.bins[2].rate, 100);
+  assert.deepEqual(
+    data.models.map((model) => [model.model, model.rate]),
+    [["Luna", 45], ["Sol", 100]],
+  );
+
+  const svg = renderCacheReportImage({
+    snapshot,
+    bounds,
+    days: 7,
+    options: { imageWidth: 1_280 },
+  });
+  assert.match(svg, /Token Ledger · 7-day cache report/);
+  assert.match(svg, /56\.0% cached/);
+  assert.match(svg, /Prior 25\.0% · \+31\.0 pp/);
+  assert.match(svg, /CACHE RATE BY PERIOD/);
+  assert.match(svg, />MODEL<\/text>/);
+  assert.match(svg, /Luna/);
+  assert.match(svg, /Sol/);
+  assert.match(svg, /MEASUREMENT COVERAGE/);
+  assert.doesNotMatch(svg, /WHERE IT WENT|WEEKLY METER|NaN/);
+});
+
+test("cache report keeps 30 daily bins at default width and coalesces at minimum width", () => {
+  const bounds = multiDayBounds("2026-08-15", "Pacific/Honolulu", 30);
+  const snapshot = {
+    events: [
+      {
+        timestamp: "2026-08-15T12:00:00.000Z",
+        model: "gpt-5.6-luna",
+        totalTokens: 100,
+        inputTokens: 90,
+        cachedInputTokens: 45,
+        outputTokens: 10,
+      },
+    ],
+  };
+  const defaultWidth = buildCacheReportData(snapshot, bounds, 30, 1_104);
+  assert.equal(defaultWidth.binSize, 1);
+  assert.equal(defaultWidth.binCount, 30);
+
+  const minimumWidth = buildCacheReportData(snapshot, bounds, 30, 724);
+  assert.equal(minimumWidth.binSize, 2);
+  assert.equal(minimumWidth.binCount, 15);
+});
+
 test("PNG image output has a real PNG signature", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-png-"));
   try {
@@ -1284,6 +1392,110 @@ test("report emits progress while generating the PNG", async () => {
     assert.match(progress, /finished report PNG/);
   } finally {
     process.stderr.write = originalWrite;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("cache-rate report uses its separate renderer and progress label", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-cache-report-"));
+  const snapshotPath = resolve(root, "snapshot.json");
+  const outputPath = resolve(root, "cache-report.png");
+  const originalWrite = process.stderr.write;
+  const stderr = [];
+  try {
+    await writeFile(
+      snapshotPath,
+      `${JSON.stringify({
+        generatedAt: "2026-08-15T12:00:00.000Z",
+        events: [
+          {
+            timestamp: "2026-08-15T12:00:00.000Z",
+            model: "gpt-5.6-luna",
+            totalTokens: 1_000,
+            inputTokens: 900,
+            cachedInputTokens: 600,
+            outputTokens: 100,
+          },
+        ],
+        threads: [],
+        quotaObservations: [],
+      })}\n`,
+    );
+    process.stderr.write = (chunk) => {
+      stderr.push(String(chunk));
+      return true;
+    };
+    const result = await run(parseArgs([
+      "report",
+      "7d",
+      "--cache-rate",
+      "--date",
+      "2026-08-15",
+      "--input",
+      snapshotPath,
+      "--image-output",
+      outputPath,
+    ]));
+    assert.match(result, /Wrote cache report:/);
+    assert.deepEqual(
+      [...(await readFile(outputPath)).subarray(0, 8)],
+      [137, 80, 78, 71, 13, 10, 26, 10],
+    );
+    const progress = stderr.join("");
+    assert.match(progress, /generating cache report PNG/);
+    assert.match(progress, /encoding cache report PNG/);
+    assert.match(progress, /finished cache report PNG/);
+  } finally {
+    process.stderr.write = originalWrite;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("cache-rate report uses a distinct default filename", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-cache-default-"));
+  const snapshotPath = resolve(root, "snapshot.json");
+  const outputPath = resolve(root, "token-ledger-cache-report-7d.png");
+  try {
+    await writeFile(
+      snapshotPath,
+      `${JSON.stringify({
+        generatedAt: "2026-08-15T12:00:00.000Z",
+        events: [
+          {
+            timestamp: "2026-08-15T12:00:00.000Z",
+            model: "gpt-5.6-sol",
+            totalTokens: 1_000,
+            inputTokens: 900,
+            cachedInputTokens: 450,
+            outputTokens: 100,
+          },
+        ],
+      })}\n`,
+    );
+    const result = spawnSync(
+      process.execPath,
+      [
+        CLI_ENTRYPOINT,
+        "report",
+        "7d",
+        "--cache-rate",
+        "--date",
+        "2026-08-15",
+        "--input",
+        snapshotPath,
+        "--no-open",
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Wrote cache report:/);
+    assert.match(result.stdout, /token-ledger-cache-report-7d\.png/);
+    assert.deepEqual(
+      [...(await readFile(outputPath)).subarray(0, 8)],
+      [137, 80, 78, 71, 13, 10, 26, 10],
+    );
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -1716,4 +1928,17 @@ test("the report command writes the dashboard image by default", () => {
 
   const drain = parseArgs(["report", "7d", "--drain"]);
   assert.equal(drain.drain, true);
+
+  const cache = parseArgs(["report", "14d", "--cache-rate"]);
+  assert.equal(cache.cacheRate, true);
+  assert.equal(cache.image, true);
+  assert.equal(cache.trendDays, 14);
+  assert.throws(
+    () => parseArgs(["trend", "7d", "--cache-rate"]),
+    /--cache-rate is only available with the report command/,
+  );
+  assert.throws(
+    () => parseArgs(["report", "7d", "--cache-rate", "--drain"]),
+    /--cache-rate cannot be combined with --drain/,
+  );
 });
