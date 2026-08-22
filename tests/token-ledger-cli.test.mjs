@@ -1217,6 +1217,46 @@ test("30-day trend bins use readable multi-day columns", () => {
   assert.equal(forced.binCount, 30);
 });
 
+test("long trend windows fit terminal and image column widths", () => {
+  const days = 3_650;
+  const bounds = multiDayBounds("2026-08-15", "Pacific/Honolulu", days);
+  const snapshot = {
+    events: [{
+      timestamp: "2026-08-14T12:00:00.000Z",
+      model: "gpt-5.6-luna",
+      totalTokens: 1,
+    }],
+  };
+  const terminal = buildActualTokenBins(snapshot, bounds, days, 36);
+  assert.ok(terminal.binCount <= 36);
+  assert.ok(terminal.binSize > 1);
+  const terminalOutput = renderTrendPlain({
+    snapshot,
+    bounds,
+    trend: buildUsageTrend(snapshot, bounds),
+    days,
+    options: { width: 96 },
+  });
+  assert.ok(terminalOutput.split("\n").every((line) => line.length <= 96));
+
+  const imagePlotWidth = 1_280 - 124 - 126;
+  const image = buildActualTokenBins(snapshot, bounds, days, imagePlotWidth, {
+    minBinWidth: 26,
+    preferDaily: true,
+  });
+  assert.ok(image.binCount <= Math.floor(imagePlotWidth / 26));
+  assert.ok(image.binSize > 1);
+  const svg = renderTrendImage({
+    snapshot,
+    bounds,
+    trend: buildUsageTrend(snapshot, bounds),
+    days,
+    options: { imageWidth: 1_280 },
+  });
+  assert.match(svg, /<title[^>]*>Token Ledger · 3650-day trend<\/title>/);
+  assert.doesNotMatch(svg, /NaN/);
+});
+
 test("the 30-day report image draws one bar per calendar day", () => {
   const bounds = multiDayBounds("2026-08-15", "Pacific/Honolulu", 30);
   const snapshot = {
@@ -1242,7 +1282,7 @@ test("the 30-day report image draws one bar per calendar day", () => {
   });
   assert.match(svg, /<title[^>]*>Token Ledger · 30-day trend<\/title>/);
   // Weekday captions only render on per-day columns, so their presence shows
-  // the 30-day window kept daily bars instead of multi-day bins.
+  // the 30-day window still fits as daily bars at this image width.
   assert.match(svg, /\bTUE\b/);
   // Per-day columns mean no multi-day range labels like "Jul 17–19" beneath
   // the bars (the en dash in the header subtitle is surrounded by spaces).

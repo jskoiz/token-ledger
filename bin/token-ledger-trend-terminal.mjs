@@ -175,9 +175,19 @@ function localDateLabel(dateString, timeZone) {
     .toUpperCase();
 }
 
-function chooseBinSize(days, width) {
-  if (days <= 14) return 1;
-  return width >= 120 ? 2 : 3;
+export function chooseBinSize(days, width, { minBinWidth = 1, preferDaily = false } = {}) {
+  const rangeDays = Number(days);
+  const plotWidth = Math.max(1, Number(width) || 1);
+  const minimumBinWidth = Math.max(1, Number(minBinWidth) || 1);
+  const maxBinCount = Math.max(1, Math.floor(plotWidth / minimumBinWidth));
+  const preferredBinSize = preferDaily
+    ? 1
+    : rangeDays <= 14
+      ? 1
+      : plotWidth >= 120
+        ? 2
+        : 3;
+  return Math.max(preferredBinSize, Math.ceil(rangeDays / maxBinCount));
 }
 
 function sortedModelEntries(values) {
@@ -186,8 +196,14 @@ function sortedModelEntries(values) {
     .sort(([left], [right]) => modelSort(left, right));
 }
 
-export function buildActualTokenBins(snapshot, bounds, days, width, { binSize: forcedBinSize } = {}) {
-  const binSize = forcedBinSize ?? chooseBinSize(days, width);
+export function buildActualTokenBins(
+  snapshot,
+  bounds,
+  days,
+  width,
+  { binSize: forcedBinSize, minBinWidth, preferDaily } = {},
+) {
+  const binSize = forcedBinSize ?? chooseBinSize(days, width, { minBinWidth, preferDaily });
   const binCount = Math.ceil(days / binSize);
   const bins = Array.from({ length: binCount }, (_, index) => ({
     startDateString: shiftCalendarDate(bounds.startDateString, index * binSize),
