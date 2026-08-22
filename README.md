@@ -1,183 +1,156 @@
 # Token Ledger
 
-Token Ledger is a small, local-only terminal dashboard for Codex usage. It
-shows ranked project bars, model mix, usage type, cache coverage, and reset
-cycle context without sending your data anywhere.
+Token Ledger is a local-only Codex usage dashboard with two outputs:
 
-## Install
+- a generated PNG report for trends, model composition, and weekly-meter
+  context;
+- a terminal dashboard for a fast project and token summary.
 
-Requires Node.js 22.13 or newer.
+This README describes the local checkout. It does not assume a hosted report
+or a published npm package.
 
-Once published, install the CLI with:
+## Install and use
+
+Requires Node.js 22.13 or newer. From this checkout:
 
 ```bash
-npm install -g tledger
+npm install
 ```
 
-For a one-time run without a permanent global install:
+The same local install provides both outputs. To install the `tledger` bin
+locally on your PATH instead:
 
 ```bash
-npx tledger week
-```
-
-Until the package is published, install it from this repository:
-
-```bash
-git clone <repository-url>
-cd token-ledger
 npm install -g .
 ```
 
-The package uses a small runtime image encoder for PNG report output, Node's
-built-in SQLite support, and reads Codex data directly from the local machine.
+Generate the report as a PNG. `report` is the image form of the trend view;
+the default file is `token-ledger-report-7d.png` in the current directory.
 
-## Run
+```bash
+tledger report 7d --no-open
+# choose a destination explicitly
+tledger report 7d --image-output artifacts/token-ledger-report-7d.png --no-open
+```
 
-The shortest useful command is:
+Use the terminal dashboard for the compact view:
 
 ```bash
 tledger week
-```
-
-It defaults to today's seven-day window, the computer's local timezone, the
-top 10 projects, and the local Codex data directory. The default terminal view
-is interactive; press `q` or `esc` to exit.
-
-Other common views:
-
-```bash
-tledger 1d
+tledger week 2026-08-20 --static
 tledger 1d --static
-tledger 2d
-tledger 1w
-tledger 3w --static
-tledger day 2026-08-05
-tledger week --top 5
-tledger week --static
-tledger trend 7d --static
-tledger trend 7d --image --image-output artifacts/token-ledger-trend-7d.png
-tledger report 7d
 ```
 
-Bare duration aliases such as `tledger 1d`, `tledger 2d`, `tledger 3d`,
-`tledger 1w`, `tledger 2w`, and `tledger 3w` show the `TOKENS BY PROJECT`
-breakdown for a rolling window ending when the command starts. Day and week
-aliases accept any positive `Nd` or `Nw` value up to 3,650 days. `tledger 1d`
-is the existing rolling 24-hour view; `tledger 1w` is a rolling seven-day
-window. This is different from `tledger day today`, which covers the current
-calendar day from local midnight, and `tledger week`, which covers seven local
-calendar days.
+`week` covers seven local calendar days ending on the selected day; its upper
+boundary is the next local midnight and is end-exclusive. `1d` is a rolling
+24-hour view ending when the command starts. In a TTY, the project dashboard
+is interactive; `--static` prints once, and `--plain` or `NO_COLOR=1` disables
+color. In the interactive view, `j`/`k` select a project; `q`, `Q`, `Esc`, or `Ctrl-C` exits.
+Enter does not inspect a project, and `d` / `w` / `m` do not change the range;
+choose the range in the command. `trend [Nd|Nw] --image` is equivalent to
+`report [Nd|Nw]`.
 
-`tledger report [Nd|Nw]` is the one-step report output: it writes the
-dashboard PNG (identical to `trend --image`) to
-`token-ledger-report-<period>.png` in the current directory. It accepts the
-same flags as the trend view (`--drain`, `--date`, `--tz`, `--image-output`,
-`--image-width`) and prints progress while rendering and encoding the image.
+## Cache and input controls
 
-The terminal trend view is a compact approximation of the image view. For the
-full chart grammar, use `--image`: it writes a single shareable report card as
-a PNG — model stat cards with week-over-week delta chips and share micro-bars,
-calendar-day columns of local token volume stacked by model, the observed
-weekly meter remaining overlaid as a smoothed amber line with dashed reset
-breaks and a few callout pills, a top-projects row with pace and runway
-figures, and a plain-language footnote strip (meter points burned, estimated
-cost, scheduled vs early resets, and data freshness).
-
-When run from a terminal, the finished PNG opens in the default image viewer
-automatically so the report lands on screen instead of in a file browser.
-Pass `--no-open` to skip that; piped or scripted runs never open a window.
-
-Turns run in fast mode (service tier "priority") are drawn as a darker shade
-within their model's segment, with a legend entry explaining the shade;
-fast-mode turns are weighted 1.5× in the credit estimate because they debit
-the plan limit at a higher rate.
-
-Pass `--drain` to flip the columns into limit-drain units instead: each column
-becomes the weekly limit percentage the meter dropped, stacked by model using
-rate-card credit weights (an estimate — the official card is the best
-available proxy for per-model debit, but subscription limits are not billed
-per token), on the same percent scale as the meter line.
-
-Meter windows are keyed by their server-reported reset timestamp, so a fresh
-window that starts days early (a provider-initiated limit restart) is drawn as
-its own cycle and labeled `restart`, while a true weekly expiry is labeled
-`reset`.
-Stale readings from sessions still reporting a superseded window are dropped
-instead of being fused into the line as phantom drain. Drops observed after a
-sparse meter gap (over 36 hours) are spread across the covered days and marked
-with `≈`. When a range has no usable meter drain, columns fall back to raw
-local token counts and the chart says so.
-
-`--image` defaults to `token-ledger-trend-7d.png` in the current directory.
-Use `--image-output <file.png>` to choose the path and `--image-width <px>` to
-choose a width from 900 to 2400 pixels.
-
-Use `trend 14d` for daily columns across two weeks. At 30 days, the terminal
-uses readable multi-day bins: three-day bins at ordinary widths and two-day
-bins on wider terminals. The image view uses the same readable multi-day
-binning at 30 days. The image also reports the separate local rate-card credit
-estimate when token breakdowns are available; that estimate is an absolute
-credit count and never rescales the observed-drain columns.
-
-The CLI automatically checks the local Codex source files before rendering. If
-they are newer than the local cache, it rebuilds the privacy-reduced snapshot.
-The first refresh may scan historical rollout files; later runs use the cache
-for one hour before checking source freshness again. Use `--refresh` when you
-need to force an immediate rebuild.
-
-The `1d` project dashboard shows a compact snapshot-age line such as
-`SNAPSHOT · fresh · 12m old`. `fresh` means the snapshot is within the
-one-hour cache window, `stale` means it is older, and `age unknown` means the
-snapshot has no usable capture-time metadata. The indicator does not print a
-local path or trigger another source scan.
-
-Useful overrides:
+The default privacy-reduced snapshot is
+`~/.token-ledger/token-ledger-snapshot.json`. On a normal default-path run, a
+snapshot whose mtime is in the past and less than one hour old skips the source
+walk. An exact-hour or future mtime is not fresh; an older snapshot is checked
+against local source mtimes before it is reused or rebuilt.
 
 ```bash
-# Use another timezone instead of the computer's local timezone
-tledger week --tz America/New_York
-
-# Force a complete local refresh
+# Force a rebuild from CODEX_HOME or ~/.codex
 tledger week --refresh
 
-# Skip the freshness check and use the existing cache
+# Read the existing default snapshot without a source-freshness check
 tledger week --no-refresh
 
-# Read a specific privacy-reduced snapshot
+# Read an explicit snapshot without automatic freshness checks
 tledger week --input /path/to/token-ledger-snapshot.json
 ```
 
-`--static` prints once for pipes, logs, or terminals without interactive input.
-`--plain` or `NO_COLOR=1` disables ANSI color. `--youplot` is an optional
-legacy renderer and is not required for the default dashboard.
+`--refresh` rebuilds the default snapshot and cannot be combined with
+`--input` in this checkout. `--no-archived` excludes `archived_sessions` when a
+refresh occurs. The collector can also be run directly:
 
-## Local data and privacy
-
-The CLI reads from `CODEX_HOME` when set, otherwise `~/.codex`. It uses local
-Codex rollout JSONL files, the session index, and local state metadata. It
-writes its privacy-reduced cache to:
-
-```text
-~/.token-ledger/token-ledger-snapshot.json
+```bash
+node lib/token-ledger-importer.mjs --output /path/to/token-ledger-snapshot.json
 ```
 
-The collector does not export message bodies, reasoning text, tool arguments or
-results, credentials, file contents, or full local paths. Display titles may
-contain user-written text. CLI errors and empty-state source labels show only a
-safe filename label, not an absolute input or source path. When a PNG or report
-is written, the explicit output path is reported so you can find the file. The
-CLI makes no network requests.
+## Report versus CLI
 
-## Keyboard controls
+| | Generated report | Terminal dashboard |
+| --- | --- | --- |
+| Command | `tledger report 7d` or `tledger trend 7d --image` | `tledger week`, `tledger 1d`, or `tledger day <date>` |
+| Output | One PNG with daily token columns, model cards, weekly-meter line, project ranking, pace/runway, and estimate/provenance footnotes | Interactive or static project rows with totals, shares, thread counts, model mix, usage type, cache split, and reset-cycle context |
+| Range | A selected local-calendar-day trend window, such as 7d or 2w | A calendar day/week or a rolling 24-hour/`Nd`/`Nw` window |
+| Estimate surface | Rate-card credits, meter-derived burn, and runway are called out in the report | The sidebar can show derived `View burn`; project detail includes rate-card credit shares when available |
 
-In the interactive dashboard:
+The report is the broader visual summary. The CLI does not open or generate a
+report unless you request the `report`, `trend --image`, or `--image` form.
 
-- `↑` / `↓` or `j` / `k` moves between projects.
-- `q`, `Q`, `Esc`, or `Ctrl-C` exits.
-- Enter does not inspect a project, and `d` / `w` / `m` do not change the
-  range; choose the desired range in the command instead.
+## Examples
 
-## Verify from source
+### Seven-day report
+
+![Seven-day Token Ledger report example](docs/token-ledger-report-7-day.png)
+
+### Non-report CLI output
+
+![Anonymized Token Ledger terminal output](docs/token-ledger-cli-week.png)
+
+The terminal capture was made from a local privacy-reduced snapshot after
+replacing project and thread labels with neutral names. It contains no prompts,
+responses, secrets, home paths, or project names.
+
+## What is observed
+
+The collector reads local rollout JSONL under `sessions/` and, unless disabled,
+`archived_sessions/`, plus `session_index.jsonl` and read-only `state_5.sqlite`
+metadata. It retains positive `last_token_usage` model-call events and their
+timestamps, turn IDs, model/source attribution, and token categories.
+
+Observed totals are the sum of globally de-duplicated retained events. Events
+with turn IDs use the turn plus cumulative/last-usage/context signatures;
+legacy events without turn IDs use a high-specificity usage signature and are
+marked as heuristic. State database token counters are kept as non-additive
+reference values because forks and subagents inherit cumulative history.
+
+Input, cached-input, output, and reasoning are stored as separate categories:
+cached input is a subset of input, and reasoning is a subset of output. Any
+composition that presents them together subtracts those subsets to avoid
+double counting. Models are attributed from turn context/settings and local
+thread metadata, then normalized for display.
+
+The weekly meter uses local rate-limit observations for the account-wide
+weekly window. Reset timestamps identify windows; stale readings and separate
+named pools are not stitched into that meter. Reset type, remaining
+percentage, observation time, and the selected window are local observations,
+not an official account-wide quota or billing record.
+
+The exported snapshot contains token metadata, model/use-type labels, project
+labels, and display titles. It omits message bodies, reasoning text, tool
+arguments/results, credential fields, and full local paths. Display titles and
+project labels are user-written or local metadata and should be reviewed before
+sharing. Normal successful dashboard output is privacy-reduced, but diagnostics
+or explicit PNG writes may echo configured snapshot, Codex, or output path
+labels.
+
+## What is estimated
+
+Credit values use the hardcoded rate card dated **2026-08-17**. Cached input is
+priced separately, priority/fast-mode events use the 1.5× multiplier, and
+events without a detailed breakdown or known model rate are unrated. These are
+rate-card estimates, not provider billing totals.
+
+When meter observations are available, report bars in `--drain` mode represent
+observed meter drops; model attribution within a drop uses rate-card weights
+when possible and token weights as a fallback. Long observation gaps are
+spread across local calendar days as estimates. Tokens-per-meter-point,
+model-split burn, runway, credit-per-percent, and CLI `View burn` are derived
+estimates. None is official billing, quota, or account-completeness truth.
+
+## Verify
 
 ```bash
 npm test
@@ -185,7 +158,3 @@ npm run lint
 npm run verify:release
 npm pack --dry-run --json
 ```
-
-`npm run verify:release` packs the allowlisted artifact, installs that tarball
-in a clean temporary directory with no network or Codex data access, and runs
-the installed `tledger --help` and synthetic `tledger 1d --static` smoke checks.
