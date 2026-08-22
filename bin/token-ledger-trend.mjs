@@ -283,7 +283,7 @@ export function normalizeQuotaTimeline(observations) {
   return normalized;
 }
 
-function eventCredits(event) {
+export function eventCredits(event) {
   // Recompute from token components first so the current rate card applies;
   // snapshots can carry credits stored under an outdated card. Fast-mode
   // turns (service tier "priority") debit the limit at a higher rate.

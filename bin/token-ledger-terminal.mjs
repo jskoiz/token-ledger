@@ -1,4 +1,5 @@
 import {
+  eventCredits,
   normalizeQuotaTimeline,
   weeklyQuotaObservations,
 } from "./token-ledger-trend.mjs";
@@ -251,12 +252,8 @@ export function quotaCycleSummary(snapshot = {}, displayedEvents = []) {
       (acc, event) => {
         const tokens = Number(event.totalTokens) || 0;
         acc.tokens += tokens;
-        const credits = Number(event.rateCardCredits);
-        if (
-          event.rateCardCredits !== null &&
-          event.rateCardCredits !== undefined &&
-          Number.isFinite(credits)
-        ) {
+        const credits = eventCredits(event);
+        if (Number.isFinite(credits) && credits >= 0) {
           acc.credits += credits;
           acc.ratedTokens += tokens;
         }

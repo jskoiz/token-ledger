@@ -860,7 +860,7 @@ test("quota context maps the selected range to reset-cycle burn", () => {
   assert.match(output, /View burn\s+~20\.0 pts/);
 });
 
-test("quota burn uses credit weighting when every cycle event is rated", () => {
+test("quota burn recomputes current card credits when every cycle event is rated", () => {
   const observation = {
     timestamp: "2026-08-02T00:00:00.000Z",
     usedPercent: 20,
@@ -869,13 +869,19 @@ test("quota burn uses credit weighting when every cycle event is rated", () => {
   };
   const displayed = {
     timestamp: "2026-08-01T00:00:00.000Z",
-    totalTokens: 1_000,
-    rateCardCredits: 10,
+    model: "gpt-5.6-luna",
+    inputTokens: 1_000_000,
+    outputTokens: 0,
+    totalTokens: 1_000_000,
+    rateCardCredits: 1,
   };
   const other = {
     timestamp: "2026-08-01T12:00:00.000Z",
-    totalTokens: 1_000,
-    rateCardCredits: 30,
+    model: "gpt-5.6-sol",
+    inputTokens: 120_000,
+    outputTokens: 0,
+    totalTokens: 120_000,
+    rateCardCredits: 99,
   };
   const quota = quotaCycleSummary(
     { events: [displayed, other], quotaObservations: [observation] },
@@ -885,12 +891,22 @@ test("quota burn uses credit weighting when every cycle event is rated", () => {
   assert.equal(quota.displayedSharePercent, 25);
   assert.equal(quota.estimatedDisplayedBurnPercent, 5);
 
+  const fallbackDisplayed = {
+    timestamp: "2026-08-01T00:00:00.000Z",
+    totalTokens: 1_000,
+    rateCardCredits: 10,
+  };
+  const fallbackOther = {
+    timestamp: "2026-08-01T12:00:00.000Z",
+    totalTokens: 1_000,
+    rateCardCredits: null,
+  };
   const fallback = quotaCycleSummary(
     {
-      events: [displayed, { ...other, rateCardCredits: null }],
+      events: [fallbackDisplayed, fallbackOther],
       quotaObservations: [observation],
     },
-    [displayed],
+    [fallbackDisplayed],
   );
   assert.equal(fallback.shareBasis, "tokens");
   assert.equal(fallback.displayedSharePercent, 50);
