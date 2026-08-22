@@ -48,6 +48,9 @@ Other common views:
 ```bash
 tledger 1d
 tledger 1d --static
+tledger 2d
+tledger 1w
+tledger 3w --static
 tledger day 2026-08-05
 tledger week --top 5
 tledger week --static
@@ -56,11 +59,16 @@ tledger trend 7d --image --image-output artifacts/token-ledger-trend-7d.png
 tledger report 7d
 ```
 
-`tledger 1d` shows the `TOKENS BY PROJECT` breakdown for the rolling 24 hours
-ending when the command starts. It is different from `tledger day today`, which
-covers the current calendar day from local midnight.
+Bare duration aliases such as `tledger 1d`, `tledger 2d`, `tledger 3d`,
+`tledger 1w`, `tledger 2w`, and `tledger 3w` show the `TOKENS BY PROJECT`
+breakdown for a rolling window ending when the command starts. Day and week
+aliases accept any positive `Nd` or `Nw` value up to 3,650 days. `tledger 1d`
+is the existing rolling 24-hour view; `tledger 1w` is a rolling seven-day
+window. This is different from `tledger day today`, which covers the current
+calendar day from local midnight, and `tledger week`, which covers seven local
+calendar days.
 
-`tledger report [7d|14d|30d]` is the one-step report output: it writes the
+`tledger report [Nd|Nw]` is the one-step report output: it writes the
 dashboard PNG (identical to `trend --image`) to
 `token-ledger-report-<period>.png` in the current directory. It accepts the
 same flags as the trend view (`--drain`, `--date`, `--tz`, `--image-output`,

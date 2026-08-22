@@ -6,6 +6,7 @@ import {
 
 const WEEK_MINUTES = 10_080;
 const RESET_JITTER_SECONDS = 5 * 60;
+const MAX_TREND_DAYS = 3_650;
 // Meter observations more than this far apart get their burn spread across
 // calendar days as an estimate rather than pinned to the observation day.
 const LONG_GAP_MS = 36 * 60 * 60 * 1_000;
@@ -92,8 +93,9 @@ function todayInTimeZone(timeZone) {
 }
 
 export function multiDayBounds(value, timeZone, rangeDays) {
-  if (![7, 14, 30].includes(Number(rangeDays))) {
-    throw new Error("Trend range must be 7, 14, or 30 days.");
+  const days = Number(rangeDays);
+  if (!Number.isSafeInteger(days) || days < 1 || days > MAX_TREND_DAYS) {
+    throw new Error(`Trend range must be between 1 and ${MAX_TREND_DAYS} days.`);
   }
   let endDateString = value;
   if (!endDateString || endDateString === "today") {
@@ -113,7 +115,7 @@ export function multiDayBounds(value, timeZone, rangeDays) {
   ) {
     throw new Error(`Invalid calendar day: ${endDateString}`);
   }
-  const startDateString = shiftCalendarDate(endDateString, -Number(rangeDays) + 1);
+  const startDateString = shiftCalendarDate(endDateString, -days + 1);
   return {
     dateString: endDateString,
     startDateString,
@@ -121,7 +123,7 @@ export function multiDayBounds(value, timeZone, rangeDays) {
     start: zonedMidnight(startDateString, timeZone),
     end: zonedMidnight(shiftCalendarDate(endDateString, 1), timeZone),
     timeZone,
-    rangeDays: Number(rangeDays),
+    rangeDays: days,
   };
 }
 

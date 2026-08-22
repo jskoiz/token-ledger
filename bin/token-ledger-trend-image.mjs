@@ -70,6 +70,7 @@ const COLORS = {
 const FONT_FAMILY = "system-ui, -apple-system, 'Segoe UI', sans-serif";
 const MONO_FAMILY = "ui-monospace, Menlo, monospace";
 const FAST_MODE_LABEL_COLOR = "#a78bfa";
+const MIN_BAR_WIDTH = 26;
 
 function escapeXml(value) {
   return String(value)
@@ -437,9 +438,12 @@ export function renderTrendImage({
   const contentRight = width - outer;
   const contentWidth = width - outer * 2;
 
-  // The image has no character-cell limit, so every window gets one bar per
-  // calendar day instead of the terminal's multi-day bins.
-  const actual = buildActualTokenBins(snapshot, bounds, days, plotWidth, { binSize: 1 });
+  // Keep daily bars while they fit at the minimum readable width; aggregate
+  // longer windows into multi-day columns so bars and labels never overlap.
+  const actual = buildActualTokenBins(snapshot, bounds, days, plotWidth, {
+    minBinWidth: MIN_BAR_WIDTH,
+    preferDaily: true,
+  });
   const burn = buildBurnDayBins(trend, bounds, { days, binSize: actual.binSize });
   const meterUsable = Boolean(trend.available && burn.totalPercent > 0);
   const percentMode = Boolean(options.drain) && meterUsable;
@@ -475,7 +479,10 @@ export function renderTrendImage({
     ),
     end: bounds.start,
   };
-  const priorTotals = buildActualTokenBins(snapshot, priorBounds, days, plotWidth, { binSize: 1 }).totals;
+  const priorTotals = buildActualTokenBins(snapshot, priorBounds, days, plotWidth, {
+    minBinWidth: MIN_BAR_WIDTH,
+    preferDaily: true,
+  }).totals;
 
   const latestQuotaPoint = [...(trend.points ?? [])]
     .filter((point) => point.timestampMs <= bounds.end.getTime())
@@ -743,7 +750,7 @@ export function renderTrendImage({
 
   // ---- Bars ----
   const slotWidth = plotWidth / binCount;
-  const barWidth = Math.min(74, Math.max(26, slotWidth * 0.6));
+  const barWidth = Math.min(74, Math.max(MIN_BAR_WIDTH, slotWidth * 0.6));
   const barGeometry = bars.map((bin, binIndex) => {
     const centerX = plotLeft + (binIndex + 0.5) * slotWidth;
     return {

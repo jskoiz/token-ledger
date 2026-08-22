@@ -138,8 +138,13 @@ function displayProject(row) {
   return row.displayProject || row.project || "Unlabelled activity";
 }
 
-function dateLabel(bounds, range = "day") {
+function isRollingRange(range) {
+  return range === "rolling24h" || range === "rolling";
+}
+
+function dateLabel(bounds, range = "day", rollingLabel = "1 day") {
   if (range === "rolling24h") return "LAST 24 HOURS";
+  if (range === "rolling") return `LAST ${rollingLabel.toUpperCase()}`;
   if (range === "week" && bounds.startDateString && bounds.endDateString) {
     const startParts = bounds.startDateString.split("-").map(Number);
     const endParts = bounds.endDateString.split("-").map(Number);
@@ -538,9 +543,15 @@ function snapshotLine(freshness, enabled) {
 
 function headerLines(stats, bounds, frameWidth, options, enabled, freshness) {
   const left = colorize("TOKEN LEDGER", TITLE_STYLE, enabled);
-  const date = colorize(dateLabel(bounds, options.range), TEXT_STYLE, enabled);
+  const date = colorize(
+    dateLabel(bounds, options.range, options.rollingLabel),
+    TEXT_STYLE,
+    enabled,
+  );
   const modeLabel = options.range === "rolling24h"
     ? "24 HOURS"
+    : options.range === "rolling"
+      ? options.rollingLabel.toUpperCase()
     : options.range === "week"
       ? "7 DAYS"
       : "DAY";
@@ -561,15 +572,17 @@ function headerLines(stats, bounds, frameWidth, options, enabled, freshness) {
   ].join(join);
   if (visibleLength(fullLine) < frameWidth) {
     const lines = [alignHeader(fullLine)];
-    if (options.range === "rolling24h") lines.push(alignHeader(snapshotLine(freshness, enabled)));
+    if (isRollingRange(options.range)) lines.push(alignHeader(snapshotLine(freshness, enabled)));
     return lines;
   }
 
-  const compactDate = dateLabel(bounds, options.range)
+  const compactDate = dateLabel(bounds, options.range, options.rollingLabel)
     .replace(/ 20\d{2}$/, "")
     .replace(" – ", "–");
   const compactMode = options.range === "rolling24h"
     ? "24H"
+    : options.range === "rolling"
+      ? `${options.rollingAmount}${options.rollingUnit.toUpperCase()}`
     : options.range === "week"
       ? "7D"
       : "DAY";
@@ -584,7 +597,7 @@ function headerLines(stats, bounds, frameWidth, options, enabled, freshness) {
   ].join(join);
   if (visibleLength(compactLine) < frameWidth) {
     const lines = [alignHeader(compactLine)];
-    if (options.range === "rolling24h") lines.push(alignHeader(snapshotLine(freshness, enabled)));
+    if (isRollingRange(options.range)) lines.push(alignHeader(snapshotLine(freshness, enabled)));
     return lines;
   }
 
@@ -599,7 +612,7 @@ function headerLines(stats, bounds, frameWidth, options, enabled, freshness) {
     compact(stats.projectCount),
   ].join(" ");
   const lines = [alignHeader(minimalLine)];
-  if (options.range === "rolling24h") lines.push(alignHeader(snapshotLine(freshness, enabled)));
+  if (isRollingRange(options.range)) lines.push(alignHeader(snapshotLine(freshness, enabled)));
   return lines;
 }
 

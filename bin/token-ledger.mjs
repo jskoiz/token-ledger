@@ -32,6 +32,8 @@ const DEFAULT_TOP = 10;
 const DEFAULT_TIME_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone;
 export const SNAPSHOT_CACHE_MAX_AGE_MS = 60 * 60 * 1000;
 export const ROLLING_24_HOURS_MS = 24 * 60 * 60 * 1000;
+const MAX_ROLLING_DAYS = 3_650;
+const DURATION_ALIAS = /^(\d+)(d|w)$/i;
 const ANSI_RESET = "\u001b[0m";
 const MODEL_COLORS = {
   sol: TERMINAL_MODEL_COLORS.sol,
@@ -47,16 +49,18 @@ function usage() {
 
 Usage:
   tledger 1d                 Rolling 24-hour project breakdown (ends now)
+  tledger <N>d               Rolling N-day project breakdown (ends now)
+  tledger <N>w               Rolling N-week project breakdown (ends now)
   tledger day <YYYY-MM-DD>
   tledger week [end-day]
-  tledger trend [7d|14d|30d]
-  tledger report [7d|14d|30d]
+  tledger trend [Nd|Nw]
+  tledger report [Nd|Nw]
   npm run usage:day -- <YYYY-MM-DD>
   npm run usage:week -- [end-day]
 
 Options:
   --date <day>         Date as YYYY-MM-DD, today, or yesterday
-  --period <window>    Trend window: 7d, 14d, or 30d
+  --period <window>    Trend window, for example 7d, 14d, or 2w
   --input <file>       Snapshot to read (default: ~/.token-ledger/token-ledger-snapshot.json)
   --refresh            Rebuild the default snapshot from CODEX_HOME or ~/.codex
   --no-refresh         Use the cached snapshot without checking local JSONL files
@@ -85,6 +89,39 @@ the snapshot or prints message bodies, tool payloads, credentials, or local
 input/source paths. Explicit PNG output paths are reported after writing.`;
 }
 
+function durationAlias(value) {
+  const match = DURATION_ALIAS.exec(String(value ?? ""));
+  if (!match) return null;
+  const amount = Number(match[1]);
+  const unit = match[2].toLowerCase();
+  const days = unit === "w" ? amount * 7 : amount;
+  if (
+    !Number.isSafeInteger(amount) ||
+    !Number.isSafeInteger(days) ||
+    amount < 1 ||
+    days > MAX_ROLLING_DAYS
+  ) {
+    throw new Error(
+      `Duration must be between 1d and ${MAX_ROLLING_DAYS}d (or the equivalent in weeks).`,
+    );
+  }
+  const noun = unit === "w"
+    ? amount === 1 ? "week" : "weeks"
+    : amount === 1 ? "day" : "days";
+  return {
+    amount,
+    unit,
+    days,
+    label: `${amount} ${noun}`,
+  };
+}
+
+function rollingRangeDescription(options) {
+  return options.range === "rolling24h"
+    ? "the last 24 hours"
+    : `the last ${options.rollingLabel}`;
+}
+
 function readOption(argv, index, name) {
   const value = argv[index + 1];
   if (!value || value.startsWith("--")) {
@@ -94,9 +131,13 @@ function readOption(argv, index, name) {
 }
 
 export function parseArgs(argv) {
+  const alias = durationAlias(argv[0]);
   const rolling24hCommand = argv[0] === "1d";
+  const rollingDurationCommand = Boolean(alias) && !rolling24hCommand;
   const command = rolling24hCommand
     ? "rolling24h"
+    : rollingDurationCommand
+      ? "rolling"
     : argv[0] === "week"
       ? "week"
       : argv[0] === "trend" || argv[0] === "report"
@@ -106,6 +147,11 @@ export function parseArgs(argv) {
     range: command,
     view: command === "trend" ? "trend" : "projects",
     rolling24h: rolling24hCommand,
+    rollingDuration: rollingDurationCommand,
+    rollingDays: alias?.days ?? (rolling24hCommand ? 1 : null),
+    rollingAmount: alias?.amount ?? (rolling24hCommand ? 1 : null),
+    rollingUnit: alias?.unit ?? (rolling24hCommand ? "d" : null),
+    rollingLabel: alias?.label ?? "1 day",
     report: argv[0] === "report",
     trendDays: 7,
     date: null,
@@ -132,7 +178,7 @@ export function parseArgs(argv) {
   };
 
   let trendPeriodSeen = false;
-  let index = ["1d", "day", "week", "trend", "report"].includes(argv[0]) ? 1 : 0;
+  let index = alias || ["day", "week", "trend", "report"].includes(argv[0]) ? 1 : 0;
   for (; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--help" || argument === "-h") {
@@ -148,10 +194,13 @@ export function parseArgs(argv) {
         throw new Error("Trend period can only be specified once.");
       }
       const value = readOption(argv, index, "--period");
-      if (!["7d", "14d", "30d"].includes(value)) {
-        throw new Error("Trend period must be 7d, 14d, or 30d.");
+      const period = durationAlias(value);
+      if (!period) {
+        throw new Error(
+          "Trend period must use a positive number of days or weeks, such as 7d or 2w.",
+        );
       }
-      options.trendDays = Number.parseInt(value, 10);
+      options.trendDays = period.days;
       trendPeriodSeen = true;
       index += 1;
     } else if (argument === "--input") {
@@ -248,10 +297,13 @@ export function parseArgs(argv) {
       if (trendPeriodSeen) {
         throw new Error("Trend period can only be specified once.");
       }
-      if (!["7d", "14d", "30d"].includes(argument)) {
-        throw new Error("Trend period must be 7d, 14d, or 30d.");
+      const period = durationAlias(argument);
+      if (!period) {
+        throw new Error(
+          "Trend period must use a positive number of days or weeks, such as 7d or 2w.",
+        );
       }
-      options.trendDays = Number.parseInt(argument, 10);
+      options.trendDays = period.days;
       trendPeriodSeen = true;
     } else if (!argument.startsWith("-") && !options.date) {
       options.date = argument;
@@ -261,13 +313,13 @@ export function parseArgs(argv) {
   }
 
   if (options.report) options.image = true;
-  if (!options.help && options.rolling24h && options.date) {
-    throw new Error("1d does not accept --date; its rolling window ends now.");
+  if (!options.help && (options.rolling24h || options.rollingDuration) && options.date) {
+    throw new Error(`${options.rollingLabel} does not accept --date; its rolling window ends now.`);
   }
   if (!options.help && !options.date && (options.range === "week" || options.view === "trend")) {
     options.date = "today";
   }
-  if (!options.help && !options.date && !options.rolling24h) {
+  if (!options.help && !options.date && !options.rolling24h && !options.rollingDuration) {
     throw new Error("A day is required, for example: tledger day 2026-08-01");
   }
   if (!options.help && options.refresh && !options.autoRefresh) {
@@ -394,18 +446,33 @@ export function weekBounds(value, timeZone) {
   };
 }
 
-export function rolling24hBounds(value = new Date(), timeZone = DEFAULT_TIME_ZONE) {
+export function rollingDurationBounds(
+  value = new Date(),
+  timeZone = DEFAULT_TIME_ZONE,
+  rangeDays = 1,
+) {
   validateTimeZone(timeZone);
   const end = value instanceof Date ? new Date(value.getTime()) : new Date(value);
   if (!Number.isFinite(end.getTime())) {
-    throw new Error("Rolling 24-hour window requires a valid end time.");
+    throw new Error("Rolling window requires a valid end time.");
+  }
+  const days = Number(rangeDays);
+  if (!Number.isSafeInteger(days) || days < 1 || days > MAX_ROLLING_DAYS) {
+    throw new Error(
+      `Rolling window must be between 1 and ${MAX_ROLLING_DAYS} days.`,
+    );
   }
   return {
-    start: new Date(end.getTime() - ROLLING_24_HOURS_MS),
+    start: new Date(end.getTime() - days * ROLLING_24_HOURS_MS),
     end,
     timeZone,
-    rangeHours: 24,
+    rangeHours: days * 24,
+    rangeDays: days,
   };
+}
+
+export function rolling24hBounds(value = new Date(), timeZone = DEFAULT_TIME_ZONE) {
+  return rollingDurationBounds(value, timeZone, 1);
 }
 
 export function sanitizeTerminalText(value) {
@@ -911,7 +978,9 @@ function render(options, snapshot, bounds, events, rows, allRows, freshness) {
   const totalTokens = summary.totalTokens;
   const dateLabel = options.range === "rolling24h"
     ? "last 24 hours"
-    : options.range === "week"
+    : options.range === "rolling"
+      ? `last ${options.rollingLabel}`
+      : options.range === "week"
       ? `${bounds.startDateString} through ${bounds.endDateString}`
       : new Intl.DateTimeFormat("en-US", {
         timeZone: bounds.timeZone,
@@ -957,11 +1026,16 @@ function boundsForOptions(options, now = new Date()) {
   if (options.range === "rolling24h") {
     return rolling24hBounds(now, options.timeZone);
   }
+  if (options.range === "rolling") {
+    return rollingDurationBounds(now, options.timeZone, options.rollingDays);
+  }
   return dayBounds(options.date, options.timeZone);
 }
 
 function rangeDescription(options, bounds) {
-  if (options.range === "rolling24h") return "the last 24 hours";
+  if (options.range === "rolling24h" || options.range === "rolling") {
+    return rollingRangeDescription(options);
+  }
   if (bounds.startDateString && bounds.endDateString) {
     return `${bounds.startDateString} through ${bounds.endDateString}`;
   }

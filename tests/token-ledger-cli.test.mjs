@@ -20,6 +20,7 @@ import {
   parseArgs,
   redactLocalPaths,
   rolling24hBounds,
+  rollingDurationBounds,
   run,
   sanitizeTerminalText,
   DEFAULT_SNAPSHOT,
@@ -95,6 +96,16 @@ test("rolling24hBounds covers the exact preceding 24 hours", () => {
   assert.equal(bounds.start.toISOString(), "2026-08-18T22:15:30.000Z");
   assert.equal(bounds.end.toISOString(), "2026-08-19T22:15:30.000Z");
   assert.equal(bounds.rangeHours, 24);
+  assert.equal(bounds.timeZone, "Pacific/Honolulu");
+});
+
+test("rollingDurationBounds covers arbitrary day windows ending at the supplied time", () => {
+  const end = new Date("2026-08-19T22:15:30.000Z");
+  const bounds = rollingDurationBounds(end, "Pacific/Honolulu", 3);
+  assert.equal(bounds.start.toISOString(), "2026-08-16T22:15:30.000Z");
+  assert.equal(bounds.end.toISOString(), "2026-08-19T22:15:30.000Z");
+  assert.equal(bounds.rangeHours, 72);
+  assert.equal(bounds.rangeDays, 3);
   assert.equal(bounds.timeZone, "Pacific/Honolulu");
 });
 
@@ -222,6 +233,25 @@ test("parseArgs accepts the bare 1d rolling project view", () => {
   );
   assert.throws(
     () => parseArgs(["1d", "--date", "today"]),
+    /does not accept --date/,
+  );
+});
+
+test("parseArgs accepts rolling day and week duration aliases", () => {
+  const twoDays = parseArgs(["2d", "--static"]);
+  assert.equal(twoDays.range, "rolling");
+  assert.equal(twoDays.rollingDuration, true);
+  assert.equal(twoDays.rollingDays, 2);
+  assert.equal(twoDays.rollingLabel, "2 days");
+  assert.equal(twoDays.view, "projects");
+  assert.equal(twoDays.date, null);
+
+  const threeWeeks = parseArgs(["3w"]);
+  assert.equal(threeWeeks.range, "rolling");
+  assert.equal(threeWeeks.rollingDays, 21);
+  assert.equal(threeWeeks.rollingLabel, "3 weeks");
+  assert.throws(
+    () => parseArgs(["2d", "today"]),
     /does not accept --date/,
   );
 });
@@ -491,7 +521,7 @@ test("static freshness uses the wall clock after snapshot loading", async () => 
   }
 });
 
-test("parseArgs supports the 7d, 14d, and 30d trend windows", () => {
+test("parseArgs supports day and week trend windows", () => {
   const positional = parseArgs(["trend", "14d", "--static"]);
   assert.equal(positional.view, "trend");
   assert.equal(positional.range, "trend");
@@ -501,7 +531,12 @@ test("parseArgs supports the 7d, 14d, and 30d trend windows", () => {
   const option = parseArgs(["trend", "--period", "30d", "--date", "2026-08-15"]);
   assert.equal(option.trendDays, 30);
   assert.equal(option.date, "2026-08-15");
-  assert.throws(() => parseArgs(["trend", "10d"]), /7d, 14d, or 30d/);
+  assert.equal(parseArgs(["trend", "2w"]).trendDays, 14);
+  assert.equal(parseArgs(["trend", "10d"]).trendDays, 10);
+  assert.throws(
+    () => parseArgs(["trend", "0d"]),
+    /Duration must be between 1d and/,
+  );
   assert.throws(
     () => parseArgs(["trend", "7d", "--period", "14d"]),
     /only be specified once/,
@@ -1276,6 +1311,46 @@ test("30-day trend bins use readable multi-day columns", () => {
   assert.equal(forced.binCount, 30);
 });
 
+test("long trend windows fit terminal and image column widths", () => {
+  const days = 3_650;
+  const bounds = multiDayBounds("2026-08-15", "Pacific/Honolulu", days);
+  const snapshot = {
+    events: [{
+      timestamp: "2026-08-14T12:00:00.000Z",
+      model: "gpt-5.6-luna",
+      totalTokens: 1,
+    }],
+  };
+  const terminal = buildActualTokenBins(snapshot, bounds, days, 36);
+  assert.ok(terminal.binCount <= 36);
+  assert.ok(terminal.binSize > 1);
+  const terminalOutput = renderTrendPlain({
+    snapshot,
+    bounds,
+    trend: buildUsageTrend(snapshot, bounds),
+    days,
+    options: { width: 96 },
+  });
+  assert.ok(terminalOutput.split("\n").every((line) => line.length <= 96));
+
+  const imagePlotWidth = 1_280 - 124 - 126;
+  const image = buildActualTokenBins(snapshot, bounds, days, imagePlotWidth, {
+    minBinWidth: 26,
+    preferDaily: true,
+  });
+  assert.ok(image.binCount <= Math.floor(imagePlotWidth / 26));
+  assert.ok(image.binSize > 1);
+  const svg = renderTrendImage({
+    snapshot,
+    bounds,
+    trend: buildUsageTrend(snapshot, bounds),
+    days,
+    options: { imageWidth: 1_280 },
+  });
+  assert.match(svg, /<title[^>]*>Token Ledger · 3650-day trend<\/title>/);
+  assert.doesNotMatch(svg, /NaN/);
+});
+
 test("the 30-day report image draws one bar per calendar day", () => {
   const bounds = multiDayBounds("2026-08-15", "Pacific/Honolulu", 30);
   const snapshot = {
@@ -1301,7 +1376,7 @@ test("the 30-day report image draws one bar per calendar day", () => {
   });
   assert.match(svg, /<title[^>]*>Token Ledger · 30-day trend<\/title>/);
   // Weekday captions only render on per-day columns, so their presence shows
-  // the 30-day window kept daily bars instead of multi-day bins.
+  // the 30-day window still fits as daily bars at this image width.
   assert.match(svg, /\bTUE\b/);
   // Per-day columns mean no multi-day range labels like "Jul 17–19" beneath
   // the bars (the en dash in the header subtitle is surrounded by spaces).
