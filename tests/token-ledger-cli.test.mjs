@@ -1345,6 +1345,33 @@ test("cache report contains non-finite snapshot token values", () => {
   assert.doesNotMatch(svg, /NaN|Infinity|undefined/);
 });
 
+test("cache report coverage includes inferred event totals", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+  const snapshot = {
+    events: [
+      {
+        timestamp: "2026-08-15T12:00:00.000Z",
+        inputTokens: 900,
+        cachedInputTokens: 450,
+        outputTokens: 100,
+      },
+      {
+        timestamp: "2026-08-14T12:00:00.000Z",
+        totalTokens: 1_000,
+        breakdownAvailable: false,
+      },
+    ],
+  };
+
+  const data = buildCacheReportData(snapshot, bounds, 7, 1_100);
+  assert.equal(data.totalTokens, 2_000);
+  assert.equal(data.detailedTokens, 1_000);
+  assert.equal(data.measurementCoveragePercent, 50);
+  assert.equal(data.bins.at(-1).totalTokens, 1_000);
+  assert.equal(data.bins.at(-1).detailedTokens, 1_000);
+  assert.equal(data.bins.at(-1).measurementCoveragePercent, 100);
+});
+
 test("cache report contains hostile object-shaped snapshot fields", () => {
   const bounds = multiDayBounds("2026-08-15", "UTC", 7);
   const hostileValue = () => ({ toString: null, valueOf: null });
@@ -1655,7 +1682,7 @@ test("cache-rate report uses its separate renderer and progress label", async ()
   }
 });
 
-test("cache-rate report writes an empty-state image for an empty range", async () => {
+test("cache-rate report ignores unused project metadata for an empty range", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-cache-empty-"));
   const snapshotPath = resolve(root, "snapshot.json");
   const outputPath = resolve(root, "cache-report.png");
@@ -1673,6 +1700,7 @@ test("cache-rate report writes an empty-state image for an empty range", async (
           cachedInputTokens: 450,
           outputTokens: 100,
         }],
+        threads: [null],
       })}\n`,
     );
     process.stderr.write = () => true;

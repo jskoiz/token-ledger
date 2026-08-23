@@ -1085,7 +1085,9 @@ export async function run(options, { nowMs } = {}) {
       `Source: ${sourceLabel(options.input, snapshot)}`,
     ].join("\n");
   }
-  const allRows = aggregateProjects(snapshot, events, options);
+  const allRows = options.cacheRate
+    ? []
+    : aggregateProjects(snapshot, events, options);
   const rows = allRows.slice(0, options.top);
   const outputPath = writingImage
     ? options.imageOutput ??

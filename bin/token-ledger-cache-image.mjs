@@ -140,16 +140,20 @@ function safeModelLabel(value) {
 }
 
 function cacheBreakdown(event) {
-  const totalTokens = nonNegativeFiniteNumber(event.totalTokens);
+  const reportedTotalTokens = nonNegativeFiniteNumber(event.totalTokens);
   const inputTokens = nonNegativeFiniteNumber(event.inputTokens);
   const outputTokens = nonNegativeFiniteNumber(event.outputTokens);
+  const componentTotalTokens = nonNegativeFiniteNumber(inputTokens + outputTokens);
+  const totalTokens = reportedTotalTokens > 0
+    ? reportedTotalTokens
+    : componentTotalTokens;
   const cachedInputTokens = Math.min(
     inputTokens,
     nonNegativeFiniteNumber(event.cachedInputTokens),
   );
   const hasComponents = inputTokens > 0 || outputTokens > 0;
   const inferredDetailed = hasComponents && (
-    totalTokens === 0 || inputTokens + outputTokens === totalTokens
+    reportedTotalTokens === 0 || componentTotalTokens === reportedTotalTokens
   );
   const detailed = event.breakdownAvailable === true || (
     event.breakdownAvailable !== false && inferredDetailed
