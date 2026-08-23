@@ -38,19 +38,46 @@ export const noObjectParametersRule = defineRule({
     },
   },
   createOnce(context) {
-    const resolvesToObject = (
+    const resolvesToBroadType = (
       type,
+      target,
       visited = new Set(),
       bindings = new Map(),
     ) => {
-      if (type.type === "TSObjectKeyword") return true;
+      const keyword = target === "object"
+        ? "TSObjectKeyword"
+        : "TSUnknownKeyword";
+      if (type.type === keyword) return true;
       if (type.type === "TSParenthesizedType") {
-        return resolvesToObject(type.typeAnnotation, visited, bindings);
+        return resolvesToBroadType(
+          type.typeAnnotation,
+          target,
+          visited,
+          bindings,
+        );
       }
       if (type.type === "TSUnionType") {
         return type.types.some((member) =>
-          resolvesToObject(member, visited, bindings),
+          resolvesToBroadType(member, target, visited, bindings),
         );
+      }
+      if (type.type === "TSIntersectionType") {
+        if (target === "unknown") {
+          return type.types.every((member) =>
+            resolvesToBroadType(member, target, visited, bindings),
+          );
+        }
+        let includesObject = false;
+        for (const member of type.types) {
+          if (resolvesToBroadType(member, "object", visited, bindings)) {
+            includesObject = true;
+          } else if (
+            !resolvesToBroadType(member, "unknown", visited, bindings)
+          ) {
+            return false;
+          }
+        }
+        return includesObject;
       }
 
       const reference = typeAliasReference(type);
@@ -60,7 +87,12 @@ export const noObjectParametersRule = defineRule({
         ? bindings.get(reference.name)
         : undefined;
       if (binding !== undefined) {
-        return resolvesToObject(binding.type, visited, binding.bindings);
+        return resolvesToBroadType(
+          binding.type,
+          target,
+          visited,
+          binding.bindings,
+        );
       }
 
       const alias = visibleTypeAlias(reference, type, context.sourceCode);
@@ -81,8 +113,15 @@ export const noObjectParametersRule = defineRule({
 
       const nextVisited = new Set(visited);
       nextVisited.add(alias);
-      return resolvesToObject(alias.typeAnnotation, nextVisited, nextBindings);
+      return resolvesToBroadType(
+        alias.typeAnnotation,
+        target,
+        nextVisited,
+        nextBindings,
+      );
     };
+
+    const resolvesToObject = (type) => resolvesToBroadType(type, "object");
 
     const checkParameters = (node) => {
       for (const parameter of node.params) {

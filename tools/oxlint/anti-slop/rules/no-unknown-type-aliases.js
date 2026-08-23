@@ -5,6 +5,15 @@ import {
   visibleTypeAlias,
 } from "../shared/type-aliases.js";
 
+function isInsideTypeAliasDeclaration(node) {
+  let current = node.parent;
+  while (current !== null && current.type !== "Program") {
+    if (current.type === "TSTypeAliasDeclaration") return true;
+    current = current.parent;
+  }
+  return false;
+}
+
 /** Ban named aliases that merely conceal TypeScript's unknown top type. */
 export const noUnknownTypeAliasesRule = defineRule({
   meta: {
@@ -69,14 +78,30 @@ export const noUnknownTypeAliasesRule = defineRule({
       return resolvesToUnknown(alias.typeAnnotation, nextVisited, nextBindings);
     };
 
+    const report = (node, alias) => {
+      context.report({
+        node,
+        messageId: "unknownAlias",
+        data: { alias },
+      });
+    };
+
     return {
       TSTypeAliasDeclaration(alias) {
         if (!resolvesToUnknown(alias.typeAnnotation, new Set([alias]))) return;
-        context.report({
-          node: alias.id,
-          messageId: "unknownAlias",
-          data: { alias: alias.id.name },
-        });
+        report(alias.id, alias.id.name);
+      },
+      TSTypeReference(node) {
+        if (isInsideTypeAliasDeclaration(node)) return;
+        const reference = typeAliasReference(node);
+        if (reference === null) return;
+        const alias = visibleTypeAlias(reference, node, context.sourceCode);
+        if (alias === null) return;
+        const parameters = alias.typeParameters?.params ?? [];
+        if (reference.arguments.length >= parameters.length) return;
+        if (resolvesToUnknown(alias.typeAnnotation, new Set([alias]))) return;
+        if (!resolvesToUnknown(node)) return;
+        report(node, reference.name);
       },
     };
   },
