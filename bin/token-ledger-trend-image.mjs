@@ -637,10 +637,10 @@ export function renderTrendImage({
       swatch: FAST_MODE_LABEL_COLOR,
       label: "Fast mode",
       labelColor: COLORS.muted,
-      value: `${FAST_MODE_MULTIPLIER.toFixed(2)}× rate`,
+      value: `${FAST_MODE_MULTIPLIER.toFixed(2)}×`,
       valueColor: COLORS.ink,
       chip: null,
-      suffix: null,
+      suffix: "rate",
       track: COLORS.track,
       fill: FAST_MODE_LABEL_COLOR,
       barPercent: fastShare,
@@ -675,41 +675,62 @@ export function renderTrendImage({
     });
   }
   if (cards.length) {
-    const gap = 10;
-    const cardWidth = (cardsRegionWidth - gap * (cards.length - 1)) / cards.length;
-    const innerWidth = cardWidth - 26;
+    // One segmented strip: the stats share a panel with hairline dividers so
+    // the band reads as two calm blocks — stats + pace.
+    const segWidth = cardsRegionWidth / cards.length;
+    elements.push(svgRect(outer, cardTop, cardsRegionWidth, topRowHeight, {
+      rx: 7,
+      fill: COLORS.panel,
+    }));
     cards.forEach((card, index) => {
-      const x = outer + index * (cardWidth + gap);
-      elements.push(svgRect(x, cardTop, cardWidth, topRowHeight, {
-        rx: 7,
-        fill: card.panel,
-        stroke: card.border,
-        "stroke-width": 1,
-      }));
-      elements.push(`<circle cx="${(x + 17).toFixed(2)}" cy="${cardTop + 20}" r="3.5" fill="${card.swatch}"/>`);
+      const segX = outer + index * segWidth;
+      const contentX = segX + 17;
+      const innerWidth = segWidth - 34;
+      const tinted = card.panel !== COLORS.panel;
+      if (tinted) {
+        // The amber meter segment hugs the strip's rounded corner.
+        if (index === 0 && cards.length === 1) {
+          elements.push(svgRect(segX, cardTop, segWidth, topRowHeight, {
+            rx: 7,
+            fill: card.panel,
+          }));
+        } else {
+          const radius = 6.5;
+          const tintWidth = segWidth - 0.5;
+          const tintHeight = topRowHeight - 1;
+          const straightWidth = (tintWidth - radius).toFixed(2);
+          const straightHeight = (tintHeight - 2 * radius).toFixed(2);
+          elements.push(`<path d="M ${segX.toFixed(2)} ${(cardTop + 0.5).toFixed(2)} h ${straightWidth} a ${radius} ${radius} 0 0 1 ${radius} ${radius} v ${straightHeight} a ${radius} ${radius} 0 0 1 -${radius} ${radius} h -${straightWidth} z" fill="${card.panel}"/>`);
+        }
+      }
+      if (index > 0) {
+        elements.push(`<line x1="${segX.toFixed(2)}" y1="${cardTop + 1}" x2="${segX.toFixed(2)}" y2="${cardTop + topRowHeight - 1}" stroke="${tinted ? "rgba(246,183,60,.35)" : COLORS.panelBorder}" stroke-width="1"/>`);
+      }
+      elements.push(`<circle cx="${(contentX + 3.5).toFixed(2)}" cy="${cardTop + 20}" r="3.5" fill="${card.swatch}"/>`);
       elements.push(svgText({
-        x: x + 27,
-        y: cardTop + 24,
+        x: contentX + 15,
+        y: cardTop + 25,
         value: card.label.toUpperCase(),
         fill: card.labelColor,
         size: 10.5,
         spacing: ".9",
       }));
-      const valueBaseline = cardTop + 60;
+      // The value cluster anchors to the strip's bottom edge.
+      const valueBaseline = cardTop + topRowHeight - 51;
       elements.push(svgText({
-        x: x + 13,
+        x: contentX,
         y: valueBaseline,
         value: card.value,
         fill: card.valueColor,
-        size: 22,
+        size: 24,
         weight: 800,
         spacing: "-0.55",
       }));
-      const valueWidth = textWidth(card.value, 22, 800);
+      const valueWidth = textWidth(card.value, 24, 800);
       if (card.chip) {
-        const chipTextWidth = textWidth(card.chip.text, 10.5, 700);
-        const chipX = x + 13 + valueWidth + 7;
-        elements.push(svgRect(chipX, valueBaseline - 12, chipTextWidth + 10, 16, {
+        const chipTextWidth = textWidth(card.chip.text, 10, 700);
+        const chipX = contentX + valueWidth + 7;
+        elements.push(svgRect(chipX, valueBaseline - 11, chipTextWidth + 10, 15, {
           rx: 3,
           fill: card.chip.fill,
         }));
@@ -718,36 +739,41 @@ export function renderTrendImage({
           y: valueBaseline,
           value: card.chip.text,
           fill: card.chip.color,
-          size: 10.5,
+          size: 10,
           weight: 700,
         }));
       } else if (card.suffix) {
         elements.push(svgText({
-          x: x + 13 + valueWidth + 7,
+          x: contentX + valueWidth + 10,
           y: valueBaseline,
           value: card.suffix,
           fill: COLORS.secondary,
           size: 10.5,
         }));
       }
-      // The micro-bar and caption anchor to the card's bottom edge.
-      const barY = cardTop + topRowHeight - 44;
-      elements.push(svgRect(x + 13, barY, innerWidth, 4, { rx: 2, fill: card.track }));
-      const fillWidth = (Math.min(100, Math.max(0, card.barPercent)) / 100) * innerWidth;
-      if (fillWidth > 0) {
-        elements.push(svgRect(x + 13, barY, fillWidth, 4, { rx: 2, fill: card.fill }));
-      }
       const caption = card.captionShort && textWidth(card.caption, 10.5) > innerWidth
         ? card.captionShort
         : card.caption;
       elements.push(svgText({
-        x: x + 13,
-        y: cardTop + topRowHeight - 18,
+        x: contentX,
+        y: cardTop + topRowHeight - 29,
         value: caption,
         fill: COLORS.muted,
         size: 10.5,
       }));
+      const barY = cardTop + topRowHeight - 17;
+      elements.push(svgRect(contentX, barY, innerWidth, 3, { rx: 1.5, fill: card.track }));
+      const fillWidth = (Math.min(100, Math.max(0, card.barPercent)) / 100) * innerWidth;
+      if (fillWidth > 0) {
+        elements.push(svgRect(contentX, barY, fillWidth, 3, { rx: 1.5, fill: card.fill }));
+      }
     });
+    elements.push(svgRect(outer, cardTop, cardsRegionWidth, topRowHeight, {
+      rx: 7,
+      fill: "none",
+      stroke: COLORS.panelBorder,
+      "stroke-width": 1,
+    }));
   }
 
   // ---- Pace & runway panel (top right, same height as the cards) ----

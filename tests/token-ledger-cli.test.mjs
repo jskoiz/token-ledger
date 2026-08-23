@@ -1201,7 +1201,7 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
   // mode stat card explains it.
   assert.match(svg, /fill="#0a655c"/);
   assert.match(svg, /FAST MODE/);
-  assert.match(svg, /1\.50× rate/);
+  assert.match(svg, /1\.50×/);
   assert.match(svg, /Darker shade = fast mode/);
   // The projects row and the pace block sit in the combined layout.
   assert.match(svg, /WHERE IT WENT · TOP PROJECTS/);
