@@ -8,7 +8,11 @@ function isTypeAssertionExpression(node             )                           
 }
 
 function isTransparentAssertionWrapper(node             )          {
-  return node.type === "ParenthesizedExpression" || node.type === "TSNonNullExpression";
+  return (
+    node.type === "ParenthesizedExpression" ||
+    node.type === "TSNonNullExpression" ||
+    node.type === "TSSatisfiesExpression"
+  );
 }
 
 function unwrapAssertionExpression(expression                   )                    {

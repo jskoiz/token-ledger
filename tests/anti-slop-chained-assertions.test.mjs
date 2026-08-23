@@ -59,3 +59,25 @@ test("anti-slop does not report a single assertion or an all-const chain across 
   `);
   assert.doesNotMatch(result.output, /anti-slop\(no-chained-type-assertions\)/);
 });
+
+test("anti-slop traverses satisfies wrappers and reports the outer assertion once", async () => {
+  const result = await lintTypeScript(`
+    declare const value: unknown;
+    const chained = ((value as unknown) satisfies unknown) as string;
+    const nested = (((value as unknown) satisfies unknown)!) as string;
+    const outerSatisfies = ((value as unknown) as string) satisfies string;
+    const single = (value as string) satisfies string;
+    const constOnly = ((value as const) satisfies unknown) as const;
+    void chained;
+    void nested;
+    void outerSatisfies;
+    void single;
+    void constOnly;
+  `);
+  assert.equal(result.status, 1, result.output);
+  assert.equal(
+    result.output.match(/anti-slop\(no-chained-type-assertions\)/g)?.length,
+    3,
+    result.output,
+  );
+});
