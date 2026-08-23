@@ -86,6 +86,28 @@ function periodLabel(bounds) {
     : `${start}, ${startYear} – ${end}, ${endYear}`;
 }
 
+function wrapFooterText(value, maxWidth, size = 12) {
+  const words = String(value).split(/\s+/).filter(Boolean);
+  const lines = [];
+  let current = "";
+  for (const word of words) {
+    const candidate = current ? `${current} ${word}` : word;
+    if (current && textWidth(candidate, size) > maxWidth) {
+      lines.push(current);
+      current = word;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current) lines.push(current);
+  return lines;
+}
+
+function footerQualifierLines(value, fallbackLines, maxWidth) {
+  if (textWidth(value, 12) <= maxWidth) return [value];
+  return fallbackLines.flatMap((line) => wrapFooterText(line, maxWidth));
+}
+
 function binDateLabel(bin) {
   const finalDate = shiftCalendarDate(bin.endDateString, -1);
   if (finalDate === bin.startDateString) return shortDateLabel(bin.startDateString);
@@ -528,6 +550,41 @@ export function renderCacheReportImage({
   const data = buildCacheReportData(snapshot, bounds, days, plotWidth);
   const prior = priorPeriodSummary(snapshot, bounds, days);
   const models = combinedModelRows(data.models);
+  const columnWidth = (contentRight - outer) / 3;
+  const qualifierWidth = columnWidth - 22;
+  const measurementCounts = `${data.detailedEventCount.toLocaleString("en-US")} of ${data.eventCount.toLocaleString("en-US")} calls`;
+  const measurementQualifier = `${measurementCounts} include component detail`;
+  const dataAsOfQualifier = `${bounds.timeZone} · ${days}-day calendar window`;
+  const footerItems = [
+    {
+      label: "RATE DEFINITION",
+      value: "cached input ÷ measured input",
+      qualifiers: ["weighted by input tokens, not daily averages"],
+    },
+    {
+      label: "MEASUREMENT COVERAGE",
+      value: Number.isFinite(data.measurementCoveragePercent)
+        ? `${percent(data.measurementCoveragePercent)} of ${data.totalTokens > 0 ? "token volume" : "calls"}`
+        : "unknown",
+      qualifiers: footerQualifierLines(
+        measurementQualifier,
+        [measurementCounts, "include component detail"],
+        qualifierWidth,
+      ),
+    },
+    {
+      label: "DATA AS OF",
+      value: generatedAtLabel(snapshot.generatedAt, bounds.timeZone),
+      qualifiers: footerQualifierLines(
+        dataAsOfQualifier,
+        [bounds.timeZone, `${days}-day calendar window`],
+        qualifierWidth,
+      ),
+    },
+  ];
+  const qualifierLineCount = Math.max(
+    ...footerItems.map((item) => item.qualifiers.length),
+  );
   const headerTitle = "TOKEN LEDGER · CACHE REPORT";
   const headerMetadata = `${periodLabel(bounds)} · ${bounds.timeZone}`;
   const headerTitleWidth = textWidth(headerTitle, 27, 800) -
@@ -548,7 +605,7 @@ export function renderCacheReportImage({
   const modelRowHeight = 44;
   const modelRowCount = Math.max(1, models.length);
   const footerRuleY = modelRowsTop + modelRowCount * modelRowHeight + 28;
-  const height = footerRuleY + 118;
+  const height = footerRuleY + 118 + Math.max(0, qualifierLineCount - 2) * 16;
 
   const description =
     "Dark cache report with a weighted cached-versus-uncached input split, normalized cache-rate columns with input-volume context, and a secondary model-level cache-rate breakout.";
@@ -983,32 +1040,6 @@ export function renderCacheReportImage({
     `<line x1="${outer}" y1="${footerRuleY}" x2="${contentRight}" y2="${footerRuleY}" stroke="${COLORS.rule}" stroke-width="1"/>`,
   );
   const footerTop = footerRuleY + 22;
-  const columnWidth = (contentRight - outer) / 3;
-  const dataAsOfQualifier = `${bounds.timeZone} · ${days}-day calendar window`;
-  const footerItems = [
-    {
-      label: "RATE DEFINITION",
-      value: "cached input ÷ measured input",
-      qualifiers: ["weighted by input tokens, not daily averages"],
-    },
-    {
-      label: "MEASUREMENT COVERAGE",
-      value: Number.isFinite(data.measurementCoveragePercent)
-        ? `${percent(data.measurementCoveragePercent)} of ${data.totalTokens > 0 ? "token volume" : "calls"}`
-        : "unknown",
-      qualifiers: [`${data.detailedEventCount.toLocaleString("en-US")} of ${data.eventCount.toLocaleString("en-US")} calls include component detail`],
-    },
-    {
-      label: "DATA AS OF",
-      value: generatedAtLabel(snapshot.generatedAt, bounds.timeZone),
-      qualifiers: textWidth(dataAsOfQualifier, 12) <= columnWidth - 22
-        ? [dataAsOfQualifier]
-        : [bounds.timeZone, `${days}-day calendar window`],
-    },
-  ];
-  const qualifierLineCount = Math.max(
-    ...footerItems.map((item) => item.qualifiers.length),
-  );
   footerItems.forEach((item, index) => {
     const columnX = outer + index * columnWidth;
     const x = index === 0 ? columnX : columnX + 22;
