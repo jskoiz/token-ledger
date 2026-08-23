@@ -8,6 +8,7 @@ import {
   shiftCalendarDate,
   svgRect,
   svgText,
+  textWidth,
   TREND_IMAGE_MODEL_COLORS,
 } from "./token-ledger-trend-image.mjs";
 import { chooseBinSize } from "./token-ledger-trend-terminal.mjs";
@@ -845,31 +846,37 @@ export function renderCacheReportImage({
   );
   const footerTop = footerRuleY + 22;
   const columnWidth = (contentRight - outer) / 3;
+  const dataAsOfQualifier = `${bounds.timeZone} · ${days}-day calendar window`;
   const footerItems = [
     {
       label: "RATE DEFINITION",
       value: "cached input ÷ measured input",
-      qualifier: "weighted by input tokens, not daily averages",
+      qualifiers: ["weighted by input tokens, not daily averages"],
     },
     {
       label: "MEASUREMENT COVERAGE",
       value: Number.isFinite(data.measurementCoveragePercent)
         ? `${percent(data.measurementCoveragePercent)} of ${data.totalTokens > 0 ? "token volume" : "calls"}`
         : "unknown",
-      qualifier: `${data.detailedEventCount.toLocaleString("en-US")} of ${data.eventCount.toLocaleString("en-US")} calls include component detail`,
+      qualifiers: [`${data.detailedEventCount.toLocaleString("en-US")} of ${data.eventCount.toLocaleString("en-US")} calls include component detail`],
     },
     {
       label: "DATA AS OF",
       value: generatedAtLabel(snapshot.generatedAt, bounds.timeZone),
-      qualifier: `${bounds.timeZone} · ${days}-day calendar window`,
+      qualifiers: textWidth(dataAsOfQualifier, 12) <= columnWidth - 22
+        ? [dataAsOfQualifier]
+        : [bounds.timeZone, `${days}-day calendar window`],
     },
   ];
+  const qualifierLineCount = Math.max(
+    ...footerItems.map((item) => item.qualifiers.length),
+  );
   footerItems.forEach((item, index) => {
     const columnX = outer + index * columnWidth;
     const x = index === 0 ? columnX : columnX + 22;
     if (index > 0) {
       elements.push(
-        `<line x1="${columnX.toFixed(2)}" y1="${footerTop}" x2="${columnX.toFixed(2)}" y2="${footerTop + 53}" stroke="${COLORS.rule}" stroke-width="1"/>`,
+        `<line x1="${columnX.toFixed(2)}" y1="${footerTop}" x2="${columnX.toFixed(2)}" y2="${footerTop + 53 + (qualifierLineCount - 1) * 16}" stroke="${COLORS.rule}" stroke-width="1"/>`,
       );
     }
     elements.push(svgText({
@@ -888,13 +895,15 @@ export function renderCacheReportImage({
       size: 15,
       weight: 700,
     }));
-    elements.push(svgText({
-      x,
-      y: footerTop + 53,
-      value: item.qualifier,
-      fill: COLORS.muted,
-      size: 12,
-    }));
+    item.qualifiers.forEach((qualifier, qualifierIndex) => {
+      elements.push(svgText({
+        x,
+        y: footerTop + 53 + qualifierIndex * 16,
+        value: qualifier,
+        fill: COLORS.muted,
+        size: 12,
+      }));
+    });
   });
 
   elements.push("</svg>");
