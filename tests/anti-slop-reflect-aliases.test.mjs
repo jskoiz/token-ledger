@@ -49,6 +49,9 @@ test("Reflect rules follow stable object, member, renamed, and destructured alia
     const { apply: destructuredApply } = nativeReflect;
     const literalGet = Reflect["get"];
     const literalApply = nativeReflect["apply"];
+    const globalReflect = globalThis["Reflect"];
+    const globalGet = globalThis.Reflect.get;
+    const globalApply = globalThis.Reflect.apply;
 
     nativeReflect.get(value, "id");
     nativeReflect.apply(target, null, args);
@@ -60,21 +63,27 @@ test("Reflect rules follow stable object, member, renamed, and destructured alia
     destructuredApply(target, null, args);
     literalGet(value, "id");
     literalApply(target, null, args);
+    globalThis.Reflect.get(value, "id");
+    globalThis.Reflect.apply(target, null, args);
+    globalReflect.get(value, "id");
+    globalReflect.apply(target, null, args);
+    globalGet(value, "id");
+    globalApply(target, null, args);
   `);
   assert.equal(result.status, 1, result.output);
   assert.equal(
     result.output.match(/anti-slop\(no-reflect-get\)/g)?.length,
-    5,
+    8,
     result.output,
   );
   assert.equal(
     result.output.match(/anti-slop\(no-reflect-apply\)/g)?.length,
-    5,
+    8,
     result.output,
   );
   assert.equal(
     result.output.match(/anti-slop\(/g)?.length,
-    10,
+    16,
     result.output,
   );
 });
@@ -99,12 +108,21 @@ test("Reflect rules preserve mutable, shadowed, dynamic, unrelated, and allowed 
     const dynamicGet = "get";
     const dynamicApply = "apply";
     const construct = Reflect.construct;
+    const fakeGlobalThis = { Reflect: fakeReflect };
+    const fakeGlobalGet = fakeGlobalThis.Reflect.get;
+    let mutableGlobalReflect = globalThis.Reflect;
+    mutableGlobalReflect = fakeReflect;
 
     function shadowed(Reflect) {
       const localGet = Reflect.get;
       const { apply: localApply } = Reflect;
       localGet(value, "id");
       localApply(target, null, args);
+    }
+
+    function shadowedGlobal(globalThis) {
+      const localGet = globalThis.Reflect.get;
+      localGet(value, "id");
     }
 
     mutableGet(value, "id");
@@ -116,7 +134,10 @@ test("Reflect rules preserve mutable, shadowed, dynamic, unrelated, and allowed 
     Reflect[dynamicGet](value, "id");
     Reflect[dynamicApply](target, null, args);
     construct(Date, []);
+    fakeGlobalGet(value, "id");
+    mutableGlobalReflect.get(value, "id");
     void shadowed;
+    void shadowedGlobal;
   `);
   assert.equal(result.status, 0, result.output);
   assert.doesNotMatch(result.output, /anti-slop\(no-reflect-(?:get|apply)\)/);
