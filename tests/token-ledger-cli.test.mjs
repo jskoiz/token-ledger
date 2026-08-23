@@ -1339,6 +1339,65 @@ test("cache report contains non-finite snapshot token values", () => {
   assert.doesNotMatch(svg, /NaN|Infinity|undefined/);
 });
 
+test("cache report saturates finite token sums before rendering", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+  const huge = Number.MAX_VALUE;
+  const eventFor = (model, includeReportedTotal = true) => ({
+    timestamp: "2026-08-15T12:00:00.000Z",
+    model,
+    ...(includeReportedTotal ? { totalTokens: huge } : {}),
+    inputTokens: huge,
+    cachedInputTokens: huge,
+    outputTokens: huge,
+    breakdownAvailable: true,
+  });
+  const snapshot = {
+    generatedAt: "2026-08-15T12:00:00.000Z",
+    events: [
+      eventFor("gpt-5.6-luna", false),
+      eventFor("gpt-5.6-luna"),
+      eventFor("gpt-5.6-sol"),
+      eventFor("gpt-5.6-terra"),
+      eventFor("gpt-5.5"),
+      eventFor("gpt-5.4"),
+      eventFor("gpt-5.5-daybreak-blue-latest"),
+      eventFor("gpt-5.5-auto-review"),
+    ],
+  };
+
+  const data = buildCacheReportData(snapshot, bounds, 7, 1_100);
+  assert.equal(data.totalTokens, huge);
+  assert.equal(data.detailedTokens, huge);
+  assert.equal(data.inputTokens, huge);
+  assert.equal(data.cachedInputTokens, huge);
+  assert.equal(data.uncachedInputTokens, 0);
+  assert.equal(data.rate, 100);
+  assert.equal(data.bins.at(-1).totalTokens, huge);
+  assert.equal(data.bins.at(-1).inputTokens, huge);
+  assert.ok(data.models.every((model) => Number.isFinite(model.inputTokens)));
+
+  const svg = renderCacheReportImage({ snapshot, bounds, days: 7 });
+  assert.match(svg, /Other models/);
+  assert.doesNotMatch(svg, /NaN|Infinity|undefined/);
+  assert.doesNotMatch(svg, /(?:width|height|x|y)="NaN/);
+
+  const control = buildCacheReportData({
+    events: [{
+      timestamp: "2026-08-15T12:00:00.000Z",
+      model: "gpt-5.6-luna",
+      totalTokens: 12,
+      inputTokens: 10,
+      cachedInputTokens: 4,
+      outputTokens: 2,
+      breakdownAvailable: true,
+    }],
+  }, bounds, 7, 1_100);
+  assert.equal(control.totalTokens, 12);
+  assert.equal(control.inputTokens, 10);
+  assert.equal(control.cachedInputTokens, 4);
+  assert.equal(control.rate, 40);
+});
+
 test("cache report coverage includes inferred event totals", () => {
   const bounds = multiDayBounds("2026-08-15", "UTC", 7);
   const snapshot = {
