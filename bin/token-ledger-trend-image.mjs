@@ -72,7 +72,7 @@ const MONO_FAMILY = "ui-monospace, Menlo, monospace";
 const FAST_MODE_LABEL_COLOR = "#a78bfa";
 const MIN_BAR_WIDTH = 26;
 
-function escapeXml(value) {
+export function escapeXml(value) {
   return String(value)
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
@@ -81,7 +81,7 @@ function escapeXml(value) {
     .replaceAll("'", "&apos;");
 }
 
-function compact(value, digits = 2) {
+export function compact(value, digits = 2) {
   if (!Number.isFinite(value)) return "—";
   const absolute = Math.abs(value);
   const units = [
@@ -217,7 +217,7 @@ function dateStringFromParts(year, month, day) {
     .join("-");
 }
 
-function shiftCalendarDate(dateString, amount) {
+export function shiftCalendarDate(dateString, amount) {
   const [year, month, day] = dateParts(dateString);
   const date = new Date(Date.UTC(year, month - 1, day + amount));
   return dateStringFromParts(
@@ -313,7 +313,7 @@ function textWidth(text, size, weight = 400) {
   return units * size * (weight >= 700 ? 1.05 : 1);
 }
 
-function svgText({
+export function svgText({
   x,
   y,
   value,
@@ -331,7 +331,7 @@ function svgText({
   return `<text x="${x}" y="${y}" fill="${fill}" font-family="${family}" font-size="${size}px" font-weight="${weight}" text-anchor="${anchor}"${spacingAttr}${opacityAttr}>${escapeXml(value)}</text>`;
 }
 
-function svgRect(x, y, width, height, attrs = {}) {
+export function svgRect(x, y, width, height, attrs = {}) {
   const pieces = [
     `x="${Number(x).toFixed(2)}"`,
     `y="${Number(y).toFixed(2)}"`,

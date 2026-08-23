@@ -57,6 +57,7 @@ tledger week --static
 tledger trend 7d --static
 tledger trend 7d --image --image-output artifacts/token-ledger-trend-7d.png
 tledger report 7d
+tledger report 7d --cache-rate
 ```
 
 Bare duration aliases such as `tledger 1d`, `tledger 2d`, `tledger 3d`,
@@ -73,6 +74,17 @@ dashboard PNG (identical to `trend --image`) to
 `token-ledger-report-<period>.png` in the current directory. It accepts the
 same flags as the trend view (`--drain`, `--date`, `--tz`, `--image-output`,
 `--image-width`) and prints progress while rendering and encoding the image.
+
+`tledger report [Nd|Nw] --cache-rate` writes a separate, purpose-built cache
+report to `token-ledger-cache-report-<period>.png`. Its primary view is the
+input-token-weighted cache rate (`cached input / all measured input`), shown
+across the selected period with input-volume context. A smaller model breakout
+shows which models account for that input and their individual cache rates.
+The cache report intentionally omits the general report's project, quota-meter,
+runway, and output-token sections. Cached input is clamped to input per event,
+and the report states how much token volume had a usable component breakdown.
+Use `--image-output`, `--image-width`, `--date`, `--tz`, and `--no-open` the
+same way as on the standard report.
 
 The terminal trend view is a compact approximation of the image view. For the
 full chart grammar, use `--image`: it writes a single shareable report card as

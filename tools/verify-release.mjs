@@ -445,7 +445,8 @@ async function main() {
     assert(
       helpOutput.includes("Rolling 24-hour project breakdown") &&
         helpOutput.includes("--input") &&
-        helpOutput.includes("--no-refresh"),
+        helpOutput.includes("--no-refresh") &&
+        helpOutput.includes("--cache-rate"),
       "Installed tledger --help did not expose the expected release CLI options.",
     );
 
@@ -481,11 +482,41 @@ async function main() {
       "Installed smoke output exposed a source or fixture path.",
     );
 
+    const cacheReportPath = join(installDirectory, "release-cache-report.png");
+    const cacheReportOutput = run(
+      installedBinary,
+      [
+        "report",
+        "7d",
+        "--cache-rate",
+        "--input",
+        fixturePath,
+        "--no-open",
+        "--tz",
+        "UTC",
+        "--image-output",
+        cacheReportPath,
+      ],
+      { cwd: installDirectory, env: cleanEnvironment },
+    );
+    assert(
+      cacheReportOutput.includes("Wrote cache report:") &&
+        cacheReportOutput.includes("release-cache-report.png"),
+      `Installed tledger cache-report smoke output was unexpected:\n${cacheReportOutput}`,
+    );
+    const cacheReportBytes = await readFile(cacheReportPath);
+    assert(
+      JSON.stringify([...cacheReportBytes.subarray(0, 8)]) ===
+        JSON.stringify([137, 80, 78, 71, 13, 10, 26, 10]),
+      "Installed tledger cache-report smoke did not write a PNG.",
+    );
+
     console.log(`Packed ${packMetadata.id ?? `${packageJson.name}@${packageJson.version}`}.`);
     console.log(`Package contents verified (${packedFiles.length} files).`);
     console.log("Installed tarball in a clean temporary directory.");
     console.log("tledger --help: passed.");
     console.log("tledger 1d --static project smoke: passed (Alpha 1.20K, Beta 800, 2.00K total).");
+    console.log("tledger report --cache-rate PNG smoke: passed.");
     console.log("Release verification passed.");
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
