@@ -152,11 +152,13 @@ function generatedAtLabel(value, timeZone) {
   }).format(new Date(timestampMs));
 }
 
-function nonNegativeFiniteNumber(value) {
+function parsedNonNegativeFiniteNumber(value) {
   const primitive = primitiveNumber(value);
   const text = primitive === null ? primitiveString(value) : null;
-  const number = primitive ?? (text === null ? NaN : Number(text));
-  return Number.isFinite(number) && number > 0 ? number : 0;
+  const number = primitive ?? (
+    text === null || text.trim() === "" ? NaN : Number(text)
+  );
+  return Number.isFinite(number) && number >= 0 ? number : null;
 }
 
 function scaleToFiniteSum(values) {
@@ -219,12 +221,20 @@ function safeModelLabel(value) {
 }
 
 function cacheBreakdown(event) {
-  const reportedTotalTokens = nonNegativeFiniteNumber(event.totalTokens);
-  const rawInputTokens = nonNegativeFiniteNumber(event.inputTokens);
-  const outputTokens = nonNegativeFiniteNumber(event.outputTokens);
+  const parsedReportedTotalTokens = parsedNonNegativeFiniteNumber(
+    event.totalTokens,
+  );
+  const parsedInputTokens = parsedNonNegativeFiniteNumber(event.inputTokens);
+  const parsedCachedInputTokens = parsedNonNegativeFiniteNumber(
+    event.cachedInputTokens,
+  );
+  const parsedOutputTokens = parsedNonNegativeFiniteNumber(event.outputTokens);
+  const reportedTotalTokens = parsedReportedTotalTokens ?? 0;
+  const rawInputTokens = parsedInputTokens ?? 0;
+  const outputTokens = parsedOutputTokens ?? 0;
   const rawCachedInputTokens = Math.min(
     rawInputTokens,
-    nonNegativeFiniteNumber(event.cachedInputTokens),
+    parsedCachedInputTokens ?? 0,
   );
   const componentOverflowed = !Number.isFinite(rawInputTokens + outputTokens);
   const componentScale = scaleToFiniteSum([rawInputTokens, outputTokens]);
@@ -242,13 +252,19 @@ function cacheBreakdown(event) {
     ? reportedTotalTokens
     : componentTotalTokens;
   const hasComponents = inputTokens > 0 || outputTokens > 0;
-  const inferredDetailed = hasComponents && (
+  const hasReconciledBreakdown = hasComponents && (
     reportedTotalTokens === 0 ||
     componentTotalTokens === reportedTotalTokens ||
     (componentOverflowed && reportedTotalTokens === MAX_FINITE_NUMBER)
   );
-  const detailed = event.breakdownAvailable === true || (
-    event.breakdownAvailable !== false && inferredDetailed
+  const hasExplicitReconciledZeroBreakdown =
+    event.breakdownAvailable === true &&
+    parsedReportedTotalTokens === 0 &&
+    parsedInputTokens === 0 &&
+    parsedCachedInputTokens === 0 &&
+    parsedOutputTokens === 0;
+  const detailed = event.breakdownAvailable !== false && (
+    hasReconciledBreakdown || hasExplicitReconciledZeroBreakdown
   );
   return {
     totalTokens,

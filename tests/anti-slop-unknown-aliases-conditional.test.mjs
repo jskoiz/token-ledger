@@ -53,11 +53,32 @@ test("no-unknown-type-aliases resolves conditional branches that expose unknown"
     type PromiseWrapped<T> = Promise<T extends string ? unknown : unknown>;
     type PromiseLikeWrapped<T> = PromiseLike<T extends string ? unknown : unknown>;
     type LiteralNever = never extends string ? unknown : number;
+    type AnyTrue = any extends string ? unknown : number;
+    type AnyFalse = any extends string ? number : unknown;
+    type UnknownFalse = unknown extends string ? number : unknown;
+    type AnyTopUnknown = any extends unknown ? unknown : number;
+    type AnyAnyUnknown = any extends any ? unknown : number;
+    type UnknownUnionUnknown = unknown extends unknown | string ? unknown : number;
+    type UnknownUnionFalse = unknown extends string | number ? number : unknown;
+    type UnknownTarget<T> = unknown extends T ? number : unknown;
+    type UnknownTargetConcrete = UnknownTarget<string>;
+    type ExhaustiveUnionUnknown = unknown extends {} | null | undefined
+      ? unknown
+      : number;
+    type NonExhaustiveUnionUnknown = unknown extends {} | null
+      ? number
+      : unknown;
+    type AnyIntersectionUnknown = string extends any & number
+      ? unknown
+      : number;
+    type AnyNeverIntersectionUnknown = string extends any & never
+      ? number
+      : unknown;
   `);
   assert.equal(result.status, 1, result.output);
   assert.equal(
     result.output.match(/anti-slop\(no-unknown-type-aliases\)/g)?.length,
-    8,
+    20,
     result.output,
   );
   for (const alias of [
@@ -69,6 +90,18 @@ test("no-unknown-type-aliases resolves conditional branches that expose unknown"
     "Aliased",
     "Distributed",
     "LiteralNever",
+    "AnyTrue",
+    "AnyFalse",
+    "UnknownFalse",
+    "AnyTopUnknown",
+    "AnyAnyUnknown",
+    "UnknownUnionUnknown",
+    "UnknownUnionFalse",
+    "UnknownTargetConcrete",
+    "ExhaustiveUnionUnknown",
+    "NonExhaustiveUnionUnknown",
+    "AnyIntersectionUnknown",
+    "AnyNeverIntersectionUnknown",
   ]) {
     assert.match(result.output, new RegExp("Type alias `" + alias + "` hides"));
   }
@@ -91,6 +124,20 @@ test("no-unknown-type-aliases preserves undecidable and concrete conditional con
     type PromiseWrapped = Promise<unknown>;
     type PromiseLikeWrapped = PromiseLike<unknown>;
     type DistributedNever = OneUnknown<never>;
+    type AnyDominated = any extends string ? unknown : any;
+    type AnyConcrete = any extends string ? number : boolean;
+    type UnknownConcrete = unknown extends string ? unknown : number;
+    type AnyTopConcrete = any extends unknown ? number : unknown;
+    type AnyAnyConcrete = any extends any ? number : unknown;
+    type UnknownUnionConcrete = unknown extends unknown | string ? number : unknown;
+    type UnknownTarget<T> = unknown extends T ? number : unknown;
+    type UnknownTargetTop = UnknownTarget<unknown>;
+    type ExhaustiveUnionConcrete = unknown extends {} | null | undefined
+      ? number
+      : unknown;
+    type AnyIntersectionConcrete = string extends any & number
+      ? number
+      : unknown;
   `);
   assert.equal(result.status, 0, result.output);
   assert.doesNotMatch(result.output, /anti-slop\(no-unknown-type-aliases\)/);

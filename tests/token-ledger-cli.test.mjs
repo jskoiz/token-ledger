@@ -1525,6 +1525,109 @@ test("cache report coverage includes inferred event totals", () => {
   assert.equal(data.bins.at(-1).measurementCoveragePercent, 100);
 });
 
+test("cache report validates explicit breakdown markers against components", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+  const snapshot = {
+    events: [
+      {
+        timestamp: "2026-08-15T12:00:00.000Z",
+        totalTokens: 1_000,
+        inputTokens: 0,
+        cachedInputTokens: 0,
+        outputTokens: 0,
+        breakdownAvailable: true,
+      },
+      {
+        timestamp: "2026-08-15T13:00:00.000Z",
+        totalTokens: 1_000,
+        inputTokens: 900,
+        cachedInputTokens: 450,
+        outputTokens: 0,
+        breakdownAvailable: true,
+      },
+      {
+        timestamp: "2026-08-15T14:00:00.000Z",
+        totalTokens: 1_000,
+        inputTokens: 900,
+        cachedInputTokens: 450,
+        outputTokens: 100,
+        breakdownAvailable: true,
+      },
+    ],
+  };
+
+  const data = buildCacheReportData(snapshot, bounds, 7, 1_100);
+  assert.equal(data.eventCount, 3);
+  assert.equal(data.detailedEventCount, 1);
+  assert.equal(data.totalTokens, 3_000);
+  assert.equal(data.detailedTokens, 1_000);
+  assert.equal(data.inputTokens, 900);
+  assert.equal(data.cachedInputTokens, 450);
+  assert.equal(data.inputEventCount, 1);
+  assert.ok(Math.abs(data.measurementCoveragePercent - 100 / 3) < 0.000_000_1);
+});
+
+test("cache report preserves explicit reconciled zero-token breakdowns", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+  const snapshot = {
+    events: [{
+      timestamp: "2026-08-15T12:00:00.000Z",
+      totalTokens: 0,
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      breakdownAvailable: true,
+    }],
+  };
+
+  const data = buildCacheReportData(snapshot, bounds, 7, 1_100);
+  assert.equal(data.eventCount, 1);
+  assert.equal(data.detailedEventCount, 1);
+  assert.equal(data.totalTokens, 0);
+  assert.equal(data.detailedTokens, 0);
+  assert.equal(data.inputEventCount, 0);
+  assert.equal(data.measurementCoveragePercent, 100);
+
+  const svg = renderCacheReportImage({ snapshot, bounds, days: 7 });
+  assert.match(svg, /100\.0% of calls/);
+  assert.match(svg, /1 of 1 calls/);
+});
+
+test("cache report rejects blank explicit zero-token breakdowns", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+  const snapshot = {
+    events: [
+      {
+        timestamp: "2026-08-15T12:00:00.000Z",
+        totalTokens: "",
+        inputTokens: "",
+        cachedInputTokens: "",
+        outputTokens: "",
+        breakdownAvailable: true,
+      },
+      {
+        timestamp: "2026-08-15T13:00:00.000Z",
+        totalTokens: " \t",
+        inputTokens: " \t",
+        cachedInputTokens: " \t",
+        outputTokens: " \t",
+        breakdownAvailable: true,
+      },
+    ],
+  };
+
+  const data = buildCacheReportData(snapshot, bounds, 7, 1_100);
+  assert.equal(data.eventCount, 2);
+  assert.equal(data.detailedEventCount, 0);
+  assert.equal(data.totalTokens, 0);
+  assert.equal(data.inputTokens, 0);
+  assert.equal(data.measurementCoveragePercent, 0);
+
+  const svg = renderCacheReportImage({ snapshot, bounds, days: 7 });
+  assert.match(svg, /0\.00% of calls/);
+  assert.match(svg, /0 of 2 calls/);
+});
+
 test("cache report contains hostile object-shaped snapshot fields", () => {
   const bounds = multiDayBounds("2026-08-15", "UTC", 7);
   const hostileValue = () => ({ toString: null, valueOf: null });
@@ -1566,6 +1669,7 @@ test("cache report contains hostile object-shaped snapshot fields", () => {
     svg = renderCacheReportImage({ snapshot, bounds, days: 7 });
   });
   assert.equal(data.eventCount, 2);
+  assert.equal(data.detailedEventCount, 1);
   assert.equal(data.totalTokens, 1_000);
   assert.equal(data.inputTokens, 900);
   assert.deepEqual(

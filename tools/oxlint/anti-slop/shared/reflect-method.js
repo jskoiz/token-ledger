@@ -83,14 +83,26 @@ function bindingPropertyPath(pattern, name) {
   return null;
 }
 
-function isGlobalReflect(sourceCode, expression) {
-  if (expression.type !== "Identifier" || expression.name !== "Reflect") return false;
+function isGlobalIdentifier(sourceCode, expression, name) {
+  if (expression.type !== "Identifier" || expression.name !== name) return false;
   if (sourceCode.isGlobalReference(expression)) return true;
   const variable = resolveVariable(sourceCode, expression);
   return variable === null || variable.defs.length === 0;
 }
 
+function isGlobalReflect(sourceCode, expression) {
+  if (isGlobalIdentifier(sourceCode, expression, "Reflect")) return true;
+  const member = staticMember(expression);
+  return (
+    member?.property === "Reflect" &&
+    isGlobalIdentifier(sourceCode, member.object, "globalThis")
+  );
+}
+
 function memberValue(value, property) {
+  if (value?.kind === "globalThis" && property === "Reflect") {
+    return { kind: "reflect" };
+  }
   return value?.kind === "reflect"
     ? { kind: "method", method: property }
     : null;
@@ -98,9 +110,11 @@ function memberValue(value, property) {
 
 function resolveReflectValue(sourceCode, expression, visited = new Set()) {
   const current = unwrapExpression(expression);
+  if (isGlobalReflect(sourceCode, current)) return { kind: "reflect" };
+  if (isGlobalIdentifier(sourceCode, current, "globalThis")) {
+    return { kind: "globalThis" };
+  }
   if (current.type === "Identifier") {
-    if (isGlobalReflect(sourceCode, current)) return { kind: "reflect" };
-
     const variable = resolveVariable(sourceCode, current);
     if (
       variable === null ||

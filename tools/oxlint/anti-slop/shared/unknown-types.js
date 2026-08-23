@@ -105,6 +105,159 @@ export function createUnknownTypeResolver(
     }
   };
 
+  const definitelyExcludesUnknown = (type) => {
+    switch (type.type) {
+      case "TSNeverKeyword":
+      case "TSStringKeyword":
+      case "TSNumberKeyword":
+      case "TSBooleanKeyword":
+      case "TSBigIntKeyword":
+      case "TSSymbolKeyword":
+      case "TSObjectKeyword":
+      case "TSNullKeyword":
+      case "TSUndefinedKeyword":
+      case "TSVoidKeyword":
+      case "TSLiteralType":
+      case "TSTemplateLiteralType":
+      case "TSTypeLiteral":
+      case "TSArrayType":
+      case "TSTupleType":
+      case "TSFunctionType":
+      case "TSConstructorType":
+        return true;
+      default:
+        return false;
+    }
+  };
+
+  const comparisonShape = (
+    type,
+    bindings,
+    visited = new Set(),
+  ) => {
+    const resolved = resolveComparisonType(type, bindings, visited);
+    if (visited.has(resolved)) {
+      return {
+        kind: "other",
+        coversNonNullish: false,
+        coversNull: false,
+        coversUndefined: false,
+      };
+    }
+
+    if (resolved.type === "TSAnyKeyword") {
+      return {
+        kind: "any",
+        coversNonNullish: true,
+        coversNull: true,
+        coversUndefined: true,
+      };
+    }
+    if (resolved.type === "TSUnknownKeyword") {
+      return {
+        kind: "unknown",
+        coversNonNullish: true,
+        coversNull: true,
+        coversUndefined: true,
+      };
+    }
+    if (resolved.type === "TSNeverKeyword") {
+      return {
+        kind: "never",
+        coversNonNullish: false,
+        coversNull: false,
+        coversUndefined: false,
+      };
+    }
+
+    const nextVisited = new Set(visited);
+    nextVisited.add(resolved);
+    if (resolved.type === "TSUnionType") {
+      const shapes = resolved.types.map((member) =>
+        comparisonShape(member, bindings, nextVisited)
+      );
+      if (shapes.some((shape) => shape.kind === "any")) {
+        return {
+          kind: "any",
+          coversNonNullish: true,
+          coversNull: true,
+          coversUndefined: true,
+        };
+      }
+      if (shapes.some((shape) => shape.kind === "unknown")) {
+        return {
+          kind: "unknown",
+          coversNonNullish: true,
+          coversNull: true,
+          coversUndefined: true,
+        };
+      }
+      const coversNonNullish = shapes.some((shape) => shape.coversNonNullish);
+      const coversNull = shapes.some((shape) => shape.coversNull);
+      const coversUndefined = shapes.some((shape) => shape.coversUndefined);
+      return {
+        kind: coversNonNullish && coversNull && coversUndefined
+          ? "unknown"
+          : shapes.every((shape) => shape.kind === "never")
+            ? "never"
+            : "other",
+        coversNonNullish,
+        coversNull,
+        coversUndefined,
+      };
+    }
+    if (resolved.type === "TSIntersectionType") {
+      const shapes = resolved.types.map((member) =>
+        comparisonShape(member, bindings, nextVisited)
+      );
+      if (shapes.some((shape) => shape.kind === "never")) {
+        return {
+          kind: "never",
+          coversNonNullish: false,
+          coversNull: false,
+          coversUndefined: false,
+        };
+      }
+      if (shapes.some((shape) => shape.kind === "any")) {
+        return {
+          kind: "any",
+          coversNonNullish: true,
+          coversNull: true,
+          coversUndefined: true,
+        };
+      }
+      if (shapes.every((shape) => shape.kind === "unknown")) {
+        return {
+          kind: "unknown",
+          coversNonNullish: true,
+          coversNull: true,
+          coversUndefined: true,
+        };
+      }
+      const constrained = shapes.filter((shape) => shape.kind !== "unknown");
+      return {
+        kind: "other",
+        coversNonNullish:
+          constrained.length > 0 &&
+          constrained.every((shape) => shape.coversNonNullish),
+        coversNull:
+          constrained.length > 0 &&
+          constrained.every((shape) => shape.coversNull),
+        coversUndefined:
+          constrained.length > 0 &&
+          constrained.every((shape) => shape.coversUndefined),
+      };
+    }
+
+    return {
+      kind: "other",
+      coversNonNullish:
+        resolved.type === "TSTypeLiteral" && resolved.members.length === 0,
+      coversNull: resolved.type === "TSNullKeyword",
+      coversUndefined: resolved.type === "TSUndefinedKeyword",
+    };
+  };
+
   const isDefinitelyAssignable = (
     source,
     target,
@@ -115,24 +268,15 @@ export function createUnknownTypeResolver(
     const targetType = resolveComparisonType(target, bindings, visited);
     if (sourceType === targetType) return true;
     if (sourceType.type === "TSNeverKeyword") return true;
-    if (
-      targetType.type === "TSAnyKeyword" ||
-      targetType.type === "TSUnknownKeyword"
-    ) {
+    const targetShape = comparisonShape(targetType, bindings);
+    if (targetShape.kind === "any" || targetShape.kind === "unknown") {
       return true;
     }
-    if (
-      sourceType.type === "TSAnyKeyword" ||
-      sourceType.type === "TSUnknownKeyword"
-    ) {
-      return null;
-    }
-    if (visited.has(sourceType) || visited.has(targetType)) return null;
-    const nextVisited = new Set(visited);
-    nextVisited.add(sourceType);
-    nextVisited.add(targetType);
 
     if (targetType.type === "TSUnionType") {
+      if (visited.has(targetType)) return null;
+      const nextVisited = new Set(visited);
+      nextVisited.add(targetType);
       let undecidable = false;
       for (const member of targetType.types) {
         const result = isDefinitelyAssignable(
@@ -147,6 +291,9 @@ export function createUnknownTypeResolver(
       return undecidable ? null : false;
     }
     if (sourceType.type === "TSUnionType") {
+      if (visited.has(sourceType)) return null;
+      const nextVisited = new Set(visited);
+      nextVisited.add(sourceType);
       let undecidable = false;
       for (const member of sourceType.types) {
         const result = isDefinitelyAssignable(
@@ -161,6 +308,9 @@ export function createUnknownTypeResolver(
       return undecidable ? null : true;
     }
     if (targetType.type === "TSIntersectionType") {
+      if (visited.has(targetType)) return null;
+      const nextVisited = new Set(visited);
+      nextVisited.add(targetType);
       let undecidable = false;
       for (const member of targetType.types) {
         const result = isDefinitelyAssignable(
@@ -175,6 +325,9 @@ export function createUnknownTypeResolver(
       return undecidable ? null : true;
     }
     if (sourceType.type === "TSIntersectionType") {
+      if (visited.has(sourceType)) return null;
+      const nextVisited = new Set(visited);
+      nextVisited.add(sourceType);
       let undecidable = false;
       for (const member of sourceType.types) {
         const result = isDefinitelyAssignable(
@@ -188,6 +341,12 @@ export function createUnknownTypeResolver(
       }
       return undecidable ? null : false;
     }
+
+    if (sourceType.type === "TSAnyKeyword") return null;
+    if (sourceType.type === "TSUnknownKeyword") {
+      return definitelyExcludesUnknown(targetType) ? false : null;
+    }
+    if (visited.has(sourceType) || visited.has(targetType)) return null;
 
     const sourceLiteral = literalValue(sourceType);
     const targetLiteral = literalValue(targetType);
@@ -227,14 +386,28 @@ export function createUnknownTypeResolver(
     return null;
   };
 
-  const resolvesToUnknown = (
+  const unionKind = (kinds) => {
+    if (kinds.includes("any")) return "any";
+    if (kinds.includes("unknown")) return "unknown";
+    return kinds.every((kind) => kind === "never") ? "never" : "other";
+  };
+
+  const intersectionKind = (kinds) => {
+    if (kinds.includes("never")) return "never";
+    if (kinds.includes("any")) return "any";
+    return kinds.every((kind) => kind === "unknown") ? "unknown" : "other";
+  };
+
+  const resolveTopKind = (
     type,
     visited = new Set(),
     bindings = new Map(),
   ) => {
-    if (type.type === "TSUnknownKeyword") return true;
+    if (type.type === "TSUnknownKeyword") return "unknown";
+    if (type.type === "TSAnyKeyword") return "any";
+    if (type.type === "TSNeverKeyword") return "never";
     if (type.type === "TSParenthesizedType") {
-      return resolvesToUnknown(type.typeAnnotation, visited, bindings);
+      return resolveTopKind(type.typeAnnotation, visited, bindings);
     }
     if (type.type === "TSConditionalType") {
       const checkType = resolveComparisonType(type.checkType, bindings);
@@ -243,53 +416,60 @@ export function createUnknownTypeResolver(
         checkReference?.namespace.length === 0 &&
         checkReference.arguments.length === 0 &&
         bindings.has(checkReference.name);
-      if (checkType.type === "TSNeverKeyword" && isBoundNakedCheck) return false;
+      if (checkType.type === "TSNeverKeyword" && isBoundNakedCheck) {
+        return "never";
+      }
 
-      const evaluateBranch = (candidate) => {
+      const trueKind = () => resolveTopKind(type.trueType, visited, bindings);
+      const falseKind = () => resolveTopKind(type.falseType, visited, bindings);
+
+      const evaluateBranch = (candidate, combineIndeterminate = false) => {
         const selected = isDefinitelyAssignable(
           candidate,
           type.extendsType,
           bindings,
         );
-        if (selected === true) {
-          return resolvesToUnknown(type.trueType, visited, bindings);
-        }
-        if (selected === false) {
-          return resolvesToUnknown(type.falseType, visited, bindings);
-        }
-        return (
-          resolvesToUnknown(type.trueType, visited, bindings) &&
-          resolvesToUnknown(type.falseType, visited, bindings)
-        );
+        if (selected === true) return trueKind();
+        if (selected === false) return falseKind();
+        const consequent = trueKind();
+        const alternate = falseKind();
+        return combineIndeterminate
+          ? unionKind([consequent, alternate])
+          : consequent === alternate
+            ? consequent
+            : "other";
       };
 
+      if (checkType.type === "TSAnyKeyword") {
+        return evaluateBranch(checkType, true);
+      }
       if (
         checkType.type === "TSUnionType" &&
         isBoundNakedCheck
       ) {
-        return checkType.types.some((member) => evaluateBranch(member));
+        return unionKind(checkType.types.map((member) => evaluateBranch(member)));
       }
       return evaluateBranch(checkType);
     }
     if (type.type === "TSUnionType") {
-      return type.types.some((member) =>
-        resolvesToUnknown(member, visited, bindings),
+      return unionKind(
+        type.types.map((member) => resolveTopKind(member, visited, bindings)),
       );
     }
     if (type.type === "TSIntersectionType") {
-      return type.types.every((member) =>
-        resolvesToUnknown(member, visited, bindings),
+      return intersectionKind(
+        type.types.map((member) => resolveTopKind(member, visited, bindings)),
       );
     }
 
     const reference = typeAliasReference(type);
-    if (reference === null) return false;
+    if (reference === null) return "other";
 
     const binding = reference.namespace.length === 0
       ? bindings.get(reference.name)
       : undefined;
     if (binding !== undefined) {
-      return resolvesToUnknown(binding.type, visited, binding.bindings);
+      return resolveTopKind(binding.type, visited, binding.bindings);
     }
 
     const visibleBinding = visibleTypeAliasBinding(
@@ -299,15 +479,15 @@ export function createUnknownTypeResolver(
     );
     if (visibleBinding !== null) {
       const alias = visibleBinding.alias;
-      if (alias === null || visited.has(alias)) return false;
+      if (alias === null || visited.has(alias)) return "other";
       const parameters = alias.typeParameters?.params ?? [];
-      if (reference.arguments.length > parameters.length) return false;
+      if (reference.arguments.length > parameters.length) return "other";
 
       const nextBindings = new Map(bindings);
       for (const [index, parameter] of parameters.entries()) {
         const supplied = reference.arguments[index];
         const argument = supplied ?? parameter.default;
-        if (argument === null || argument === undefined) return false;
+        if (argument === null || argument === undefined) return "other";
         nextBindings.set(parameter.name.name, {
           type: argument,
           bindings: supplied === undefined ? new Map(nextBindings) : bindings,
@@ -316,7 +496,7 @@ export function createUnknownTypeResolver(
 
       const nextVisited = new Set(visited);
       nextVisited.add(alias);
-      return resolvesToUnknown(alias.typeAnnotation, nextVisited, nextBindings);
+      return resolveTopKind(alias.typeAnnotation, nextVisited, nextBindings);
     }
 
     if (
@@ -325,10 +505,18 @@ export function createUnknownTypeResolver(
       (reference.name === "Promise" || reference.name === "PromiseLike")
     ) {
       const value = reference.arguments[0];
-      return value !== undefined && resolvesToUnknown(value, visited, bindings);
+      return value === undefined
+        ? "other"
+        : resolveTopKind(value, visited, bindings);
     }
-    return false;
+    return "other";
   };
+
+  const resolvesToUnknown = (
+    type,
+    visited = new Set(),
+    bindings = new Map(),
+  ) => resolveTopKind(type, visited, bindings) === "unknown";
 
   return resolvesToUnknown;
 }

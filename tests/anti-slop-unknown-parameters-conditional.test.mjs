@@ -41,6 +41,7 @@ test("no-unknown-parameters resolves conditional aliases", async () => {
   const result = await lintTypeScript(`
     type Select<T> = T extends string ? unknown : number;
     type AlwaysUnknown<T> = T extends string ? unknown : unknown;
+    type UnknownTarget<T> = unknown extends T ? number : unknown;
 
     export function selected(value: Select<string>): void {}
     export function distributed(value: Select<string | number>): void {}
@@ -48,16 +49,75 @@ test("no-unknown-parameters resolves conditional aliases", async () => {
     export function literalNever(
       value: never extends string ? unknown : number,
     ): void {}
+    export function anyTrue(
+      value: any extends string ? unknown : number,
+    ): void {}
+    export function anyFalse(
+      value: any extends string ? number : unknown,
+    ): void {}
+    export function unknownFalse(
+      value: unknown extends string ? number : unknown,
+    ): void {}
+    export function anyTopUnknown(
+      value: any extends unknown ? unknown : number,
+    ): void {}
+    export function anyAnyUnknown(
+      value: any extends any ? unknown : number,
+    ): void {}
+    export function unknownUnionUnknown(
+      value: unknown extends unknown | string ? unknown : number,
+    ): void {}
+    export function unknownUnionFalse(
+      value: unknown extends string | number ? number : unknown,
+    ): void {}
+    export function unknownTargetConcrete(value: UnknownTarget<string>): void {}
+    export function exhaustiveUnionUnknown(
+      value: unknown extends {} | null | undefined ? unknown : number,
+    ): void {}
+    export function nonExhaustiveUnionUnknown(
+      value: unknown extends {} | null ? number : unknown,
+    ): void {}
+    export function anyIntersectionUnknown(
+      value: string extends any & number ? unknown : number,
+    ): void {}
+    export function anyNeverIntersectionUnknown(
+      value: string extends any & never ? number : unknown,
+    ): void {}
 
     export function concrete(value: Select<number>): void {}
     export function unresolved<T>(value: Select<T>): void {}
     export function distributedNever(value: Select<never>): void {}
     export function allowedCause(cause: Select<string>): void {}
+    export function anyDominated(
+      value: any extends string ? unknown : any,
+    ): void {}
+    export function unknownConcrete(
+      value: unknown extends string ? unknown : number,
+    ): void {}
+    export function anyTopConcrete(
+      value: any extends unknown ? number : unknown,
+    ): void {}
+    export function anyAnyConcrete(
+      value: any extends any ? number : unknown,
+    ): void {}
+    export function unknownUnionConcrete(
+      value: unknown extends unknown | string ? number : unknown,
+    ): void {}
+    export function unresolvedUnknownTarget<T>(
+      value: unknown extends T ? number : unknown,
+    ): void {}
+    export function unknownTargetTop(value: UnknownTarget<unknown>): void {}
+    export function exhaustiveUnionConcrete(
+      value: unknown extends {} | null | undefined ? number : unknown,
+    ): void {}
+    export function anyIntersectionConcrete(
+      value: string extends any & number ? number : unknown,
+    ): void {}
   `);
   assert.equal(result.status, 1, result.output);
   assert.equal(
     result.output.match(/anti-slop\(no-unknown-parameters\)/g)?.length,
-    4,
+    16,
     result.output,
   );
 });
