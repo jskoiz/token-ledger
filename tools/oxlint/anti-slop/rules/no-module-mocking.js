@@ -8,7 +8,10 @@ function unwrapExpression(expression                   )                    {
   let current = expression;
   while (
     current.type === "ParenthesizedExpression" ||
-    current.type === "TSNonNullExpression"
+    current.type === "TSNonNullExpression" ||
+    current.type === "TSSatisfiesExpression" ||
+    current.type === "TSAsExpression" ||
+    current.type === "TSTypeAssertion"
   ) {
     current = current.expression;
   }
