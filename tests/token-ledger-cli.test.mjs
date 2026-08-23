@@ -13,6 +13,7 @@ import { homedir, tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { writePrivateSnapshot } from "../lib/token-ledger-snapshot.mjs";
 import {
   aggregateProjects,
   dayBounds,
@@ -217,7 +218,7 @@ test("parseArgs defaults the week end day to today", () => {
   );
   assert.equal(
     options.input,
-    resolve(homedir(), ".token-ledger", "token-ledger-snapshot.json"),
+    resolve(homedir(), ".token-ledger", "token-ledger-snapshot.json.gz"),
   );
   assert.equal(options.input, DEFAULT_SNAPSHOT);
 });
@@ -341,6 +342,7 @@ test("snapshot errors retain safe labels without absolute paths", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-privacy-"));
   const missingPath = resolve(root, "missing-snapshot.json");
   const malformedPath = resolve(root, "malformed-snapshot.json");
+  const malformedGzipPath = resolve(root, "malformed-snapshot.json.gz");
   const unreadablePath = resolve(root, "unreadable-snapshot.json");
   try {
     await assert.rejects(
@@ -379,6 +381,26 @@ test("snapshot errors retain safe labels without absolute paths", async () => {
       },
     );
 
+    await writeFile(malformedGzipPath, "not a gzip stream");
+    await assert.rejects(
+      () => run(parseArgs([
+        "day",
+        "2026-08-20",
+        "--input",
+        malformedGzipPath,
+        "--no-refresh",
+        "--static",
+      ])),
+      (error) => {
+        assert.match(
+          error.message,
+          /Could not read snapshot malformed-snapshot\.json\.gz/,
+        );
+        assert.ok(!error.message.includes(root));
+        return true;
+      },
+    );
+
     await mkdir(unreadablePath);
     await assert.rejects(
       () => run(parseArgs([
@@ -399,6 +421,49 @@ test("snapshot errors retain safe labels without absolute paths", async () => {
         return true;
       },
     );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("CLI reads an explicit gzip-compressed snapshot", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-gzip-input-"));
+  const snapshotPath = resolve(root, "snapshot.json.gz");
+  try {
+    await writePrivateSnapshot(snapshotPath, {
+      generatedAt: "2026-08-20T12:00:00.000Z",
+      events: [{
+        id: "gzip-event",
+        timestamp: "2026-08-20T12:00:00.000Z",
+        project: "Compressed Project",
+        threadId: "gzip-thread",
+        model: "gpt-5.6-luna",
+        totalTokens: 1_200,
+        inputTokens: 1_000,
+        cachedInputTokens: 500,
+        outputTokens: 200,
+      }],
+      threads: [{ id: "gzip-thread", project: "Compressed Project" }],
+      quotaObservations: [],
+    });
+
+    const output = await run(parseArgs([
+      "day",
+      "2026-08-20",
+      "--input",
+      snapshotPath,
+      "--no-refresh",
+      "--static",
+      "--plain",
+      "--ascii",
+      "--raw-projects",
+      "--tz",
+      "UTC",
+    ]));
+
+    assert.match(output, /Compressed Project/);
+    assert.match(output, /1\.20K/);
+    assert.ok(!output.includes(root));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

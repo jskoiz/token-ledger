@@ -13,10 +13,12 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
 
+import { collectUsage } from "../lib/token-ledger-importer.mjs";
 import {
-  collectUsage,
+  DEFAULT_SNAPSHOT_MAX_BYTES,
+  readPrivateSnapshot,
   writePrivateSnapshot,
-} from "../lib/token-ledger-importer.mjs";
+} from "../lib/token-ledger-snapshot.mjs";
 
 function tokenCount(timestamp, total, last) {
   return {
@@ -231,6 +233,69 @@ test("private snapshots replace atomically and enforce mode 0600", async () => {
       synthetic: true,
     });
     assert.equal((await stat(output)).mode & 0o777, 0o600);
+    assert.deepEqual(
+      (await readdir(root)).filter((name) => name.endsWith(".tmp")),
+      [],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("gzip snapshots are compact, readable, atomic, and private", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-gzip-write-"));
+  try {
+    const output = resolve(root, "snapshot.json.gz");
+    const snapshot = {
+      generatedAt: "2026-08-22T00:00:00.000Z",
+      events: Array.from({ length: 1_000 }, (_, index) => ({
+        id: `event-${index}`,
+        timestamp: "2026-08-22T00:00:00.000Z",
+        project: "repeated-project",
+        model: "gpt-5.6-sol",
+        totalTokens: index + 1,
+      })),
+    };
+
+    const result = await writePrivateSnapshot(output, snapshot);
+    const encoded = await readFile(output);
+
+    assert.deepEqual([...encoded.subarray(0, 2)], [0x1f, 0x8b]);
+    assert.deepEqual(await readPrivateSnapshot(output), snapshot);
+    assert.equal(result.encoding, "gzip");
+    assert.equal(result.bytesWritten, encoded.byteLength);
+    assert.ok(result.bytesWritten < result.jsonBytes / 4);
+    assert.equal(result.maxBytes, DEFAULT_SNAPSHOT_MAX_BYTES);
+    assert.equal((await stat(output)).mode & 0o777, 0o600);
+    assert.deepEqual(
+      (await readdir(root)).filter((name) => name.endsWith(".tmp")),
+      [],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("snapshot size limit preserves the previous cache", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-size-limit-"));
+  try {
+    const output = resolve(root, "snapshot.json.gz");
+    await writeFile(output, "previous-cache\n");
+
+    await assert.rejects(
+      () => writePrivateSnapshot(
+        output,
+        {
+          events: Array.from({ length: 100 }, (_, index) => ({
+            id: `event-${index}-${"x".repeat(index + 1)}`,
+          })),
+        },
+        { maxBytes: 1 },
+      ),
+      /exceeding the .* safety limit/,
+    );
+
+    assert.equal(await readFile(output, "utf8"), "previous-cache\n");
     assert.deepEqual(
       (await readdir(root)).filter((name) => name.endsWith(".tmp")),
       [],

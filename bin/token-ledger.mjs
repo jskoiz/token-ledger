@@ -4,7 +4,6 @@ import { spawnSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import {
   mkdir,
-  readFile,
   stat,
 } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -23,11 +22,15 @@ import {
 import { renderCacheReportImage } from "./token-ledger-cache-image.mjs";
 import { renderTrendCombo } from "./token-ledger-trend-terminal.mjs";
 import { startInteractive } from "./token-ledger-tui.mjs";
+import {
+  readPrivateSnapshot,
+  writePrivateSnapshot,
+} from "../lib/token-ledger-snapshot.mjs";
 
 export const DEFAULT_SNAPSHOT = resolve(
   homedir(),
   ".token-ledger",
-  "token-ledger-snapshot.json",
+  "token-ledger-snapshot.json.gz",
 );
 const DEFAULT_TOP = 10;
 const DEFAULT_TIME_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -62,7 +65,7 @@ Usage:
 Options:
   --date <day>         Date as YYYY-MM-DD, today, or yesterday
   --period <window>    Trend window, for example 7d, 14d, or 2w
-  --input <file>       Snapshot to read (default: ~/.token-ledger/token-ledger-snapshot.json)
+  --input <file>       Snapshot to read (default: ~/.token-ledger/token-ledger-snapshot.json.gz)
   --refresh            Rebuild the default snapshot from CODEX_HOME or ~/.codex
   --no-refresh         Use the cached snapshot without checking local JSONL files
   --codex-home <dir>   Codex data root used when refreshing
@@ -823,7 +826,7 @@ async function readSnapshot(snapshotPath) {
   const snapshotLabel = safeDisplayLabel(snapshotPath, "snapshot");
   let parsed;
   try {
-    parsed = JSON.parse(await readFile(snapshotPath, "utf8"));
+    parsed = await readPrivateSnapshot(snapshotPath);
   } catch (error) {
     if (error?.code === "ENOENT") {
       throw new Error(`Snapshot not found: ${snapshotLabel}`);
@@ -846,7 +849,7 @@ async function refreshSnapshot(options) {
   }
   let progressStarted = false;
   try {
-    const { collectUsage, writePrivateSnapshot } = await import(
+    const { collectUsage } = await import(
       "../lib/token-ledger-importer.mjs"
     );
     process.stderr.write("Token Ledger: refreshing local snapshot…\n");
@@ -863,7 +866,10 @@ async function refreshSnapshot(options) {
       },
     );
     process.stderr.write("\n");
-    await writePrivateSnapshot(options.input, snapshot);
+    const writeResult = await writePrivateSnapshot(options.input, snapshot);
+    process.stderr.write(
+      `Token Ledger: cached ${(writeResult.bytesWritten / 1_000_000).toFixed(1)} MB ${writeResult.encoding} snapshot (${(writeResult.jsonBytes / 1_000_000).toFixed(1)} MB JSON before encoding; ${(writeResult.maxBytes / 1_000_000).toFixed(1)} MB limit).\n`,
+    );
     return snapshot;
   } catch (error) {
     if (progressStarted) process.stderr.write("\n");
