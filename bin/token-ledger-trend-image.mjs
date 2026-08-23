@@ -515,21 +515,18 @@ export function renderTrendImage({
   }
 
   // ---- Layout ----
-  // One uniform-height top band: a 2x2 quad of stat cells, the weekly meter
-  // as its own panel, and a pace panel with a runway timeline.
+  // One uniform-height top band: a 2x2 quad of stat cells beside one unified
+  // weekly meter + pace panel.
   const headerBaseline = 53;
   const cardTop = 82;
   const topGap = 24;
   const hasMeterCard = Boolean(hasLine && latestQuotaPoint);
   const statCardCount = modelCards.length + (hasFast ? 1 : 0);
-  const pacePanelWidth = 432;
+  const pacePanelWidth = hasMeterCard ? 560 : 432;
   const pacePanelX = contentRight - pacePanelWidth;
   const paceTextX = pacePanelX + 18;
   const paceInnerWidth = pacePanelWidth - 36;
-  const meterPanelWidth = hasMeterCard ? 240 : 0;
-  const quadWidth = contentWidth - pacePanelWidth - topGap -
-    (hasMeterCard ? meterPanelWidth + topGap : 0);
-  const meterPanelX = outer + (statCardCount ? quadWidth + topGap : 0);
+  const quadWidth = contentWidth - pacePanelWidth - topGap;
   const quadColumns = statCardCount >= 2 ? 2 : 1;
   const quadRows = Math.max(1, Math.ceil(statCardCount / quadColumns));
   const paceNoteLines = [];
@@ -546,10 +543,13 @@ export function renderTrendImage({
     }
     if (current) paceNoteLines.push(current);
   }
-  // Baseline offsets inside the pace panel: headline, optional runway
-  // timeline, the two-column stat pair, then the note.
-  const paceStatValueBaseline = 54 + (paceRunwayBar ? 60 : 34);
-  const paceNoteStart = (paceLines.length > 1 ? paceStatValueBaseline + 16 : 54) + 24;
+  // Baseline offsets inside the unified panel: meter headline, optional
+  // runway timeline, the two-column stat pair, then the note.
+  const paceHeadlineBaseline = hasMeterCard ? 58 : 54;
+  const paceStatValueBaseline = paceHeadlineBaseline + (paceRunwayBar ? 62 : 34);
+  const paceStatsPresent = paceLines.length > (hasMeterCard ? 0 : 1);
+  const paceNoteStart =
+    (paceStatsPresent ? paceStatValueBaseline + 16 : paceHeadlineBaseline) + 24;
   const topRowHeight = Math.max(
     hasMeterCard ? 170 : 150,
     paceNoteStart + (paceNoteLines.length - 1) * 16 + 14,
@@ -785,29 +785,39 @@ export function renderTrendImage({
     }));
   }
 
-  // ---- Weekly meter panel ----
+  // ---- Unified weekly meter + pace panel (top right) ----
+  elements.push(svgRect(pacePanelX, cardTop, pacePanelWidth, topRowHeight, {
+    rx: 7,
+    fill: meterCard ? meterCard.panel : COLORS.panel,
+    stroke: meterCard ? meterCard.border : COLORS.panelBorder,
+    "stroke-width": 1,
+  }));
+  const paceRight = pacePanelX + pacePanelWidth - 18;
   if (meterCard) {
-    elements.push(svgRect(meterPanelX, cardTop, meterPanelWidth, topRowHeight, {
-      rx: 7,
-      fill: meterCard.panel,
-      stroke: meterCard.border,
-      "stroke-width": 1,
-    }));
-    const meterContentX = meterPanelX + 17;
-    const meterInnerWidth = meterPanelWidth - 34;
-    elements.push(`<circle cx="${(meterContentX + 3.5).toFixed(2)}" cy="${cardTop + 19}" r="3.5" fill="${meterCard.swatch}"/>`);
+    elements.push(`<circle cx="${(paceTextX + 3.5).toFixed(2)}" cy="${cardTop + 19}" r="3.5" fill="${meterCard.swatch}"/>`);
+  }
+  elements.push(svgText({
+    x: paceTextX + (meterCard ? 15 : 0),
+    y: cardTop + 23,
+    value: meterCard ? "WEEKLY METER · PACE & RUNWAY" : "PACE & RUNWAY",
+    fill: meterCard ? meterCard.labelColor : COLORS.muted,
+    size: 10.5,
+    spacing: "1.2",
+  }));
+  if (meterCard) {
+    // Provenance rides the label row; the meter reading is the headline with
+    // the projected runway right-aligned beside it.
     elements.push(svgText({
-      x: meterContentX + 15,
+      x: paceRight,
       y: cardTop + 23,
-      value: meterCard.label.toUpperCase(),
-      fill: meterCard.labelColor,
+      value: meterCard.caption,
+      fill: COLORS.muted,
       size: 10.5,
-      spacing: ".9",
+      anchor: "end",
     }));
-    const meterValueBaseline = cardTop + topRowHeight / 2 + 14;
     elements.push(svgText({
-      x: meterContentX,
-      y: meterValueBaseline,
+      x: paceTextX,
+      y: cardTop + paceHeadlineBaseline,
       value: meterCard.value,
       fill: meterCard.valueColor,
       size: 28,
@@ -815,74 +825,61 @@ export function renderTrendImage({
       spacing: "-0.6",
     }));
     elements.push(svgText({
-      x: meterContentX + textWidth(meterCard.value, 28, 800) + 10,
-      y: meterValueBaseline,
+      x: paceTextX + textWidth(meterCard.value, 28, 800) + 10,
+      y: cardTop + paceHeadlineBaseline,
       value: meterCard.suffix,
       fill: COLORS.secondary,
       size: 11,
     }));
-    elements.push(svgText({
-      x: meterContentX,
-      y: cardTop + topRowHeight - 31,
-      value: meterCard.caption,
-      fill: COLORS.muted,
-      size: 10.5,
-    }));
-    const meterBarY = cardTop + topRowHeight - 18;
-    elements.push(svgRect(meterContentX, meterBarY, meterInnerWidth, 4, {
-      rx: 2,
-      fill: meterCard.track,
-    }));
-    const meterFillWidth =
-      (Math.min(100, Math.max(0, meterCard.barPercent)) / 100) * meterInnerWidth;
-    if (meterFillWidth > 0) {
-      elements.push(svgRect(meterContentX, meterBarY, meterFillWidth, 4, {
-        rx: 2,
-        fill: meterCard.fill,
+    if (paceLines.length > 1) {
+      const runwayValue = paceLines[0].value;
+      const runwayDetail = "left at this pace";
+      const detailWidth = textWidth(runwayDetail, 11);
+      elements.push(svgText({
+        x: paceRight - detailWidth - 8,
+        y: cardTop + paceHeadlineBaseline,
+        value: runwayValue,
+        fill: paceLines[0].color,
+        size: 18,
+        weight: 800,
+        anchor: "end",
+      }));
+      elements.push(svgText({
+        x: paceRight,
+        y: cardTop + paceHeadlineBaseline,
+        value: runwayDetail,
+        fill: COLORS.muted,
+        size: 11,
+        anchor: "end",
       }));
     }
+  } else {
+    const paceHeadline = paceLines[0];
+    elements.push(svgText({
+      x: paceTextX,
+      y: cardTop + paceHeadlineBaseline,
+      value: paceHeadline.value,
+      fill: paceHeadline.color,
+      size: 26,
+      weight: 800,
+      spacing: "-0.52",
+    }));
+    elements.push(svgText({
+      x: paceTextX + textWidth(paceHeadline.value, 26, 800) + 10,
+      y: cardTop + paceHeadlineBaseline,
+      value: paceHeadline.detail,
+      fill: COLORS.muted,
+      size: 12.5,
+    }));
   }
-
-  // ---- Pace & runway panel (top right, same height as the cards) ----
-  elements.push(svgRect(pacePanelX, cardTop, pacePanelWidth, topRowHeight, {
-    rx: 7,
-    fill: COLORS.panel,
-    stroke: COLORS.panelBorder,
-    "stroke-width": 1,
-  }));
-  elements.push(svgText({
-    x: paceTextX,
-    y: cardTop + 23,
-    value: "PACE & RUNWAY",
-    fill: COLORS.muted,
-    size: 10.5,
-    spacing: "1.2",
-  }));
-  const paceHeadline = paceLines[0];
-  elements.push(svgText({
-    x: paceTextX,
-    y: cardTop + 54,
-    value: paceHeadline.value,
-    fill: paceHeadline.color,
-    size: 26,
-    weight: 800,
-    spacing: "-0.52",
-  }));
-  elements.push(svgText({
-    x: paceTextX + textWidth(paceHeadline.value, 26, 800) + 10,
-    y: cardTop + 54,
-    value: paceHeadline.detail,
-    fill: COLORS.muted,
-    size: 12.5,
-  }));
   if (paceRunwayBar) {
     // Runway timeline: amber fill = days of meter left, tick = the next
     // weekly reset, both on a shared day scale.
     const scaleDays = Math.max(paceRunwayBar.runwayDays, paceRunwayBar.daysToReset) * 1.06;
-    const trackY = cardTop + 62;
+    const trackY = cardTop + paceHeadlineBaseline + 12;
     elements.push(svgRect(paceTextX, trackY, paceInnerWidth, 5, {
       rx: 2.5,
-      fill: COLORS.track,
+      fill: "rgba(246,183,60,.14)",
     }));
     const runwayWidth = Math.min(1, paceRunwayBar.runwayDays / scaleDays) * paceInnerWidth;
     if (runwayWidth > 0) {
@@ -896,7 +893,7 @@ export function renderTrendImage({
     elements.push(`<line x1="${tickX.toFixed(2)}" y1="${trackY - 3}" x2="${tickX.toFixed(2)}" y2="${trackY + 8}" stroke="${COLORS.secondary}" stroke-width="2"/>`);
     elements.push(svgText({
       x: paceTextX,
-      y: cardTop + 84,
+      y: trackY + 22,
       value: "now",
       fill: COLORS.muted,
       size: 10.5,
@@ -908,14 +905,17 @@ export function renderTrendImage({
     );
     elements.push(svgText({
       x: resetLabelX,
-      y: cardTop + 84,
+      y: trackY + 22,
       value: resetLabel,
       fill: COLORS.muted,
       size: 10.5,
       anchor: "middle",
     }));
   }
-  paceLines.slice(1).forEach((line, index) => {
+  const paceStatLines = meterCard
+    ? (paceLines.length > 1 ? paceLines.slice(1) : paceLines)
+    : paceLines.slice(1);
+  paceStatLines.forEach((line, index) => {
     const columnX = paceTextX + index * (paceInnerWidth / 2 + 8);
     elements.push(svgText({
       x: columnX,
