@@ -1,26 +1,18 @@
 import { defineRule } from "@oxlint/plugins";
 
-
-
 import { lexicalTypeParameterNames } from "../shared/lexical-type-parameters.js";
 
-
-
-
-
-
-
-
-
-
-function referencedAliasName(type               )                {
-  if (type.type === "TSParenthesizedType") return referencedAliasName(type.typeAnnotation);
-  if (type.type !== "TSTypeReference" || type.typeName.type !== "Identifier") return null;
-  return type.typeArguments === null ||
-    type.typeArguments === undefined ||
-    type.typeArguments.params.length === 0
-    ? type.typeName.name
-    : null;
+function aliasReference(type) {
+  if (type.type === "TSParenthesizedType") {
+    return aliasReference(type.typeAnnotation);
+  }
+  if (type.type !== "TSTypeReference" || type.typeName.type !== "Identifier") {
+    return null;
+  }
+  return {
+    name: type.typeName.name,
+    arguments: type.typeArguments?.params ?? [],
+  };
 }
 
 /** Ban function contracts that return unknown instead of a parsed domain type. */
@@ -37,45 +29,77 @@ export const noUnknownReturnsRule = defineRule({
     },
   },
   createOnce(context) {
-    const aliases = new Map                                       ();
+    const aliases = new Map();
 
     const resolvesToUnknown = (
-      type               ,
-      shadowedAliases                     ,
-      visited = new Set        (),
-    )          => {
+      type,
+      shadowedAliases,
+      visited = new Set(),
+      bindings = new Map(),
+    ) => {
       if (type.type === "TSUnknownKeyword") return true;
       if (type.type === "TSParenthesizedType") {
-        return resolvesToUnknown(type.typeAnnotation, shadowedAliases, visited);
+        return resolvesToUnknown(
+          type.typeAnnotation,
+          shadowedAliases,
+          visited,
+          bindings,
+        );
       }
       if (type.type === "TSUnionType") {
         return type.types.some((member) =>
-          resolvesToUnknown(member, shadowedAliases, visited),
+          resolvesToUnknown(member, shadowedAliases, visited, bindings),
         );
       }
-      if (
-        type.type === "TSTypeReference" &&
-        type.typeName.type === "Identifier" &&
-        (type.typeName.name === "Promise" || type.typeName.name === "PromiseLike")
-      ) {
-        const value = type.typeArguments?.params[0];
-        return value !== undefined && resolvesToUnknown(value, shadowedAliases, visited);
+
+      const reference = aliasReference(type);
+      if (reference === null) return false;
+
+      const binding = bindings.get(reference.name);
+      if (binding !== undefined) {
+        return resolvesToUnknown(
+          binding.type,
+          shadowedAliases,
+          visited,
+          binding.bindings,
+        );
       }
-      const name = referencedAliasName(type);
-      if (name === null || visited.has(name) || shadowedAliases.has(name)) return false;
-      const alias = aliases.get(name);
-      if (
-        alias === undefined ||
-        (alias.typeParameters !== null && alias.typeParameters !== undefined)
-      ) {
+      if (reference.name === "Promise" || reference.name === "PromiseLike") {
+        const value = reference.arguments[0];
+        return value !== undefined &&
+          resolvesToUnknown(value, shadowedAliases, visited, bindings);
+      }
+      if (visited.has(reference.name) || shadowedAliases.has(reference.name)) {
         return false;
       }
+
+      const alias = aliases.get(reference.name);
+      if (alias === undefined) return false;
+      const parameters = alias.typeParameters?.params ?? [];
+      if (reference.arguments.length > parameters.length) return false;
+
+      const nextBindings = new Map(bindings);
+      for (const [index, parameter] of parameters.entries()) {
+        const supplied = reference.arguments[index];
+        const argument = supplied ?? parameter.default;
+        if (argument === null || argument === undefined) return false;
+        nextBindings.set(parameter.name.name, {
+          type: argument,
+          bindings: supplied === undefined ? new Map(nextBindings) : bindings,
+        });
+      }
+
       const nextVisited = new Set(visited);
-      nextVisited.add(name);
-      return resolvesToUnknown(alias.typeAnnotation, shadowedAliases, nextVisited);
+      nextVisited.add(reference.name);
+      return resolvesToUnknown(
+        alias.typeAnnotation,
+        shadowedAliases,
+        nextVisited,
+        nextBindings,
+      );
     };
 
-    const checkReturnType = (node                        ) => {
+    const checkReturnType = (node) => {
       const annotation = node.returnType;
       if (annotation === null || annotation === undefined) return;
       if (
