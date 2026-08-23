@@ -55,6 +55,50 @@ test("anti-slop recognizes aliases whose unions collapse to unknown", async () =
   assert.match(result.output, /anti-slop\(no-unknown-type-aliases\)/);
 });
 
+test("anti-slop resolves intersections that remain unknown", async () => {
+  const result = await lintTypeScript(`
+    type Payload = unknown & unknown;
+    type Narrowed = unknown & string;
+    export function consume(value: Payload & unknown): void {}
+    export function keep(value: Narrowed): Narrowed { return value; }
+    export function load(): Promise<Payload & unknown> {
+      throw new Error("unreachable");
+    }
+  `);
+  assert.equal(result.status, 1, result.output);
+  assert.equal(
+    result.output.match(/anti-slop\(no-unknown-type-aliases\)/g)?.length,
+    1,
+    result.output,
+  );
+  assert.equal(
+    result.output.match(/anti-slop\(no-unknown-parameters\)/g)?.length,
+    1,
+    result.output,
+  );
+  assert.equal(
+    result.output.match(/anti-slop\(no-unknown-returns\)/g)?.length,
+    1,
+    result.output,
+  );
+});
+
+test("anti-slop unwraps parenthesized empty-object spread branches", async () => {
+  const result = await lintTypeScript(`
+    declare const enabled: boolean;
+    declare const fields: { id: string };
+    export const alternate = { ...(enabled ? fields : (({}))) };
+    export const consequent = { ...(enabled ? (({})) : fields) };
+    export const nonempty = { ...(enabled ? fields : ({ id: "fallback" })) };
+  `);
+  assert.equal(result.status, 1, result.output);
+  assert.equal(
+    result.output.match(/anti-slop\(no-conditional-empty-object-spread\)/g)?.length,
+    2,
+    result.output,
+  );
+});
+
 test("anti-slop resolves unions and generic aliases in unknown parameters", async () => {
   const result = await lintTypeScript(`
     type Identity<T> = T;

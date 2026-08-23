@@ -33,6 +33,11 @@ export const noUnknownTypeAliasesRule = defineRule({
           resolvesToUnknown(member, visited, bindings),
         );
       }
+      if (type.type === "TSIntersectionType") {
+        return type.types.every((member) =>
+          resolvesToUnknown(member, visited, bindings),
+        );
+      }
 
       const reference = typeAliasReference(type);
       if (reference === null) return false;
