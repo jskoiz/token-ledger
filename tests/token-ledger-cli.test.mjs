@@ -1388,6 +1388,31 @@ test("cache report contains hostile object-shaped snapshot fields", () => {
   assert.doesNotMatch(svg, /NaN|Infinity|undefined/);
 });
 
+test("cache report labels non-string generation timestamps as unknown", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+  const snapshot = {
+    events: [
+      {
+        timestamp: "2026-08-15T12:00:00.000Z",
+        model: "gpt-5.6-luna",
+        totalTokens: 1_000,
+        inputTokens: 900,
+        cachedInputTokens: 450,
+        outputTokens: 100,
+      },
+    ],
+  };
+
+  for (const generatedAt of [null, 0, { toString: null, valueOf: null }]) {
+    const svg = renderCacheReportImage({
+      snapshot: { ...snapshot, generatedAt },
+      bounds,
+      days: 7,
+    });
+    assert.match(svg, /DATA AS OF[\s\S]*>unknown<\/text>/);
+  }
+});
+
 test("cache report coalesces overflow models and renders zero-measurement state", () => {
   const bounds = multiDayBounds("2026-08-15", "UTC", 7);
   const modelNames = [
