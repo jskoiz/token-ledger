@@ -1378,14 +1378,14 @@ test("cache report saturates finite token sums before rendering", () => {
   };
 
   const data = buildCacheReportData(snapshot, bounds, 7, 1_100);
-  assert.equal(data.totalTokens, huge);
-  assert.equal(data.detailedTokens, huge);
-  assert.equal(data.inputTokens, huge);
-  assert.equal(data.cachedInputTokens, huge);
+  assert.ok(Number.isFinite(data.totalTokens) && data.totalTokens > 0);
+  assert.ok(Number.isFinite(data.detailedTokens) && data.detailedTokens > 0);
+  assert.ok(Number.isFinite(data.inputTokens) && data.inputTokens > 0);
+  assert.ok(Number.isFinite(data.cachedInputTokens) && data.cachedInputTokens > 0);
   assert.equal(data.uncachedInputTokens, 0);
   assert.equal(data.rate, 100);
-  assert.equal(data.bins.at(-1).totalTokens, huge);
-  assert.equal(data.bins.at(-1).inputTokens, huge);
+  assert.ok(Number.isFinite(data.bins.at(-1).totalTokens));
+  assert.ok(Number.isFinite(data.bins.at(-1).inputTokens));
   assert.ok(data.models.every((model) => Number.isFinite(model.inputTokens)));
 
   const svg = renderCacheReportImage({ snapshot, bounds, days: 7 });
@@ -1408,6 +1408,94 @@ test("cache report saturates finite token sums before rendering", () => {
   assert.equal(control.inputTokens, 10);
   assert.equal(control.cachedInputTokens, 4);
   assert.equal(control.rate, 40);
+
+  const inferredOverflow = buildCacheReportData({
+    events: [{
+      timestamp: "2026-08-15T12:00:00.000Z",
+      totalTokens: huge,
+      inputTokens: huge,
+      cachedInputTokens: huge,
+      outputTokens: huge,
+    }],
+  }, bounds, 7, 1_100);
+  assert.equal(inferredOverflow.detailedEventCount, 1);
+});
+
+test("cache report detects native overflow at a rounded finite ratio", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+  const first = (1 - Number.EPSILON) * Number.MAX_VALUE;
+  const second = 5e292;
+  const eventFor = (inputTokens, cachedInputTokens) => ({
+    timestamp: "2026-08-15T12:00:00.000Z",
+    model: "gpt-5.6-luna",
+    totalTokens: inputTokens,
+    inputTokens,
+    cachedInputTokens,
+    outputTokens: 0,
+    breakdownAvailable: true,
+  });
+  const snapshot = {
+    events: [eventFor(first, first), eventFor(second, 0)],
+  };
+
+  const data = buildCacheReportData(snapshot, bounds, 7, 1_100);
+  for (const aggregate of [data, ...data.bins, ...data.models]) {
+    for (const key of [
+      "totalTokens",
+      "detailedTokens",
+      "inputTokens",
+      "cachedInputTokens",
+      "uncachedInputTokens",
+    ]) {
+      if (key in aggregate) assert.ok(Number.isFinite(aggregate[key]), `${key} overflowed`);
+    }
+  }
+  assert.ok(Math.abs(data.rate - 100) < 0.000_000_1);
+  assert.equal(
+    data.cachedInputTokens + data.uncachedInputTokens,
+    data.inputTokens,
+  );
+  assert.equal(data.measurementCoveragePercent, 100);
+
+  const svg = renderCacheReportImage({ snapshot, bounds, days: 7 });
+  assert.match(svg, />100\.0% cached</);
+  assert.doesNotMatch(svg, /NaN|Infinity|undefined/);
+});
+
+test("cache report preserves proportions when token sums are normalized", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+  const token = 1e308;
+  const eventFor = (cachedInputTokens, measured = true) => ({
+    timestamp: "2026-08-15T12:00:00.000Z",
+    model: "gpt-5.6-luna",
+    totalTokens: token,
+    inputTokens: token,
+    cachedInputTokens: measured ? cachedInputTokens : token,
+    outputTokens: 0,
+    breakdownAvailable: measured,
+  });
+  const snapshot = {
+    events: [
+      eventFor(token),
+      eventFor(0),
+      eventFor(0),
+      eventFor(0, false),
+    ],
+  };
+
+  const data = buildCacheReportData(snapshot, bounds, 7, 1_100);
+  assert.ok(Math.abs(data.rate - 100 / 3) < 0.000_000_1);
+  assert.equal(
+    data.cachedInputTokens + data.uncachedInputTokens,
+    data.inputTokens,
+  );
+  assert.ok(Math.abs(data.measurementCoveragePercent - 75) < 0.000_000_1);
+  assert.ok(Number.isFinite(data.totalTokens));
+  assert.ok(Number.isFinite(data.detailedTokens));
+
+  const svg = renderCacheReportImage({ snapshot, bounds, days: 7 });
+  assert.match(svg, /33\.3% cached/);
+  assert.doesNotMatch(svg, /NaN|Infinity|undefined/);
 });
 
 test("cache report coverage includes inferred event totals", () => {
