@@ -597,8 +597,12 @@ export function filterDayEvents(snapshot, bounds) {
   const start = bounds.start.getTime();
   const end = bounds.end.getTime();
   return (snapshot.events ?? []).filter((event) => {
-    const timestamp = new Date(event.timestamp).getTime();
-    return Number.isFinite(timestamp) && timestamp >= start && timestamp < end;
+    try {
+      const timestamp = new Date(event?.timestamp).getTime();
+      return Number.isFinite(timestamp) && timestamp >= start && timestamp < end;
+    } catch {
+      return false;
+    }
   });
 }
 

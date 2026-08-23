@@ -300,7 +300,7 @@ function binDateLabel(bin, timeZone) {
 
 // Rough sans-serif advance widths in em units, for placing inline runs
 // (value + chip, legend items, pace rows). SVG has no flow layout.
-function textWidth(text, size, weight = 400) {
+export function textWidth(text, size, weight = 400) {
   let units = 0;
   for (const character of String(text)) {
     if (/[il.,:;'|!]/.test(character)) units += 0.3;

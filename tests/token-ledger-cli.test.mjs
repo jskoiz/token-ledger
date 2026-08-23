@@ -116,6 +116,8 @@ test("rollingDurationBounds covers arbitrary day windows ending at the supplied 
 test("filterDayEvents keeps the start and excludes the end boundary", () => {
   const snapshot = {
     events: [
+      null,
+      { id: "hostile", timestamp: { toString: null, valueOf: null } },
       { id: "before", timestamp: "2026-08-01T09:59:59.999Z" },
       { id: "start", timestamp: "2026-08-01T10:00:00.000Z" },
       { id: "inside", timestamp: "2026-08-01T20:00:00.000Z" },
@@ -1548,6 +1550,43 @@ test("cache report keeps 30 daily bins at default width and coalesces at minimum
   assert.equal(minimumWidth.binCount, 15);
 });
 
+test("cache report wraps long timezone footer text at minimum width", () => {
+  const timeZone = "America/Argentina/ComodRivadavia";
+  const bounds = multiDayBounds("2026-08-15", timeZone, 7);
+  const minimumSvg = renderCacheReportImage({
+    snapshot: { generatedAt: "2026-08-15T12:00:00.000Z", events: [] },
+    bounds,
+    days: 7,
+    options: { imageWidth: 900 },
+  });
+
+  assert.match(minimumSvg, />America\/Argentina\/ComodRivadavia<\/text>/);
+  assert.match(minimumSvg, />7-day calendar window<\/text>/);
+  assert.doesNotMatch(
+    minimumSvg,
+    /America\/Argentina\/ComodRivadavia · 7-day calendar window/,
+  );
+
+  const shortZoneSvg = renderCacheReportImage({
+    snapshot: { generatedAt: "2026-08-15T12:00:00.000Z", events: [] },
+    bounds: multiDayBounds("2026-08-15", "UTC", 7),
+    days: 7,
+    options: { imageWidth: 900 },
+  });
+  assert.match(shortZoneSvg, />UTC · 7-day calendar window<\/text>/);
+
+  const wideSvg = renderCacheReportImage({
+    snapshot: { generatedAt: "2026-08-15T12:00:00.000Z", events: [] },
+    bounds,
+    days: 7,
+    options: { imageWidth: 2_400 },
+  });
+  assert.match(
+    wideSvg,
+    />America\/Argentina\/ComodRivadavia · 7-day calendar window<\/text>/,
+  );
+});
+
 test("PNG image output has a real PNG signature", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-png-"));
   try {
@@ -1692,14 +1731,18 @@ test("cache-rate report ignores unused project metadata for an empty range", asy
       snapshotPath,
       `${JSON.stringify({
         generatedAt: "2026-08-15T12:00:00.000Z",
-        events: [{
-          timestamp: "2026-07-01T12:00:00.000Z",
-          model: "gpt-5.6-luna",
-          totalTokens: 1_000,
-          inputTokens: 900,
-          cachedInputTokens: 450,
-          outputTokens: 100,
-        }],
+        events: [
+          null,
+          { timestamp: { toString: null, valueOf: null } },
+          {
+            timestamp: "2026-07-01T12:00:00.000Z",
+            model: "gpt-5.6-luna",
+            totalTokens: 1_000,
+            inputTokens: 900,
+            cachedInputTokens: 450,
+            outputTokens: 100,
+          },
+        ],
         threads: [null],
       })}\n`,
     );
@@ -1737,13 +1780,17 @@ test("standard image views retain the empty-range diagnostic", async () => {
       snapshotPath,
       `${JSON.stringify({
         generatedAt: "2026-08-15T12:00:00.000Z",
-        events: [{
-          timestamp: "2026-07-01T12:00:00.000Z",
-          model: "gpt-5.6-luna",
-          totalTokens: 1_000,
-          inputTokens: 900,
-          outputTokens: 100,
-        }],
+        events: [
+          null,
+          { timestamp: { toString: null, valueOf: null } },
+          {
+            timestamp: "2026-07-01T12:00:00.000Z",
+            model: "gpt-5.6-luna",
+            totalTokens: 1_000,
+            inputTokens: 900,
+            outputTokens: 100,
+          },
+        ],
       })}\n`,
     );
     const commands = [
