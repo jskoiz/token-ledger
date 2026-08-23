@@ -1615,6 +1615,49 @@ test("cache-rate report writes an empty-state image for an empty range", async (
   }
 });
 
+test("standard image views retain the empty-range diagnostic", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-standard-empty-"));
+  const snapshotPath = resolve(root, "snapshot.json");
+  try {
+    await writeFile(
+      snapshotPath,
+      `${JSON.stringify({
+        generatedAt: "2026-08-15T12:00:00.000Z",
+        events: [{
+          timestamp: "2026-07-01T12:00:00.000Z",
+          model: "gpt-5.6-luna",
+          totalTokens: 1_000,
+          inputTokens: 900,
+          outputTokens: 100,
+        }],
+      })}\n`,
+    );
+    const commands = [
+      ["report", "7d"],
+      ["trend", "7d", "--image"],
+    ];
+    for (const [index, command] of commands.entries()) {
+      const outputPath = resolve(root, `standard-${index}.png`);
+      const result = await run(parseArgs([
+        ...command,
+        "--date",
+        "2026-08-15",
+        "--tz",
+        "UTC",
+        "--input",
+        snapshotPath,
+        "--image-output",
+        outputPath,
+        "--no-open",
+      ]));
+      assert.match(result, /No model-call events found/);
+      await assert.rejects(readFile(outputPath), { code: "ENOENT" });
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("cache-rate report uses a distinct default filename", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-cache-default-"));
   const snapshotPath = resolve(root, "snapshot.json");

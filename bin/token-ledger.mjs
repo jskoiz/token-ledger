@@ -1070,7 +1070,8 @@ export async function run(options, { nowMs } = {}) {
   const snapshot = await loadSnapshot(options);
   const events = filterDayEvents(snapshot, bounds);
   const writingImage = options.view === "trend" && options.image;
-  if (events.length === 0 && !writingImage) {
+  const writingEmptyCacheReport = writingImage && options.cacheRate;
+  if (events.length === 0 && !writingEmptyCacheReport) {
     return [
       `No model-call events found for ${rangeDescription(options, bounds)} (${bounds.timeZone}).`,
       `Source: ${sourceLabel(options.input, snapshot)}`,
