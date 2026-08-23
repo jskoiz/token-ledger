@@ -705,6 +705,9 @@ export function renderTrendImage({
       const cellY = cardTop + Math.floor(index / quadColumns) * cellHeight;
       const contentX = cellX + 17;
       const innerWidth = cellWidth - 34;
+      const innerRight = contentX + innerWidth;
+      // Each corner carries something: label top-left, delta chip top-right,
+      // value bottom-left, share caption bottom-right, bar along the bottom.
       elements.push(`<circle cx="${(contentX + 3.5).toFixed(2)}" cy="${(cellY + 19).toFixed(2)}" r="3.5" fill="${card.swatch}"/>`);
       elements.push(svgText({
         x: contentX + 15,
@@ -714,6 +717,23 @@ export function renderTrendImage({
         size: 10.5,
         spacing: ".9",
       }));
+      const labelBaseline = cellY + 23;
+      if (card.chip) {
+        const chipTextWidth = textWidth(card.chip.text, 10, 700);
+        const chipX = innerRight - chipTextWidth - 10;
+        elements.push(svgRect(chipX, labelBaseline - 11, chipTextWidth + 10, 15, {
+          rx: 3,
+          fill: card.chip.fill,
+        }));
+        elements.push(svgText({
+          x: chipX + 5,
+          y: labelBaseline,
+          value: card.chip.text,
+          fill: card.chip.color,
+          size: 10,
+          weight: 700,
+        }));
+      }
       const valueBaseline = cellY + cellHeight / 2 + 9;
       elements.push(svgText({
         x: contentX,
@@ -724,57 +744,42 @@ export function renderTrendImage({
         weight: 800,
         spacing: "-0.5",
       }));
-      const valueWidth = textWidth(card.value, 21, 800);
-      if (card.chip) {
-        const chipTextWidth = textWidth(card.chip.text, 10, 700);
-        const chipX = contentX + valueWidth + 7;
-        elements.push(svgRect(chipX, valueBaseline - 11, chipTextWidth + 10, 15, {
-          rx: 3,
-          fill: card.chip.fill,
-        }));
+      let valueEnd = contentX + textWidth(card.value, 21, 800);
+      if (card.suffix) {
         elements.push(svgText({
-          x: chipX + 5,
-          y: valueBaseline,
-          value: card.chip.text,
-          fill: card.chip.color,
-          size: 10,
-          weight: 700,
-        }));
-      } else if (card.suffix) {
-        elements.push(svgText({
-          x: contentX + valueWidth + 10,
+          x: valueEnd + 10,
           y: valueBaseline,
           value: card.suffix,
           fill: COLORS.secondary,
           size: 10.5,
         }));
+        valueEnd += 10 + textWidth(card.suffix, 10.5);
       }
-      // Caption on the cell's bottom line, share bar filling the width beside it.
-      const caption = card.captionShort && textWidth(card.caption, 10.5) > innerWidth
+      const captionAvail = innerRight - valueEnd - 16;
+      const caption = card.captionShort && textWidth(card.caption, 10.5) > captionAvail
         ? card.captionShort
         : card.caption;
-      const captionBaseline = cellY + cellHeight - 13;
-      elements.push(svgText({
-        x: contentX,
-        y: captionBaseline,
-        value: caption,
-        fill: COLORS.muted,
-        size: 10.5,
-      }));
-      const barStart = contentX + textWidth(caption, 10.5) + 14;
-      const barWidthAvail = contentX + innerWidth - barStart;
-      if (barWidthAvail >= 50) {
-        elements.push(svgRect(barStart, captionBaseline - 8, barWidthAvail, 3, {
-          rx: 1.5,
-          fill: card.track,
+      if (textWidth(caption, 10.5) <= captionAvail) {
+        elements.push(svgText({
+          x: innerRight,
+          y: valueBaseline,
+          value: caption,
+          fill: COLORS.muted,
+          size: 10.5,
+          anchor: "end",
         }));
-        const fillWidth = (Math.min(100, Math.max(0, card.barPercent)) / 100) * barWidthAvail;
-        if (fillWidth > 0) {
-          elements.push(svgRect(barStart, captionBaseline - 8, fillWidth, 3, {
-            rx: 1.5,
-            fill: card.fill,
-          }));
-        }
+      }
+      const barY = cellY + cellHeight - 16;
+      elements.push(svgRect(contentX, barY, innerWidth, 3, {
+        rx: 1.5,
+        fill: card.track,
+      }));
+      const fillWidth = (Math.min(100, Math.max(0, card.barPercent)) / 100) * innerWidth;
+      if (fillWidth > 0) {
+        elements.push(svgRect(contentX, barY, fillWidth, 3, {
+          rx: 1.5,
+          fill: card.fill,
+        }));
       }
     });
     elements.push(svgRect(outer, cardTop, quadWidth, topRowHeight, {
