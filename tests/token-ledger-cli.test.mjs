@@ -628,6 +628,12 @@ test("snapshot freshness labels the one-hour cache age without exposing paths", 
     snapshotFreshness({ generatedAt: "not-a-date" }, now),
     { status: "unknown", ageLabel: "age unknown" },
   );
+  for (const generatedAt of [0, {}, { toString: null, valueOf: null }]) {
+    assert.deepEqual(snapshotFreshness({ generatedAt }, now), {
+      status: "unknown",
+      ageLabel: "age unknown",
+    });
+  }
 });
 
 test("interactive controls stay aligned with rendered and documented help", async () => {

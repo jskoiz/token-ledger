@@ -4,12 +4,12 @@ import {
 	classifyUnsafeDictionary,
 	classifyUnsafeDictionaryValue,
 	createTypeEnvironment,
-	type TypeEnvironment,
-} from "../shared/dictionary-types.ts";
 
-import type { ESTree } from "@oxlint/plugins";
+} from "../shared/dictionary-types.js";
 
-const typeNodeKinds: ReadonlySet<string> = new Set([
+
+
+const typeNodeKinds                      = new Set([
 	"JSDocNonNullableType",
 	"JSDocNullableType",
 	"JSDocUnknownType",
@@ -49,16 +49,16 @@ const typeNodeKinds: ReadonlySet<string> = new Set([
 	"TSVoidKeyword",
 ]);
 
-function isTypeNode(node: ESTree.Node): node is ESTree.TSType {
+function isTypeNode(node             )                        {
 	return typeNodeKinds.has(node.type);
 }
 
-function typeReferenceName(type: ESTree.TSTypeReference): string | null {
+function typeReferenceName(type                        )                {
 	return type.typeName.type === "Identifier" ? type.typeName.name : null;
 }
 
-function isInsideTypeAliasDeclaration(node: ESTree.Node): boolean {
-	let current: ESTree.Node | null = node.parent;
+function isInsideTypeAliasDeclaration(node             )          {
+	let current                     = node.parent;
 	while (current !== null && current.type !== "Program") {
 		if (current.type === "TSTypeAliasDeclaration") return true;
 		current = current.parent;
@@ -66,16 +66,16 @@ function isInsideTypeAliasDeclaration(node: ESTree.Node): boolean {
 	return false;
 }
 
-function isPlainAliasConsumerUse(node: ESTree.TSType, environment: TypeEnvironment): boolean {
+function isPlainAliasConsumerUse(node               , environment                 )          {
 	if (node.type !== "TSTypeReference" || node.typeArguments?.params.length) return false;
 	const name = typeReferenceName(node);
 	return name !== null && environment.aliases.has(name) && !isInsideTypeAliasDeclaration(node);
 }
 
-function shouldReportType(node: ESTree.TSType, environment: TypeEnvironment): boolean {
+function shouldReportType(node               , environment                 )          {
 	if (isPlainAliasConsumerUse(node, environment)) return false;
 	if (classifyUnsafeDictionary(node, environment) === null) return false;
-	let current: ESTree.Node | null = node.parent;
+	let current                     = node.parent;
 	while (current !== null && current.type !== "Program") {
 		if (isTypeNode(current) && classifyUnsafeDictionary(current, environment) !== null)
 			return false;
@@ -98,11 +98,11 @@ export const noUnsafeDictionaryTypeRule = defineRule({
 		},
 	},
 	createOnce(context) {
-		let environment: TypeEnvironment | null = null;
-		const report = (node: ESTree.Node, value: string) => {
+		let environment                         = null;
+		const report = (node             , value        ) => {
 			context.report({ node, messageId: "unsafeDictionary", data: { value } });
 		};
-		const reportIfUnsafe = (node: ESTree.TSType) => {
+		const reportIfUnsafe = (node               ) => {
 			if (environment === null || !shouldReportType(node, environment)) return;
 			const unsafe = classifyUnsafeDictionary(node, environment);
 			if (unsafe === null) return;

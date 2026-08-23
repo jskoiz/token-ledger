@@ -1,17 +1,17 @@
 import { defineRule } from "@oxlint/plugins";
-import type { ESTree } from "@oxlint/plugins";
 
-type Parameter = ESTree.ParamPattern;
-type ParameterOwner =
-  | ESTree.ArrowFunctionExpression
-  | ESTree.Function
-  | ESTree.TSCallSignatureDeclaration
-  | ESTree.TSConstructSignatureDeclaration
-  | ESTree.TSConstructorType
-  | ESTree.TSFunctionType
-  | ESTree.TSMethodSignature;
 
-function parameterAnnotation(parameter: Parameter): ESTree.TSTypeAnnotation | null | undefined {
+
+
+
+
+
+
+
+
+
+
+function parameterAnnotation(parameter           )                                             {
   if (parameter.type === "TSParameterProperty") {
     return parameterAnnotation(parameter.parameter);
   }
@@ -24,7 +24,7 @@ function parameterAnnotation(parameter: Parameter): ESTree.TSTypeAnnotation | nu
   return parameter.typeAnnotation;
 }
 
-function parameterName(parameter: Parameter, sourceText: string): string {
+function parameterName(parameter           , sourceText        )         {
   if (parameter.type === "TSParameterProperty") {
     return parameterName(parameter.parameter, sourceText);
   }
@@ -53,7 +53,7 @@ export const noUnknownParametersRule = defineRule({
     },
   },
   createOnce(context) {
-    const checkParameters = (node: ParameterOwner) => {
+    const checkParameters = (node                ) => {
       for (const parameter of node.params) {
         const annotation = parameterAnnotation(parameter);
         if (annotation?.typeAnnotation.type !== "TSUnknownKeyword") continue;

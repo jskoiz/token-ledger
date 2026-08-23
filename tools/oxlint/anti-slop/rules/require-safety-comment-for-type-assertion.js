@@ -1,8 +1,8 @@
 import { defineRule } from "@oxlint/plugins";
 
-import type { ESTree, SourceCode } from "@oxlint/plugins";
 
-type TypeAssertion = ESTree.TSAsExpression | ESTree.TSTypeAssertion;
+
+
 
 const commentOwnerKinds = new Set([
   "ExpressionStatement",
@@ -12,7 +12,7 @@ const commentOwnerKinds = new Set([
   "VariableDeclaration",
 ]);
 
-function isConstAssertion(node: TypeAssertion): boolean {
+function isConstAssertion(node               )          {
   return (
     node.typeAnnotation.type === "TSTypeReference" &&
     node.typeAnnotation.typeName.type === "Identifier" &&
@@ -20,8 +20,8 @@ function isConstAssertion(node: TypeAssertion): boolean {
   );
 }
 
-function hasSafetyComment(sourceCode: SourceCode, node: TypeAssertion): boolean {
-  let current: ESTree.Node = node;
+function hasSafetyComment(sourceCode            , node               )          {
+  let current              = node;
   while (true) {
     if (
       sourceCode
@@ -49,7 +49,7 @@ export const requireSafetyCommentForTypeAssertionRule = defineRule({
     },
   },
   createOnce(context) {
-    const checkAssertion = (node: TypeAssertion) => {
+    const checkAssertion = (node               ) => {
       if (isConstAssertion(node) || hasSafetyComment(context.sourceCode, node)) return;
       context.report({ node, messageId: "missingSafetyComment" });
     };

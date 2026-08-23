@@ -1,10 +1,10 @@
-import type { ESTree, Scope, SourceCode, Variable } from "@oxlint/plugins";
+
 
 function resolveVariable(
-  sourceCode: SourceCode,
-  identifier: ESTree.IdentifierReference,
-): Variable | null {
-  let scope: Scope | null = sourceCode.getScope(identifier);
+  sourceCode            ,
+  identifier                            ,
+)                  {
+  let scope               = sourceCode.getScope(identifier);
   while (scope !== null) {
     const variable = scope.set.get(identifier.name);
     if (variable !== undefined) return variable;
@@ -13,7 +13,7 @@ function resolveVariable(
   return null;
 }
 
-function isGlobalReflect(sourceCode: SourceCode, expression: ESTree.Expression): boolean {
+function isGlobalReflect(sourceCode            , expression                   )          {
   if (expression.type !== "Identifier" || expression.name !== "Reflect") return false;
   if (sourceCode.isGlobalReference(expression)) return true;
   const variable = resolveVariable(sourceCode, expression);
@@ -22,10 +22,10 @@ function isGlobalReflect(sourceCode: SourceCode, expression: ESTree.Expression):
 
 /** Reports whether a call target names one method on the global Reflect object. */
 export function isGlobalReflectMethodCall(
-  sourceCode: SourceCode,
-  callee: ESTree.Expression,
-  methodName: string,
-): boolean {
+  sourceCode            ,
+  callee                   ,
+  methodName        ,
+)          {
   if (!("property" in callee) || !("object" in callee) || !("computed" in callee)) return false;
   if (!isGlobalReflect(sourceCode, callee.object)) return false;
   const property = callee.property;

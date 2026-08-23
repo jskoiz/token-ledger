@@ -1,20 +1,20 @@
 import { defineRule } from "@oxlint/plugins";
 
-import type { ESTree, SourceCode } from "@oxlint/plugins";
 
-import { lexicalTypeParameterNames } from "../shared/lexical-type-parameters.ts";
 
-type Parameter = ESTree.ParamPattern;
-type ParameterOwner =
-	| ESTree.ArrowFunctionExpression
-	| ESTree.Function
-	| ESTree.TSCallSignatureDeclaration
-	| ESTree.TSConstructSignatureDeclaration
-	| ESTree.TSConstructorType
-	| ESTree.TSFunctionType
-	| ESTree.TSMethodSignature;
+import { lexicalTypeParameterNames } from "../shared/lexical-type-parameters.js";
 
-function parameterAnnotation(parameter: Parameter): ESTree.TSTypeAnnotation | null | undefined {
+
+
+
+
+
+
+
+
+
+
+function parameterAnnotation(parameter           )                                             {
 	if (parameter.type === "TSParameterProperty") {
 		return parameterAnnotation(parameter.parameter);
 	}
@@ -27,7 +27,7 @@ function parameterAnnotation(parameter: Parameter): ESTree.TSTypeAnnotation | nu
 	return parameter.typeAnnotation;
 }
 
-function parameterName(parameter: Parameter, sourceCode: SourceCode): string {
+function parameterName(parameter           , sourceCode            )         {
 	return parameter.type === "Identifier"
 		? parameter.name
 		: sourceCode.getText(parameter).replace(/\s*:\s*object\s*$/u, "");
@@ -47,13 +47,13 @@ export const noObjectParametersRule = defineRule({
 		},
 	},
 	createOnce(context) {
-		const aliases = new Map<string, ESTree.TSType>();
+		const aliases = new Map                       ();
 
 		const resolvesToObject = (
-			type: ESTree.TSType,
-			shadowedAliases: ReadonlySet<string>,
-			visited = new Set<string>(),
-		): boolean => {
+			type               ,
+			shadowedAliases                     ,
+			visited = new Set        (),
+		)          => {
 			if (type.type === "TSObjectKeyword") return true;
 			if (type.type === "TSParenthesizedType")
 				return resolvesToObject(type.typeAnnotation, shadowedAliases, visited);
@@ -80,7 +80,7 @@ export const noObjectParametersRule = defineRule({
 			return resolvesToObject(alias, shadowedAliases, nextVisited);
 		};
 
-		const checkParameters = (node: ParameterOwner) => {
+		const checkParameters = (node                ) => {
 			const shadowedAliases = lexicalTypeParameterNames(
 				node,
 				context.sourceCode.visitorKeys,

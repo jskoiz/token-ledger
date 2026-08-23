@@ -1,19 +1,19 @@
 import { defineRule } from "@oxlint/plugins";
 
-import type { ESTree } from "@oxlint/plugins";
 
-import { lexicalTypeParameterNames } from "../shared/lexical-type-parameters.ts";
 
-type FunctionWithReturnType =
-  | ESTree.ArrowFunctionExpression
-  | ESTree.Function
-  | ESTree.TSCallSignatureDeclaration
-  | ESTree.TSConstructSignatureDeclaration
-  | ESTree.TSConstructorType
-  | ESTree.TSFunctionType
-  | ESTree.TSMethodSignature;
+import { lexicalTypeParameterNames } from "../shared/lexical-type-parameters.js";
 
-function referencedAliasName(type: ESTree.TSType): string | null {
+
+
+
+
+
+
+
+
+
+function referencedAliasName(type               )                {
   if (type.type === "TSParenthesizedType") return referencedAliasName(type.typeAnnotation);
   if (type.type !== "TSTypeReference" || type.typeName.type !== "Identifier") return null;
   return type.typeArguments === null ||
@@ -37,13 +37,13 @@ export const noUnknownReturnsRule = defineRule({
     },
   },
   createOnce(context) {
-    const aliases = new Map<string, ESTree.TSTypeAliasDeclaration>();
+    const aliases = new Map                                       ();
 
     const resolvesToUnknown = (
-      type: ESTree.TSType,
-      shadowedAliases: ReadonlySet<string>,
-      visited = new Set<string>(),
-    ): boolean => {
+      type               ,
+      shadowedAliases                     ,
+      visited = new Set        (),
+    )          => {
       if (type.type === "TSUnknownKeyword") return true;
       if (type.type === "TSParenthesizedType") {
         return resolvesToUnknown(type.typeAnnotation, shadowedAliases, visited);
@@ -75,7 +75,7 @@ export const noUnknownReturnsRule = defineRule({
       return resolvesToUnknown(alias.typeAnnotation, shadowedAliases, nextVisited);
     };
 
-    const checkReturnType = (node: FunctionWithReturnType) => {
+    const checkReturnType = (node                        ) => {
       const annotation = node.returnType;
       if (annotation === null || annotation === undefined) return;
       if (

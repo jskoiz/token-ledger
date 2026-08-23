@@ -1,7 +1,7 @@
 import { defineRule } from "@oxlint/plugins";
-import type { ESTree } from "@oxlint/plugins";
 
-function unwrapParentheses(node: ESTree.Expression): ESTree.Expression {
+
+function unwrapParentheses(node                   )                    {
   let current = node;
   while (current.type === "ParenthesizedExpression") {
     current = current.expression;
@@ -9,11 +9,11 @@ function unwrapParentheses(node: ESTree.Expression): ESTree.Expression {
   return current;
 }
 
-function isEmptyObjectExpression(node: ESTree.Expression): boolean {
+function isEmptyObjectExpression(node                   )          {
   return node.type === "ObjectExpression" && node.properties.length === 0;
 }
 
-function isConditionalEmptyObjectSpread(node: ESTree.Expression): boolean {
+function isConditionalEmptyObjectSpread(node                   )          {
   const conditional = unwrapParentheses(node);
   return (
     conditional.type === "ConditionalExpression" &&

@@ -1,6 +1,6 @@
 import { eslintCompatPlugin } from "@oxlint/plugins";
 
-import { noServiceConstructorImportsRule } from "./rules/no-service-constructor-imports.ts";
+import { noServiceConstructorImportsRule } from "./rules/no-service-constructor-imports.js";
 
 /** Opt-in Oxlint rules for Effect service and Layer architecture. */
 const antiSlopEffectPlugin = eslintCompatPlugin({

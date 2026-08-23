@@ -298,6 +298,14 @@ test("source labels resolve structured, encoded, and plain thread sources", asyn
         useType: "interactive",
       },
     },
+    {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      turn: "turn-e",
+      timestamp: "2026-08-18T14:00:00.000Z",
+      total: 500,
+      source: { toString: null, valueOf: null },
+      expected: { source: "unknown", useType: "unknown" },
+    },
   ];
   try {
     const rolloutDirectory = resolve(root, "sessions", "2026", "08", "18");

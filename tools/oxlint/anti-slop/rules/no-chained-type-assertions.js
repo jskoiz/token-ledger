@@ -1,13 +1,13 @@
 import { defineRule } from "@oxlint/plugins";
-import type { ESTree } from "@oxlint/plugins";
 
-type TypeAssertionExpression = ESTree.TSAsExpression | ESTree.TSTypeAssertion;
 
-function isTypeAssertionExpression(node: ESTree.Node): node is TypeAssertionExpression {
+
+
+function isTypeAssertionExpression(node             )                                  {
   return node.type === "TSAsExpression" || node.type === "TSTypeAssertion";
 }
 
-function unwrapParenthesizedExpression(expression: ESTree.Expression): ESTree.Expression {
+function unwrapParenthesizedExpression(expression                   )                    {
   let current = expression;
   while (current.type === "ParenthesizedExpression") {
     current = current.expression;
@@ -15,7 +15,7 @@ function unwrapParenthesizedExpression(expression: ESTree.Expression): ESTree.Ex
   return current;
 }
 
-function isConstAssertion(node: TypeAssertionExpression): boolean {
+function isConstAssertion(node                         )          {
   const { typeAnnotation } = node;
   return (
     typeAnnotation.type === "TSTypeReference" &&
@@ -24,8 +24,8 @@ function isConstAssertion(node: TypeAssertionExpression): boolean {
   );
 }
 
-function isOutermostAssertionInChain(node: TypeAssertionExpression): boolean {
-  let current: ESTree.Expression = node;
+function isOutermostAssertionInChain(node                         )          {
+  let current                    = node;
   let parent = node.parent;
 
   while (parent.type === "ParenthesizedExpression" && parent.expression === current) {
@@ -36,10 +36,10 @@ function isOutermostAssertionInChain(node: TypeAssertionExpression): boolean {
   return !isTypeAssertionExpression(parent) || parent.expression !== current;
 }
 
-function isForbiddenAssertionChain(node: TypeAssertionExpression): boolean {
+function isForbiddenAssertionChain(node                         )          {
   let assertionCount = 0;
   let hasNonConstAssertion = false;
-  let current: ESTree.Expression = node;
+  let current                    = node;
 
   while (isTypeAssertionExpression(current)) {
     assertionCount += 1;
@@ -64,7 +64,7 @@ export const noChainedTypeAssertionsRule = defineRule({
     },
   },
   createOnce(context) {
-    const checkTypeAssertion = (node: TypeAssertionExpression) => {
+    const checkTypeAssertion = (node                         ) => {
       if (!isOutermostAssertionInChain(node) || !isForbiddenAssertionChain(node)) return;
       context.report({ node, messageId: "chained" });
     };

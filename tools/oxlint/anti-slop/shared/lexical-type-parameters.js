@@ -1,8 +1,8 @@
-import type { ESTree } from "@oxlint/plugins";
 
-type VisitorKeys = Readonly<Record<string, readonly string[]>>;
 
-function isNode(value: unknown): value is ESTree.Node {
+
+
+function isNode(value         )                       {
 	return (
 		typeof value === "object" &&
 		value !== null &&
@@ -12,12 +12,12 @@ function isNode(value: unknown): value is ESTree.Node {
 }
 
 function collectInferTypeParameterNames(
-	node: ESTree.Node,
-	visitorKeys: VisitorKeys,
-	names: Set<string>,
-): void {
+	node             ,
+	visitorKeys             ,
+	names             ,
+)       {
 	if (node.type === "TSInferType") names.add(node.typeParameter.name.name);
-	const record = node as unknown as Readonly<Record<string, unknown>>;
+	const record = node                                                ;
 	for (const key of visitorKeys[node.type] ?? []) {
 		const value = record[key];
 		if (isNode(value)) {
@@ -33,12 +33,12 @@ function collectInferTypeParameterNames(
 
 /** Collect type binders that are in scope at a node and can shadow module aliases. */
 export function lexicalTypeParameterNames(
-	node: ESTree.Node,
-	visitorKeys: VisitorKeys,
-): ReadonlySet<string> {
-	const names = new Set<string>();
-	let descendant: ESTree.Node = node;
-	let current: ESTree.Node | null = node;
+	node             ,
+	visitorKeys             ,
+)                      {
+	const names = new Set        ();
+	let descendant              = node;
+	let current                     = node;
 	while (current !== null && current.type !== "Program") {
 		if ("typeParameters" in current) {
 			for (const parameter of current.typeParameters?.params ?? []) {

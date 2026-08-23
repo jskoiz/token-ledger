@@ -1,15 +1,15 @@
 import { defineRule } from "@oxlint/plugins";
 
-import type { ESTree } from "@oxlint/plugins";
+
 
 const SERVICE_CONSTRUCTOR_NAME = /^make[A-Z]/u;
 const TEST_FILE = /\.(?:test|spec)\.[cm]?[jt]sx?$/u;
 
-function isProjectLocalImport(source: string): boolean {
+function isProjectLocalImport(source        )          {
 	return source.startsWith("./") || source.startsWith("../");
 }
 
-function getImportedName(specifier: ESTree.ImportSpecifier): string {
+function getImportedName(specifier                        )         {
 	if (specifier.imported.type === "Identifier") return specifier.imported.name;
 	return specifier.imported.value;
 }

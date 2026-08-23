@@ -1,10 +1,10 @@
 import { defineRule } from "@oxlint/plugins";
 
-import type { ESTree } from "@oxlint/plugins";
 
-type RuntimeFunction = ESTree.ArrowFunctionExpression | ESTree.Function;
 
-function isRuntimeFunction(node: ESTree.Node): node is RuntimeFunction {
+
+
+function isRuntimeFunction(node             )                          {
 	return (
 		node.type === "ArrowFunctionExpression" ||
 		node.type === "FunctionDeclaration" ||
@@ -12,8 +12,8 @@ function isRuntimeFunction(node: ESTree.Node): node is RuntimeFunction {
 	);
 }
 
-function isInsideTypeGuard(node: ESTree.Node): boolean {
-	let current: ESTree.Node | null = node.parent;
+function isInsideTypeGuard(node             )          {
+	let current                     = node.parent;
 	while (current !== null && current.type !== "Program") {
 		if (isRuntimeFunction(current)) {
 			return current.returnType?.typeAnnotation.type === "TSTypePredicate";
