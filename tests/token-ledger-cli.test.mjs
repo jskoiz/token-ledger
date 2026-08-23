@@ -1146,11 +1146,17 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
         timestamp: "2026-08-09T12:00:00.000Z",
         model: "gpt-5.6-luna",
         totalTokens: 1_000,
+        inputTokens: 800,
+        cachedInputTokens: 600,
+        outputTokens: 200,
       },
       {
         timestamp: "2026-08-10T12:00:00.000Z",
         model: "gpt-5.6-sol",
         totalTokens: 2_000,
+        inputTokens: 1_000,
+        cachedInputTokens: 900,
+        outputTokens: 1_000,
         serviceTier: "priority",
       },
       {
@@ -1192,29 +1198,29 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
   assert.match(svg, /fill="#10a394"/);
   assert.match(svg, /ACTUAL TOKEN VOLUME/);
   assert.match(svg, /WEEKLY METER REMAINING/);
-  assert.match(svg, /35\.0 meter points/);
-  assert.match(svg, /ESTIMATED COST/);
   assert.match(svg, /stroke="#f6b73c"/);
   assert.match(svg, /Luna/);
   assert.match(svg, /Sol/);
   // The fixture's second window follows a genuine weekly expiry, so the
-  // reset break, its dated footnote, and the plain-language reset count all
-  // appear.
+  // reset break appears.
   assert.match(svg, /RESET 100%/);
-  assert.match(svg, /1 scheduled · 0 early/);
-  assert.match(svg, /was the normal weekly reset/);
-  assert.match(svg, /meter last read Aug 12, 2:00 AM/);
-  assert.doesNotMatch(svg, /meter last read Aug 16/);
   // The all-fast Sol segment gets the darker fast-mode shade, and the fast
   // mode stat card explains it.
   assert.match(svg, /fill="#0a655c"/);
   assert.match(svg, /FAST MODE/);
-  assert.match(svg, /1\.50× rate/);
+  assert.match(svg, /1\.50×/);
   assert.match(svg, /Darker shade = fast mode/);
-  // The projects and pace row is fed from the events in range.
+  // The projects row and the pace block sit in the combined layout.
   assert.match(svg, /WHERE IT WENT · TOP PROJECTS/);
   assert.match(svg, /PACE &amp; RUNWAY/);
   assert.match(svg, /tokens per meter point/);
+  // The compressed cache sections weight the fixture's measured input:
+  // (600 + 900) / (800 + 1000) = 83.3%.
+  assert.match(svg, /CACHE RATE BY PERIOD/);
+  assert.match(svg, /CACHE RATE BY MODEL/);
+  assert.match(svg, /83\.3% weighted/);
+  // The footnote quadrants are gone from the combined report.
+  assert.doesNotMatch(svg, /ESTIMATED COST|METER BURNED|DATA AS OF|NaN/);
   assert.ok((svg.match(/<rect /g) ?? []).length >= 4);
 
   const drainSvg = renderTrendImage({
@@ -1226,7 +1232,65 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
   });
   assert.match(drainSvg, /OBSERVED LIMIT DRAIN/);
   assert.match(drainSvg, /Bars = observed meter drops/);
-  assert.match(drainSvg, /35\.0 meter points/);
+  assert.match(drainSvg, /CACHE RATE BY PERIOD/);
+
+  const minimumWidthSvg = renderTrendImage({
+    snapshot,
+    bounds,
+    trend: buildUsageTrend(snapshot, bounds),
+    days: 7,
+    options: { imageWidth: 900 },
+  });
+  const quadPanelWidth = Number(
+    minimumWidthSvg.match(
+      /<rect x="32\.00" y="82\.00" width="([\d.]+)"/,
+    )?.[1],
+  );
+  assert.ok(quadPanelWidth >= 320, `minimum-width stat quad was ${quadPanelWidth}px`);
+  const modelBarWidths = [...minimumWidthSvg.matchAll(
+    /<rect [^>]*width="([\d.]+)" height="10\.00" rx="3" fill="#d88362" opacity="\.7"\/>/g,
+  )].map((match) => Number(match[1]));
+  assert.ok(modelBarWidths.length >= 2, "expected per-model cache-rate tracks");
+  assert.ok(
+    modelBarWidths.every((barWidth) => barWidth >= 90),
+    `minimum-width model bars were ${modelBarWidths.join(", ")}px`,
+  );
+});
+
+test("cache report aggregation reuses one local date formatter", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+  const snapshot = {
+    events: [
+      "2026-08-13T12:00:00.000Z",
+      "2026-08-14T12:00:00.000Z",
+      "2026-08-15T12:00:00.000Z",
+    ].map((timestamp) => ({
+      timestamp,
+      model: "gpt-5.6-luna",
+      totalTokens: 1_000,
+      inputTokens: 900,
+      cachedInputTokens: 450,
+      outputTokens: 100,
+    })),
+  };
+  const descriptor = Object.getOwnPropertyDescriptor(Intl, "DateTimeFormat");
+  const OriginalDateTimeFormat = Intl.DateTimeFormat;
+  let constructorCalls = 0;
+
+  Object.defineProperty(Intl, "DateTimeFormat", {
+    ...descriptor,
+    value: function DateTimeFormat(...args) {
+      constructorCalls += 1;
+      return new OriginalDateTimeFormat(...args);
+    },
+  });
+  try {
+    buildCacheReportData(snapshot, bounds, 7, 1_100);
+  } finally {
+    Object.defineProperty(Intl, "DateTimeFormat", descriptor);
+  }
+
+  assert.equal(constructorCalls, 1);
 });
 
 test("cache report weights cached input, clamps event values, and keeps models secondary", () => {

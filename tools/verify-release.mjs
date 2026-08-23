@@ -482,6 +482,34 @@ async function main() {
       "Installed smoke output exposed a source or fixture path.",
     );
 
+    const reportPath = join(installDirectory, "release-report.png");
+    const reportOutput = run(
+      installedBinary,
+      [
+        "report",
+        "7d",
+        "--input",
+        fixturePath,
+        "--no-open",
+        "--tz",
+        "UTC",
+        "--image-output",
+        reportPath,
+      ],
+      { cwd: installDirectory, env: cleanEnvironment },
+    );
+    assert(
+      reportOutput.includes("Wrote report:") &&
+        reportOutput.includes("release-report.png"),
+      `Installed tledger report smoke output was unexpected:\n${reportOutput}`,
+    );
+    const reportBytes = await readFile(reportPath);
+    assert(
+      JSON.stringify([...reportBytes.subarray(0, 8)]) ===
+        JSON.stringify([137, 80, 78, 71, 13, 10, 26, 10]),
+      "Installed tledger report smoke did not write a PNG.",
+    );
+
     const cacheReportPath = join(installDirectory, "release-cache-report.png");
     const cacheReportOutput = run(
       installedBinary,
@@ -516,6 +544,7 @@ async function main() {
     console.log("Installed tarball in a clean temporary directory.");
     console.log("tledger --help: passed.");
     console.log("tledger 1d --static project smoke: passed (Alpha 1.20K, Beta 800, 2.00K total).");
+    console.log("tledger report PNG smoke: passed.");
     console.log("tledger report --cache-rate PNG smoke: passed.");
     console.log("Release verification passed.");
   } finally {

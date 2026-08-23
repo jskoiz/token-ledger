@@ -22,8 +22,10 @@ The second command links the `tledger` executable on your PATH. Without a
 global link, run the examples below as `npx tledger ...` or
 `node bin/token-ledger.mjs ...` from this checkout.
 
-Generate the report as a PNG. `report` is the image form of the trend view;
-the default file is `token-ledger-report-7d.png` in the current directory.
+Generate the report as a PNG. `report` is the image form of the trend view and
+combines usage, weekly-meter pace and runway, period and per-model cache rates,
+and top projects. The default file is `token-ledger-report-7d.png` in the
+current directory.
 
 ```bash
 tledger report 7d --no-open
@@ -92,9 +94,9 @@ node lib/token-ledger-importer.mjs --output /path/to/token-ledger-snapshot.json
 | | Generated report | Terminal dashboard |
 | --- | --- | --- |
 | Command | `tledger report 7d` or `tledger trend 7d --image` | `tledger week`, `tledger 1d`, or `tledger day <date>` |
-| Output | One PNG with daily token columns, model cards, weekly-meter line, project ranking, pace/runway, and estimate/provenance footnotes | Interactive or static project rows with totals, shares, thread counts, model mix, usage type, cache split, and reset-cycle context |
+| Output | One PNG with a stat quad, weekly-meter pace/runway, daily token columns, an aligned cache-rate strip, top projects, and per-model cache rates | Interactive or static project rows with totals, shares, thread counts, model mix, usage type, cache split, and reset-cycle context |
 | Range | A selected local-calendar-day trend window, such as 7d or 2w | A calendar day/week or a rolling 24-hour/`Nd`/`Nw` window |
-| Estimate surface | Rate-card credits, meter-derived burn, and runway are called out in the report | The sidebar can show derived `View burn`; project detail includes rate-card credit shares when available |
+| Estimate surface | Meter-derived burn and runway are called out; cache coverage comes from measured token breakdowns | The sidebar can show derived `View burn`; project detail includes rate-card credit shares when available |
 
 The report is the broader visual summary. The CLI does not open or generate a
 report unless you request the `report`, `trend --image`, or `--image` form.

@@ -42,13 +42,17 @@ function rateFor(inputTokens, cachedInputTokens) {
   return inputTokens > 0 ? (cachedInputTokens / inputTokens) * 100 : null;
 }
 
-function localDateString(timestampMs, timeZone) {
-  const parts = new Intl.DateTimeFormat("en-US", {
+function localDateFormatter(timeZone) {
+  return new Intl.DateTimeFormat("en-US", {
     timeZone,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
-  }).formatToParts(new Date(timestampMs));
+  });
+}
+
+function localDateString(timestampMs, formatter) {
+  const parts = formatter.formatToParts(new Date(timestampMs));
   const values = Object.fromEntries(
     parts
       .filter((part) => part.type !== "literal")
@@ -350,6 +354,9 @@ function accumulateRange(snapshot, bounds, bins = null, dateIndexByString = null
   const modelTotals = new Map();
   // One shared scale keeps rates, shares, and coverage proportional everywhere.
   const tokenScale = { value: 1 };
+  const dateFormatter = bins === null
+    ? null
+    : localDateFormatter(bounds.timeZone);
 
   const events = Array.isArray(snapshot?.events) ? snapshot.events : [];
   for (const event of events) {
@@ -362,9 +369,9 @@ function accumulateRange(snapshot, bounds, bins = null, dateIndexByString = null
       continue;
     }
     let { breakdown } = parsed;
-    const dateString = bins
-      ? localDateString(parsed.timestampMs, bounds.timeZone)
-      : null;
+    const dateString = dateFormatter === null
+      ? null
+      : localDateString(parsed.timestampMs, dateFormatter);
     const binIndex = dateString === null ? null : dateIndexByString.get(dateString);
     const bin = binIndex === undefined || binIndex === null ? null : bins[binIndex];
     const existingModelAggregate = breakdown.detailed && breakdown.inputTokens > 0
@@ -446,9 +453,17 @@ export function aggregateCacheRange(snapshot, bounds) {
   return accumulateRange(snapshot, bounds);
 }
 
-export function buildCacheReportData(snapshot, bounds, days, plotWidth) {
+export function buildCacheReportData(
+  snapshot,
+  bounds,
+  days,
+  plotWidth,
+  binSizeOverride = null,
+) {
   const rangeDays = Math.max(1, Number(days) || Number(bounds.rangeDays) || 7);
-  const binSize = chooseBinSize(rangeDays, plotWidth, {
+  // The combined report passes the trend chart's bin size so both charts'
+  // columns stay vertically aligned.
+  const binSize = binSizeOverride ?? chooseBinSize(rangeDays, plotWidth, {
     minBinWidth: MIN_BIN_WIDTH,
     preferDaily: true,
   });
