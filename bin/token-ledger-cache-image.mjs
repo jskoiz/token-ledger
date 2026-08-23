@@ -143,7 +143,10 @@ function scaleToFiniteSum(values) {
     (sum, value) => sum + value / MAX_FINITE_NUMBER,
     0,
   );
-  return ratio > 1 ? SCALE_HEADROOM / ratio : 1;
+  const sum = values.reduce((total, value) => total + value, 0);
+  return ratio > 1 || !Number.isFinite(sum)
+    ? SCALE_HEADROOM / Math.max(1, ratio)
+    : 1;
 }
 
 function scaleInputTokens(target, factor) {
@@ -170,6 +173,24 @@ function scaleBreakdown(breakdown, factor) {
   };
 }
 
+function tokenAdditionRatio(target, totalContribution, inputContribution) {
+  const totalRatio = Number.isFinite(target.totalTokens)
+    ? target.totalTokens / MAX_FINITE_NUMBER +
+      totalContribution / MAX_FINITE_NUMBER
+    : 0;
+  const inputRatio = target.inputTokens / MAX_FINITE_NUMBER +
+    inputContribution / MAX_FINITE_NUMBER;
+  return Math.max(totalRatio, inputRatio);
+}
+
+function tokenAdditionOverflows(target, totalContribution, inputContribution) {
+  return (
+    (Number.isFinite(target.totalTokens) &&
+      !Number.isFinite(target.totalTokens + totalContribution)) ||
+    !Number.isFinite(target.inputTokens + inputContribution)
+  );
+}
+
 function safeModelLabel(value) {
   const model = primitiveString(value);
   return model === null ? "Unknown" : trendModelLabel(model);
@@ -183,6 +204,7 @@ function cacheBreakdown(event) {
     rawInputTokens,
     nonNegativeFiniteNumber(event.cachedInputTokens),
   );
+  const componentOverflowed = !Number.isFinite(rawInputTokens + outputTokens);
   const componentScale = scaleToFiniteSum([rawInputTokens, outputTokens]);
   const inputTokens = rawInputTokens * componentScale;
   const componentOutputTokens = outputTokens * componentScale;
@@ -199,7 +221,9 @@ function cacheBreakdown(event) {
     : componentTotalTokens;
   const hasComponents = inputTokens > 0 || outputTokens > 0;
   const inferredDetailed = hasComponents && (
-    reportedTotalTokens === 0 || componentTotalTokens === reportedTotalTokens
+    reportedTotalTokens === 0 ||
+    componentTotalTokens === reportedTotalTokens ||
+    (componentOverflowed && reportedTotalTokens === MAX_FINITE_NUMBER)
   );
   const detailed = event.breakdownAvailable === true || (
     event.breakdownAvailable !== false && inferredDetailed
@@ -300,16 +324,37 @@ function accumulateRange(snapshot, bounds, bins = null, dateIndexByString = null
       continue;
     }
     let { breakdown } = parsed;
+    const dateString = bins
+      ? localDateString(parsed.timestampMs, bounds.timeZone)
+      : null;
+    const binIndex = dateString === null ? null : dateIndexByString.get(dateString);
+    const bin = binIndex === undefined || binIndex === null ? null : bins[binIndex];
+    const existingModelAggregate = breakdown.detailed && breakdown.inputTokens > 0
+      ? modelTotals.get(parsed.model)
+      : null;
+    const targets = [totals];
+    if (bin) targets.push(bin);
+    if (existingModelAggregate) targets.push(existingModelAggregate);
     const scale = tokenScale.value;
     const inputContribution = breakdown.detailed ? breakdown.inputTokens : 0;
+    const totalContribution = breakdown.totalTokens * scale;
+    const scaledInputContribution = inputContribution * scale;
     const overflowRatio = Math.max(
-      totals.totalTokens / MAX_FINITE_NUMBER +
-        (breakdown.totalTokens * scale) / MAX_FINITE_NUMBER,
-      totals.inputTokens / MAX_FINITE_NUMBER +
-        (inputContribution * scale) / MAX_FINITE_NUMBER,
+      ...targets.map((target) =>
+        tokenAdditionRatio(
+          target,
+          totalContribution,
+          scaledInputContribution,
+        )),
     );
-    if (overflowRatio > 1) {
-      const factor = SCALE_HEADROOM / overflowRatio;
+    const directOverflow = targets.some((target) =>
+      tokenAdditionOverflows(
+        target,
+        totalContribution,
+        scaledInputContribution,
+      ));
+    if (overflowRatio > 1 || directOverflow) {
+      const factor = SCALE_HEADROOM / Math.max(1, overflowRatio);
       scaleAggregateTokens(totals, factor);
       for (const bin of bins ?? []) scaleAggregateTokens(bin, factor);
       for (const model of modelTotals.values()) {
@@ -318,11 +363,6 @@ function accumulateRange(snapshot, bounds, bins = null, dateIndexByString = null
       tokenScale.value *= factor;
     }
     breakdown = scaleBreakdown(breakdown, tokenScale.value);
-    const dateString = bins
-      ? localDateString(parsed.timestampMs, bounds.timeZone)
-      : null;
-    const binIndex = dateString === null ? null : dateIndexByString.get(dateString);
-    const bin = binIndex === undefined || binIndex === null ? null : bins[binIndex];
 
     totals.eventCount += 1;
     totals.totalTokens += breakdown.totalTokens;
