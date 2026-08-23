@@ -513,19 +513,21 @@ export function renderTrendImage({
   }
 
   // ---- Layout ----
+  // One uniform-height top band: five compact stat cards and a pace panel.
   const headerBaseline = 53;
   const cardTop = 82;
-  const cardHeight = 96;
-  const topGap = 26;
-  const paceWidth = 424;
-  const cardsRegionWidth = contentWidth - paceWidth - topGap;
-  const paceX = outer + cardsRegionWidth + topGap;
+  const topGap = 24;
+  const pacePanelWidth = 400;
+  const pacePanelX = contentRight - pacePanelWidth;
+  const paceTextX = pacePanelX + 18;
+  const paceInnerWidth = pacePanelWidth - 36;
+  const cardsRegionWidth = contentWidth - pacePanelWidth - topGap;
   const paceNoteLines = [];
   if (paceNote) {
     let current = "";
     for (const word of paceNote.split(" ")) {
       const candidate = current ? `${current} ${word}` : word;
-      if (textWidth(candidate, 12) > paceWidth && current) {
+      if (textWidth(candidate, 11.5) > paceInnerWidth && current) {
         paceNoteLines.push(current);
         current = word;
       } else {
@@ -534,9 +536,16 @@ export function renderTrendImage({
     }
     if (current) paceNoteLines.push(current);
   }
-  const paceBlockHeight = 44 + (paceLines.length - 1) * 33 +
-    (paceNoteLines.length ? 12 + paceNoteLines.length * 17 : 0);
-  const chartBlockTop = Math.max(cardTop + cardHeight, cardTop + paceBlockHeight) + 14;
+  // Baseline offsets inside the pace panel; the secondary stats sit as a
+  // two-column pair under the headline.
+  const paceStatBottom = paceLines.length > 1 ? 113 : 64;
+  const topRowHeight = Math.max(
+    150,
+    paceStatBottom +
+      (paceNoteLines.length ? 25 + (paceNoteLines.length - 1) * 16 + 6 : 0) +
+      14,
+  );
+  const chartBlockTop = cardTop + topRowHeight + 16;
   const plotTop = chartBlockTop + 40;
   const plotHeight = 430;
   const plotBottom = plotTop + plotHeight;
@@ -671,36 +680,36 @@ export function renderTrendImage({
     const innerWidth = cardWidth - 26;
     cards.forEach((card, index) => {
       const x = outer + index * (cardWidth + gap);
-      elements.push(svgRect(x, cardTop, cardWidth, cardHeight, {
+      elements.push(svgRect(x, cardTop, cardWidth, topRowHeight, {
         rx: 7,
         fill: card.panel,
         stroke: card.border,
         "stroke-width": 1,
       }));
-      elements.push(`<circle cx="${(x + 16.5).toFixed(2)}" cy="${cardTop + 17.5}" r="3.5" fill="${card.swatch}"/>`);
+      elements.push(`<circle cx="${(x + 17).toFixed(2)}" cy="${cardTop + 20}" r="3.5" fill="${card.swatch}"/>`);
       elements.push(svgText({
-        x: x + 26,
-        y: cardTop + 21,
+        x: x + 27,
+        y: cardTop + 24,
         value: card.label.toUpperCase(),
         fill: card.labelColor,
-        size: 10,
+        size: 10.5,
         spacing: ".9",
       }));
-      const valueBaseline = cardTop + 50;
+      const valueBaseline = cardTop + 60;
       elements.push(svgText({
         x: x + 13,
         y: valueBaseline,
         value: card.value,
         fill: card.valueColor,
-        size: 20,
+        size: 22,
         weight: 800,
-        spacing: "-0.5",
+        spacing: "-0.55",
       }));
-      const valueWidth = textWidth(card.value, 20, 800);
+      const valueWidth = textWidth(card.value, 22, 800);
       if (card.chip) {
-        const chipTextWidth = textWidth(card.chip.text, 10, 700);
+        const chipTextWidth = textWidth(card.chip.text, 10.5, 700);
         const chipX = x + 13 + valueWidth + 7;
-        elements.push(svgRect(chipX, valueBaseline - 11, chipTextWidth + 10, 15, {
+        elements.push(svgRect(chipX, valueBaseline - 12, chipTextWidth + 10, 16, {
           rx: 3,
           fill: card.chip.fill,
         }));
@@ -709,7 +718,7 @@ export function renderTrendImage({
           y: valueBaseline,
           value: card.chip.text,
           fill: card.chip.color,
-          size: 10,
+          size: 10.5,
           weight: 700,
         }));
       } else if (card.suffix) {
@@ -718,67 +727,89 @@ export function renderTrendImage({
           y: valueBaseline,
           value: card.suffix,
           fill: COLORS.secondary,
-          size: 10,
+          size: 10.5,
         }));
       }
-      const barY = cardTop + 62;
-      elements.push(svgRect(x + 13, barY, innerWidth, 3, { rx: 1.5, fill: card.track }));
+      // The micro-bar and caption anchor to the card's bottom edge.
+      const barY = cardTop + topRowHeight - 44;
+      elements.push(svgRect(x + 13, barY, innerWidth, 4, { rx: 2, fill: card.track }));
       const fillWidth = (Math.min(100, Math.max(0, card.barPercent)) / 100) * innerWidth;
       if (fillWidth > 0) {
-        elements.push(svgRect(x + 13, barY, fillWidth, 3, { rx: 1.5, fill: card.fill }));
+        elements.push(svgRect(x + 13, barY, fillWidth, 4, { rx: 2, fill: card.fill }));
       }
-      const caption = card.captionShort && textWidth(card.caption, 10) > innerWidth
+      const caption = card.captionShort && textWidth(card.caption, 10.5) > innerWidth
         ? card.captionShort
         : card.caption;
       elements.push(svgText({
         x: x + 13,
-        y: cardTop + 82,
+        y: cardTop + topRowHeight - 18,
         value: caption,
         fill: COLORS.muted,
-        size: 10,
+        size: 10.5,
       }));
     });
   }
 
-  // ---- Pace & runway (top right) ----
+  // ---- Pace & runway panel (top right, same height as the cards) ----
+  elements.push(svgRect(pacePanelX, cardTop, pacePanelWidth, topRowHeight, {
+    rx: 7,
+    fill: COLORS.panel,
+    stroke: COLORS.panelBorder,
+    "stroke-width": 1,
+  }));
   elements.push(svgText({
-    x: paceX,
-    y: cardTop + 10,
+    x: paceTextX,
+    y: cardTop + 24,
     value: "PACE & RUNWAY",
     fill: COLORS.muted,
-    size: 12,
-    spacing: "1.32",
+    size: 10.5,
+    spacing: "1.2",
   }));
-  let paceBaseline = cardTop + 44;
-  for (const line of paceLines) {
+  const paceHeadline = paceLines[0];
+  elements.push(svgText({
+    x: paceTextX,
+    y: cardTop + 60,
+    value: paceHeadline.value,
+    fill: paceHeadline.color,
+    size: 26,
+    weight: 800,
+    spacing: "-0.52",
+  }));
+  elements.push(svgText({
+    x: paceTextX + textWidth(paceHeadline.value, 26, 800) + 10,
+    y: cardTop + 60,
+    value: paceHeadline.detail,
+    fill: COLORS.muted,
+    size: 12.5,
+  }));
+  paceLines.slice(1).forEach((line, index) => {
+    const columnX = paceTextX + index * (paceInnerWidth / 2 + 8);
     elements.push(svgText({
-      x: paceX,
-      y: paceBaseline,
+      x: columnX,
+      y: cardTop + 96,
       value: line.value,
       fill: line.color,
-      size: line.size,
-      weight: line.weight,
-      spacing: line.size >= 23 ? "-0.46" : null,
+      size: 17,
+      weight: 700,
     }));
     elements.push(svgText({
-      x: paceX + textWidth(line.value, line.size, line.weight) + 10,
-      y: paceBaseline,
+      x: columnX,
+      y: cardTop + 113,
       value: line.detail,
       fill: COLORS.muted,
-      size: 12.5,
+      size: 11,
     }));
-    paceBaseline += 33;
-  }
-  let paceNoteBaseline = paceBaseline - 33 + 29;
+  });
+  let paceNoteBaseline = cardTop + paceStatBottom + 25;
   for (const line of paceNoteLines) {
     elements.push(svgText({
-      x: paceX,
+      x: paceTextX,
       y: paceNoteBaseline,
       value: line,
       fill: COLORS.muted,
-      size: 12,
+      size: 11.5,
     }));
-    paceNoteBaseline += 17;
+    paceNoteBaseline += 16;
   }
 
   // ---- Chart grid + axes ----
