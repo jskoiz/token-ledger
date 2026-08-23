@@ -46,8 +46,10 @@ export const noObjectParametersRule = defineRule({
     ) => {
       const keyword = target === "object"
         ? "TSObjectKeyword"
-        : "TSUnknownKeyword";
-      if (type.type === keyword) return true;
+        : target === "unknown"
+          ? "TSUnknownKeyword"
+          : null;
+      if (keyword !== null && type.type === keyword) return true;
       if (type.type === "TSParenthesizedType") {
         return resolvesToBroadType(
           type.typeAnnotation,
@@ -57,11 +59,21 @@ export const noObjectParametersRule = defineRule({
         );
       }
       if (type.type === "TSUnionType") {
+        if (target === "empty-object") {
+          return type.types.every((member) =>
+            resolvesToBroadType(member, target, visited, bindings),
+          );
+        }
         return type.types.some((member) =>
           resolvesToBroadType(member, target, visited, bindings),
         );
       }
       if (type.type === "TSIntersectionType") {
+        if (target === "empty-object") {
+          return type.types.every((member) =>
+            resolvesToBroadType(member, target, visited, bindings),
+          );
+        }
         if (target === "unknown") {
           return type.types.every((member) =>
             resolvesToBroadType(member, target, visited, bindings),
@@ -69,6 +81,9 @@ export const noObjectParametersRule = defineRule({
         }
         let includesObject = false;
         for (const member of type.types) {
+          if (resolvesToBroadType(member, "empty-object", visited, bindings)) {
+            continue;
+          }
           if (resolvesToBroadType(member, "object", visited, bindings)) {
             includesObject = true;
           } else if (
@@ -78,6 +93,10 @@ export const noObjectParametersRule = defineRule({
           }
         }
         return includesObject;
+      }
+      if (target === "empty-object") {
+        if (type.type === "TSUnknownKeyword") return true;
+        if (type.type === "TSTypeLiteral") return type.members.length === 0;
       }
 
       const reference = typeAliasReference(type);
