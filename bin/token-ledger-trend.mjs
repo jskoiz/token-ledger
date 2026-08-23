@@ -3,7 +3,11 @@ import {
   FAST_MODE_MULTIPLIER,
   RATE_CARD_AS_OF,
 } from "./token-ledger-rates.mjs";
-import { usageBuckets } from "../lib/token-ledger-usage.mjs";
+import {
+  splitUsageBucketsAtBoundaries,
+  usageBuckets,
+  usageBucketsInRange,
+} from "../lib/token-ledger-usage.mjs";
 
 const WEEK_MINUTES = 10_080;
 const RESET_JITTER_SECONDS = 5 * 60;
@@ -419,10 +423,7 @@ function cloneAllocations(allocations) {
 function eventsInBounds(events, bounds) {
   const startMs = bounds.start.getTime();
   const endMs = bounds.end.getTime();
-  return events.filter((event) => {
-    const timestampMs = finiteTimestamp(event.timestamp);
-    return timestampMs !== null && timestampMs >= startMs && timestampMs < endMs;
-  });
+  return usageBucketsInRange({ events }, startMs, endMs);
 }
 
 function buildModelStats(displayedEvents, intervals, bounds) {
@@ -517,7 +518,17 @@ export function buildUsageTrend(snapshot = {}, bounds) {
     };
   }
 
-  const sortedEvents = usageBuckets(snapshot)
+  const sortedEvents = splitUsageBucketsAtBoundaries(
+    usageBuckets(snapshot),
+    [
+      startMs,
+      endMs,
+      ...observations.flatMap((observation) => [
+        observation.cycleStartMs,
+        observation.timestampMs,
+      ]),
+    ],
+  )
     .map((event) => ({ ...event, timestampMs: finiteTimestamp(event.timestamp) }))
     .filter((event) => event.timestampMs !== null && event.timestampMs < endMs)
     .sort((left, right) => left.timestampMs - right.timestampMs);

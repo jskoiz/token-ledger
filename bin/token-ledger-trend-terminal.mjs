@@ -1,5 +1,6 @@
 import { buildBurnDayBins, buildUsageTrend, trendModelLabel } from "./token-ledger-trend.mjs";
 import {
+  splitUsageBucketsAtBoundaries,
   usageBuckets,
   usageCallCount,
 } from "../lib/token-ledger-usage.mjs";
@@ -133,8 +134,8 @@ function shiftCalendarDate(dateString, amount) {
   );
 }
 
-function timeZoneOffsetMs(instant, timeZone) {
-  const parts = new Intl.DateTimeFormat("en-US", {
+function timeZoneFormatter(timeZone) {
+  return new Intl.DateTimeFormat("en-US", {
     timeZone,
     timeZoneName: "longOffset",
     year: "numeric",
@@ -144,7 +145,11 @@ function timeZoneOffsetMs(instant, timeZone) {
     minute: "2-digit",
     second: "2-digit",
     hourCycle: "h23",
-  }).formatToParts(instant);
+  });
+}
+
+function timeZoneOffsetMs(instant, formatter) {
+  const parts = formatter.formatToParts(instant);
   const value = parts.find((part) => part.type === "timeZoneName")?.value ?? "GMT";
   if (value === "GMT") return 0;
   const match = value.match(/^GMT([+-])(\d{2}):?(\d{2})?$/);
@@ -153,20 +158,23 @@ function timeZoneOffsetMs(instant, timeZone) {
   return (match[1] === "+" ? 1 : -1) * minutes * 60 * 1_000;
 }
 
-function zonedMidnight(dateString, timeZone) {
+function zonedMidnight(
+  dateString,
+  timeZone,
+  formatter = timeZoneFormatter(timeZone),
+) {
   const [year, month, day] = dateParts(dateString);
   const utcGuess = Date.UTC(year, month - 1, day);
-  const first = new Date(utcGuess - timeZoneOffsetMs(new Date(utcGuess), timeZone));
-  return new Date(first.getTime() - timeZoneOffsetMs(first, timeZone));
+  const first = new Date(utcGuess - timeZoneOffsetMs(new Date(utcGuess), formatter));
+  return new Date(first.getTime() - timeZoneOffsetMs(first, formatter));
 }
 
-function localDateString(timestamp, timeZone) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(new Date(timestamp));
+function localDateString(
+  timestamp,
+  timeZone,
+  formatter = timeZoneFormatter(timeZone),
+) {
+  const parts = formatter.formatToParts(new Date(timestamp));
   const values = Object.fromEntries(
     parts
       .filter((part) => part.type !== "literal")
@@ -234,11 +242,21 @@ export function buildActualTokenBins(
       index,
     ]),
   );
-
-  for (const event of usageBuckets(snapshot)) {
+  const dateFormatter = timeZoneFormatter(bounds.timeZone);
+  const binBoundaries = [
+    bins[0]?.startDateString,
+    ...bins.map((bin) => bin.endDateString),
+  ]
+    .filter(Boolean)
+    .map((dateString) =>
+      zonedMidnight(dateString, bounds.timeZone, dateFormatter).getTime());
+  for (const event of splitUsageBucketsAtBoundaries(
+    usageBuckets(snapshot),
+    binBoundaries,
+  )) {
     const timestamp = new Date(event.timestamp).getTime();
     if (!Number.isFinite(timestamp)) continue;
-    const dateString = localDateString(timestamp, bounds.timeZone);
+    const dateString = localDateString(timestamp, bounds.timeZone, dateFormatter);
     const dayIndex = dateIndexByString.get(dateString);
     if (dayIndex === undefined || dayIndex >= days) continue;
     const bin = bins[Math.floor(dayIndex / binSize)];

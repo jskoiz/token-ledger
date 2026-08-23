@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
+import { gzipSync } from "node:zlib";
 
 import { collectUsage } from "../lib/token-ledger-importer.mjs";
 import {
@@ -22,6 +23,7 @@ import {
 import {
   buildUsageBuckets,
   SNAPSHOT_SCHEMA_VERSION,
+  splitUsageBucketsAtBoundaries,
   usageBucketStats,
 } from "../lib/token-ledger-usage.mjs";
 
@@ -281,6 +283,59 @@ test("gzip snapshots are compact, readable, atomic, and private", async () => {
   }
 });
 
+test("snapshot reader rejects compressed inputs above the pre-read limit", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-gzip-read-size-"));
+  try {
+    const output = resolve(root, "oversized.json.gz");
+    await writeFile(output, Buffer.alloc(1_025, 0));
+
+    await assert.rejects(
+      () => readPrivateSnapshot(output, {
+        maxBytes: 1_024,
+        maxJsonBytes: 4_096,
+      }),
+      (error) => {
+        assert.equal(error.code, "ERR_SNAPSHOT_SIZE_LIMIT");
+        assert.match(error.message, /compressed read limit/);
+        return true;
+      },
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("snapshot reader bounds gzip expansion and preserves valid reads", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-gzip-read-json-"));
+  try {
+    const output = resolve(root, "snapshot.json.gz");
+    const snapshot = { label: "x".repeat(4_096), events: [] };
+    const encoded = gzipSync(Buffer.from(JSON.stringify(snapshot)));
+    await writeFile(output, encoded);
+
+    await assert.rejects(
+      () => readPrivateSnapshot(output, {
+        maxBytes: encoded.byteLength + 1,
+        maxJsonBytes: 1_024,
+      }),
+      (error) => {
+        assert.equal(error.code, "ERR_SNAPSHOT_SIZE_LIMIT");
+        assert.match(error.message, /expands beyond the .* JSON read limit/);
+        return true;
+      },
+    );
+    assert.deepEqual(
+      await readPrivateSnapshot(output, {
+        maxBytes: encoded.byteLength + 1,
+        maxJsonBytes: 8_192,
+      }),
+      snapshot,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("snapshot size limit preserves the previous cache", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-size-limit-"));
   try {
@@ -393,6 +448,53 @@ test("usage buckets preserve additive totals across age tiers", () => {
     buckets.flatMap((bucket) => bucket.threadIds).sort(),
     rows.map((row) => row.threadId).sort(),
   );
+});
+
+test("compacted buckets split proportionally at range boundaries", () => {
+  const rows = [
+    ["2025-06-01T06:00:00.000Z", 70],
+    ["2025-06-01T18:00:00.000Z", 80],
+  ].map(([timestamp, totalTokens], index) => ({
+    timestamp,
+    threadId: `thread-${index}`,
+    project: "boundary-history",
+    model: "gpt-5.6-luna",
+    effort: "medium",
+    source: "desktop",
+    useType: "interactive",
+    serviceTier: null,
+    inputTokens: totalTokens - 10,
+    cachedInputTokens: 10,
+    outputTokens: 10,
+    totalTokens,
+    callCount: 1,
+    breakdownAvailable: true,
+  }));
+  const [bucket] = buildUsageBuckets(rows, {
+    latestTimestampMs: Date.parse("2026-08-23T00:00:00.000Z"),
+    policy: [{ maximumAgeMs: Infinity, resolutionMs: 86_400_000 }],
+  });
+  const fragments = splitUsageBucketsAtBoundaries(
+    [bucket],
+    [Date.parse("2025-06-01T07:00:00.000Z")],
+  );
+
+  assert.equal(fragments.length, 2);
+  assert.ok(fragments.every((fragment) => fragment.rangeAllocationEstimated));
+  assert.ok(fragments[0].totalTokens > 0);
+  assert.ok(fragments[1].totalTokens > 0);
+  assert.ok(Math.abs(
+    fragments.reduce((sum, fragment) => sum + fragment.totalTokens, 0) -
+      bucket.totalTokens,
+  ) < 1e-9);
+  assert.ok(Math.abs(
+    fragments.reduce((sum, fragment) => sum + fragment.inputTokens, 0) -
+      bucket.inputTokens,
+  ) < 1e-9);
+  assert.ok(Math.abs(
+    fragments.reduce((sum, fragment) => sum + fragment.callCount, 0) -
+      bucket.callCount,
+  ) < 1e-9);
 });
 
 test("dense recent usage compacts during collection before memory grows unbounded", () => {
