@@ -55,6 +55,38 @@ test("anti-slop recognizes aliases whose unions collapse to unknown", async () =
   assert.match(result.output, /anti-slop\(no-unknown-type-aliases\)/);
 });
 
+test("anti-slop resolves unions and generic aliases in unknown parameters", async () => {
+  const result = await lintTypeScript(`
+    type Identity<T> = T;
+    type DefaultUnknown<T = unknown> = T;
+    export function consumeUnion(value: string | unknown): void {}
+    export function consumeAlias(value: Identity<unknown>): void {}
+    export function consumeDefault(value: DefaultUnknown): void {}
+  `);
+  assert.equal(result.status, 1, result.output);
+  assert.equal(
+    result.output.match(/anti-slop\(no-unknown-parameters\)/g)?.length,
+    3,
+    result.output,
+  );
+});
+
+test("anti-slop resolves applied generic aliases in object parameters", async () => {
+  const result = await lintTypeScript(`
+    type Identity<T> = T;
+    type Wrapped<T> = Identity<T>;
+    type DefaultObject<T = object> = T;
+    export function consume(value: Wrapped<object>): void {}
+    export function consumeDefault(value: DefaultObject): void {}
+  `);
+  assert.equal(result.status, 1, result.output);
+  assert.equal(
+    result.output.match(/anti-slop\(no-object-parameters\)/g)?.length,
+    2,
+    result.output,
+  );
+});
+
 test("anti-slop keeps concrete generic aliases valid", async () => {
   const result = await lintTypeScript(`
     type Identity<T> = T;
