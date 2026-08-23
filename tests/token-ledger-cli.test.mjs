@@ -46,6 +46,7 @@ import { creditsForUsage } from "../bin/token-ledger-rates.mjs";
 import {
   renderTrendImage,
   textWidth,
+  truncateText,
   writeTrendPng,
 } from "../bin/token-ledger-trend-image.mjs";
 import {
@@ -1259,16 +1260,30 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
     options: { imageWidth: 1_000 },
   });
   assert.match(svg, /<title[^>]*>Token Ledger · 7-day trend<\/title>/);
+  assert.match(svg, /data-report-mode="actual-tokens"/);
   assert.match(svg, /fill="#3b82f6"/);
   assert.match(svg, /fill="#10a394"/);
-  assert.match(svg, /ACTUAL TOKEN VOLUME/);
-  assert.match(svg, /WEEKLY METER REMAINING/);
+  assert.match(svg, /TOKEN VOLUME · ACTUAL/);
+  assert.match(svg, /WEEKLY METER · REMAINING/);
+  assert.match(svg, /data-model="Luna" data-value="1000" data-unit="tokens"/);
+  assert.match(svg, /data-model="Sol" data-value="2000" data-unit="tokens"/);
   assert.match(svg, /stroke="#f6b73c"/);
   assert.match(svg, /Luna/);
   assert.match(svg, /Sol/);
   // The fixture's second window follows a genuine weekly expiry, so the
   // reset break appears.
-  assert.match(svg, /RESET 100%/);
+  assert.match(svg, /RESET · 100%/);
+  const resetX = Number(svg.match(
+    /<line x1="([\d.]+)"[^>]*stroke="rgba\(246,183,60,\.48\)"/,
+  )?.[1]);
+  const meterPaths = [...svg.matchAll(
+    /<path d="([^"]+)"[^>]*data-series="weekly-meter"[^>]*data-cycle="([^"]+)"/g,
+  )].map((match) => ({ path: match[1], cycle: match[2] }));
+  assert.equal(meterPaths.length, 2);
+  const firstPathEndX = Number(meterPaths[0].path.match(/ ([\d.]+) [\d.]+$/)?.[1]);
+  const secondPathStartX = Number(meterPaths[1].path.match(/^M ([\d.]+)/)?.[1]);
+  assert.ok(Math.abs(firstPathEndX - resetX) < 0.02);
+  assert.ok(Math.abs(secondPathStartX - resetX) < 0.02);
   // The all-fast Sol segment gets the darker fast-mode shade, and the fast
   // mode stat card explains it.
   assert.match(svg, /fill="#0a655c"/);
@@ -1295,8 +1310,12 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
     days: 7,
     options: { imageWidth: 1_000, drain: true },
   });
-  assert.match(drainSvg, /OBSERVED LIMIT DRAIN/);
-  assert.match(drainSvg, /Bars = observed meter drops/);
+  assert.match(drainSvg, /Token Ledger · 7-day meter drain/);
+  assert.match(drainSvg, /data-report-mode="meter-drain"/);
+  assert.match(drainSvg, /METER DRAIN · OBSERVED TOTAL, ESTIMATED MODEL SPLIT/);
+  assert.match(drainSvg, /columns = estimated model split/);
+  assert.match(drainSvg, /OBSERVED DRAIN/);
+  assert.match(drainSvg, /data-unit="meter-points"/);
   assert.match(drainSvg, /CACHE RATE BY PERIOD/);
 
   const minimumWidthSvg = renderTrendImage({
@@ -1320,6 +1339,80 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
     modelBarWidths.every((barWidth) => barWidth >= 90),
     `minimum-width model bars were ${modelBarWidths.join(", ")}px`,
   );
+});
+
+test("trend report truncates project names to the measured label column", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+  const longProjectName =
+    "bd8dca09-b808-4a31-acdfbdf79fdc-with-an-even-longer-project-suffix";
+  const clipped = truncateText(longProjectName, 190, 15, 700);
+  assert.notEqual(clipped, longProjectName);
+  assert.match(clipped, /…$/);
+  assert.ok(textWidth(clipped, 15, 700) <= 190);
+
+  const snapshot = {
+    generatedAt: "2026-08-15T12:00:00.000Z",
+    events: [{
+      timestamp: "2026-08-15T12:00:00.000Z",
+      model: "gpt-5.6-luna",
+      totalTokens: 1_000,
+      inputTokens: 800,
+      cachedInputTokens: 600,
+      outputTokens: 200,
+    }],
+    quotaObservations: [],
+  };
+  const svg = renderTrendImage({
+    snapshot,
+    bounds,
+    trend: buildUsageTrend(snapshot, bounds),
+    days: 7,
+    options: { imageWidth: 1_280 },
+    projectRows: [{
+      project: longProjectName,
+      displayProject: longProjectName,
+      totalTokens: 1_000,
+    }],
+  });
+
+  assert.doesNotMatch(svg, new RegExp(`>${longProjectName}<\\/text>`));
+  assert.match(svg, new RegExp(`>${clipped}<\\/text>`));
+});
+
+test("trend report limits reset labels in dense windows", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 30);
+  const cycleStarts = [
+    "2026-07-20T00:00:00.000Z",
+    "2026-07-23T00:00:00.000Z",
+    "2026-07-26T00:00:00.000Z",
+    "2026-07-29T00:00:00.000Z",
+    "2026-08-01T00:00:00.000Z",
+    "2026-08-04T00:00:00.000Z",
+    "2026-08-07T00:00:00.000Z",
+  ];
+  const snapshot = {
+    generatedAt: "2026-08-15T12:00:00.000Z",
+    events: [],
+    quotaObservations: cycleStarts.map((timestamp, index) => ({
+      timestamp,
+      usedPercent: 10 + index,
+      windowMinutes: 10_080,
+      resetsAt: Date.parse(timestamp) / 1_000 + 10_080 * 60,
+    })),
+  };
+  const svg = renderTrendImage({
+    snapshot,
+    bounds,
+    trend: buildUsageTrend(snapshot, bounds),
+    days: 30,
+    options: { imageWidth: 1_280 },
+  });
+  const resetLines = svg.match(
+    /stroke="rgba\(246,183,60,\.48\)"/g,
+  ) ?? [];
+  const resetLabels = svg.match(/>RESTART · 100%<\/text>/g) ?? [];
+  assert.equal(resetLines.length, cycleStarts.length - 1);
+  assert.equal(resetLabels.length, 4);
 });
 
 test("cache report aggregation reuses one local date formatter", () => {
@@ -2439,7 +2532,7 @@ test("long trend windows fit terminal and image column widths", () => {
   });
   assert.ok(terminalOutput.split("\n").every((line) => line.length <= 96));
 
-  const imagePlotWidth = 1_280 - 124 - 126;
+  const imagePlotWidth = 1_280 - 96 - 96;
   const image = buildActualTokenBins(snapshot, bounds, days, imagePlotWidth, {
     minBinWidth: 26,
     preferDaily: true,

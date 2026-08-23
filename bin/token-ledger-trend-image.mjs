@@ -108,11 +108,16 @@ export function compact(value, digits = 2) {
 }
 
 function percent(value) {
-  return `${Number(value).toFixed(value >= 10 ? 1 : 2)}%`;
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "—";
+  if (numeric > 0 && numeric < 0.1) return "<0.1%";
+  return `${numeric.toFixed(1)}%`;
 }
 
 function meterLabel(value) {
-  return `${Number(value).toFixed(1)}%`;
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "—";
+  return `${numeric.toFixed(Number.isInteger(numeric) ? 0 : 1)}%`;
 }
 
 function niceCeiling(value) {
@@ -241,6 +246,30 @@ export function textWidth(text, size, weight = 400) {
   return units * size * (weight >= 700 ? 1.05 : 1);
 }
 
+export function truncateText(text, maxWidth, size, weight = 400) {
+  let value = String(text ?? "").replace(/\.{3,}/g, "…");
+  if (!(maxWidth > 0) || textWidth(value, size, weight) <= maxWidth) return value;
+  if (value.includes("…")) {
+    const leading = `${value.split("…", 1)[0].trimEnd()}…`;
+    if (textWidth(leading, size, weight) <= maxWidth) return leading;
+    value = leading;
+  }
+  const ellipsis = "…";
+  const ellipsisWidth = textWidth(ellipsis, size, weight);
+  if (ellipsisWidth >= maxWidth) return ellipsis;
+
+  const characters = [...value];
+  let low = 0;
+  let high = characters.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    const candidate = `${characters.slice(0, middle).join("")}${ellipsis}`;
+    if (textWidth(candidate, size, weight) <= maxWidth) low = middle;
+    else high = middle - 1;
+  }
+  return `${characters.slice(0, low).join("").trimEnd()}${ellipsis}`;
+}
+
 export function svgText({
   x,
   y,
@@ -360,8 +389,8 @@ export function renderTrendImage({
 }) {
   const width = Math.max(900, Math.min(2_400, Number(options.imageWidth) || 1_280));
   const outer = 32;
-  const plotLeft = 124;
-  const plotRight = width - 126;
+  const plotLeft = 96;
+  const plotRight = width - 96;
   const plotWidth = plotRight - plotLeft;
   const contentRight = width - outer;
   const contentWidth = width - outer * 2;
@@ -499,11 +528,11 @@ export function renderTrendImage({
       paceRunwayBar = { runwayDays, daysToReset, resetInLabel };
       const gap = runwayDays - daysToReset;
       if (Math.abs(gap) <= 1.5) {
-        paceNote = `Next weekly reset in ${resetInLabel} — the current pace lands within ~${Math.max(1, Math.round(Math.abs(gap)))} day of it.`;
+        paceNote = `Next weekly reset in ${resetInLabel}. Current pace lands within ~${Math.max(1, Math.round(Math.abs(gap)))} day of it.`;
       } else if (gap > 0) {
-        paceNote = `Next weekly reset in ${resetInLabel} — the current pace leaves ~${Math.round(gap)} days of headroom past it.`;
+        paceNote = `Next weekly reset in ${resetInLabel}. Current pace leaves ~${Math.round(gap)} days of headroom past it.`;
       } else {
-        paceNote = `Next weekly reset in ${resetInLabel} — the current pace runs the meter out ~${Math.round(-gap)} days before it.`;
+        paceNote = `Next weekly reset in ${resetInLabel}. Current pace runs the meter out ~${Math.round(-gap)} days before it.`;
       }
     }
   } else {
@@ -524,7 +553,8 @@ export function renderTrendImage({
   const cardTop = 82;
   const topGap = 24;
   const hasMeterCard = Boolean(hasLine && latestQuotaPoint);
-  const statCardCount = modelCards.length + (hasFast ? 1 : 0);
+  const statCardCount =
+    modelCards.length + (hasFast ? 1 : 0) + (percentMode ? 1 : 0);
   const pacePanelWidth = hasMeterCard
     ? Math.min(560, Math.max(480, contentWidth * 0.55))
     : 432;
@@ -583,16 +613,19 @@ export function renderTrendImage({
   const height = bottomTop + bottomBlockHeight + 34;
 
   const yearLabel = bounds.endDateString.slice(0, 4);
-  const title = `TOKEN LEDGER · ${days}-DAY TREND`;
+  const title = percentMode
+    ? `TOKEN LEDGER · ${days}-DAY METER DRAIN`
+    : `TOKEN LEDGER · ${days}-DAY TREND`;
   const subtitle = `${localDateLabel(bounds.startDateString, bounds.timeZone)} – ${localDateLabel(bounds.endDateString, bounds.timeZone)}, ${yearLabel} · ${bounds.timeZone}`;
   const description = percentMode
-    ? "Dark report card: compact model stat cards beside pace and runway, stacked columns of the observed weekly-limit percentage consumed per column split by model via rate-card credit weights, the observed weekly meter remaining as a smoothed amber line with reset breaks and callout pills, a compressed cache-rate-by-period strip, and top projects beside per-model cache rates."
+    ? "Dark report card: compact actual-token stat cards beside pace and runway, stacked columns of observed weekly-meter drain with an explicitly estimated per-model split, the observed weekly meter remaining as an amber line with continuous reset boundaries, a compressed cache-rate-by-period strip, and top projects beside per-model cache rates."
     : "Dark report card: compact model stat cards with week-over-week delta chips beside pace and runway, stacked columns of local token volume by model with fast-mode usage in a darker shade, the observed weekly meter remaining as a smoothed amber line with reset breaks and callout pills, a compressed cache-rate-by-period strip, and top projects beside per-model cache rates.";
 
   const elements = [
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="trend-title trend-description">`,
-    `<title id="trend-title">${escapeXml(`Token Ledger · ${days}-day trend`)}</title>`,
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="trend-title trend-description" data-report-mode="${percentMode ? "meter-drain" : "actual-tokens"}">`,
+    `<title id="trend-title">${escapeXml(percentMode ? `Token Ledger · ${days}-day meter drain` : `Token Ledger · ${days}-day trend`)}</title>`,
     `<desc id="trend-description">${escapeXml(description)}</desc>`,
+    `<defs><clipPath id="trend-plot-clip"><rect x="${plotLeft}" y="${plotTop}" width="${plotWidth}" height="${plotHeight}"/></clipPath></defs>`,
     `<rect width="100%" height="100%" fill="${COLORS.background}"/>`,
     svgText({
       x: outer,
@@ -632,7 +665,7 @@ export function renderTrendImage({
     }
     cards.push({
       swatch: styleForModel(model),
-      label: model,
+      label: percentMode ? `${model} · tokens` : model,
       labelColor: COLORS.muted,
       value: compact(tokens),
       valueColor: COLORS.ink,
@@ -641,7 +674,8 @@ export function renderTrendImage({
       track: COLORS.track,
       fill: styleForModel(model),
       barPercent: share,
-      caption: `${percent(share)} of tokens`,
+      caption: `${percent(share)} of ${percentMode ? "actual " : ""}tokens`,
+      captionShort: percent(share),
       panel: COLORS.panel,
       border: COLORS.panelBorder,
     });
@@ -661,6 +695,24 @@ export function renderTrendImage({
       barPercent: fastShare,
       caption: `${percent(fastShare)} of tokens · darker bar shade`,
       captionShort: `${percent(fastShare)} of tokens`,
+      panel: COLORS.panel,
+      border: COLORS.panelBorder,
+    });
+  }
+  if (percentMode) {
+    cards.push({
+      swatch: COLORS.line,
+      label: "Observed drain",
+      labelColor: COLORS.meterAxis,
+      value: `${burn.totalPercent.toFixed(1)} pts`,
+      valueColor: COLORS.line,
+      chip: null,
+      suffix: null,
+      track: "rgba(246,183,60,.16)",
+      fill: COLORS.line,
+      barPercent: burn.totalPercent,
+      caption: "observed total · model split estimated",
+      captionShort: "model split estimated",
       panel: COLORS.panel,
       border: COLORS.panelBorder,
     });
@@ -771,16 +823,16 @@ export function renderTrendImage({
         valueEnd += 10 + textWidth(card.suffix, 10.5);
       }
       const captionAvail = innerRight - valueEnd - 16;
-      const caption = card.captionShort && textWidth(card.caption, 10.5) > captionAvail
+      const caption = card.captionShort && textWidth(card.caption, 11) > captionAvail
         ? card.captionShort
         : card.caption;
-      if (textWidth(caption, 10.5) <= captionAvail) {
+      if (textWidth(caption, 11) <= captionAvail) {
         elements.push(svgText({
           x: innerRight,
           y: valueBaseline,
           value: caption,
-          fill: COLORS.muted,
-          size: 10.5,
+          fill: COLORS.secondary,
+          size: 11,
           anchor: "end",
         }));
       }
@@ -995,26 +1047,26 @@ export function renderTrendImage({
       }));
     }
   }
-  const axisTitleY = plotTop + plotHeight / 2;
   elements.push(svgText({
-    x: outer + 30,
-    y: axisTitleY,
-    value: percentMode ? "OBSERVED LIMIT DRAIN" : "ACTUAL TOKEN VOLUME",
+    x: plotLeft,
+    y: chartBlockTop + 18,
+    value: percentMode
+      ? "METER DRAIN · OBSERVED TOTAL, ESTIMATED MODEL SPLIT"
+      : "TOKEN VOLUME · ACTUAL",
     fill: COLORS.leftAxis,
-    size: 12,
-    anchor: "middle",
-    spacing: "2",
-  }).replace("<text ", `<text transform="rotate(-90 ${outer + 30} ${axisTitleY})" `));
+    size: 11.5,
+    spacing: "1.25",
+  }));
   if (hasLine) {
     elements.push(svgText({
-      x: width - outer - 6,
-      y: axisTitleY,
-      value: "WEEKLY METER REMAINING (%)",
+      x: plotRight,
+      y: chartBlockTop + 18,
+      value: "WEEKLY METER · REMAINING",
       fill: COLORS.meterAxis,
-      size: 12,
-      anchor: "middle",
-      spacing: "2",
-    }).replace("<text ", `<text transform="rotate(90 ${width - outer - 6} ${axisTitleY})" `));
+      size: 11.5,
+      anchor: "end",
+      spacing: "1.25",
+    }));
   }
 
   // ---- Bars ----
@@ -1043,10 +1095,21 @@ export function renderTrendImage({
       const fastHeight = fastValue > 0 && value > 0
         ? segmentHeight * Math.min(1, fastValue / value)
         : 0;
-      elements.push(svgRect(x, y, barWidth, segmentHeight - fastHeight, { fill: baseColor }));
+      elements.push(svgRect(x, y, barWidth, segmentHeight - fastHeight, {
+        fill: baseColor,
+        "data-series": "usage-bars",
+        "data-model": model,
+        "data-value": value,
+        "data-unit": percentMode ? "meter-points" : "tokens",
+      }));
       if (fastHeight > 0.5) {
         elements.push(svgRect(x, y + segmentHeight - fastHeight, barWidth, fastHeight, {
           fill: fastShade(baseColor),
+          "data-series": "usage-bars",
+          "data-model": model,
+          "data-value": fastValue,
+          "data-unit": "tokens",
+          "data-tier": "fast",
         }));
       }
       const valueLabel = percentMode ? percent(value) : compact(value);
@@ -1094,68 +1157,112 @@ export function renderTrendImage({
       cycle.push(point);
       cycles.set(point.cycle, cycle);
     }
-    const orderedCycles = [...cycles.values()].sort(
-      (left, right) => left[0].timestampMs - right[0].timestampMs,
+    const orderedCycles = [...cycles.entries()].sort(
+      (left, right) => left[1][0].timestampMs - right[1][0].timestampMs,
     );
 
     resetMarks = resetsInRange
       .filter((reset) => reset.kind !== "start")
-      .map((reset) => {
-        // Nudge a reset that lands inside a column into the gutter to its
-        // right, so the dashed break never crosses the bar or its total.
-        let x = xForTimestamp(Math.max(bounds.start.getTime(), reset.timestampMs));
-        const binIndex = Math.floor((x - plotLeft) / slotWidth);
-        const barRight = plotLeft + (binIndex + 0.5) * slotWidth + barWidth / 2;
-        if (x >= barRight - barWidth && x <= barRight) {
-          x = Math.min(barRight + 14, plotRight - 4);
+      .map((reset) => ({
+        ...reset,
+        x: xForTimestamp(Math.max(bounds.start.getTime(), reset.timestampMs)),
+        label: reset.kind === "weekly-expiry"
+          ? "RESET · 100%"
+          : "RESTART · 100%",
+      }));
+    const resetByCycle = new Map(resetMarks.map((reset) => [reset.cycle, reset]));
+    const resetLabels = (() => {
+      const maximum = 4;
+      if (resetMarks.length <= maximum) return resetMarks;
+      const selected = new Map();
+      const add = (reset) => {
+        if (reset) selected.set(reset.cycle, reset);
+      };
+      const scheduled = resetMarks.filter(
+        (reset) => reset.kind === "weekly-expiry",
+      );
+      if (scheduled.length >= maximum) {
+        for (let index = 0; index < maximum; index += 1) {
+          add(scheduled[Math.round((index / (maximum - 1)) * (scheduled.length - 1))]);
         }
-        return {
-          x,
-          label: reset.kind === "weekly-expiry" ? "RESET 100%" : "RESTART 100%",
-        };
-      });
+      } else {
+        scheduled.forEach(add);
+        add(resetMarks[0]);
+        add(resetMarks.findLast((reset) => reset.kind !== "weekly-expiry"));
+        for (let index = 1; selected.size < maximum && index < resetMarks.length - 1; index += 1) {
+          const candidateIndex = Math.round(
+            (index / (maximum - 1)) * (resetMarks.length - 1),
+          );
+          add(resetMarks[candidateIndex]);
+        }
+      }
+      return [...selected.values()]
+        .sort((left, right) => left.x - right.x)
+        .slice(-maximum);
+    })();
+    const labeledResetCycles = new Set(resetLabels.map((reset) => reset.cycle));
 
-    for (const [cycleIndex, cyclePoints] of orderedCycles.entries()) {
+    for (const [cycleIndex, [cycleId, cyclePoints]] of orderedCycles.entries()) {
+      const points = cyclePoints.map((point) => ({
+        x: xForTimestamp(point.timestampMs),
+        y: yForRemaining(point.remainingPercent),
+        remainingPercent: point.remainingPercent,
+        timestampMs: point.timestampMs,
+      }));
+      const cycleReset = resetByCycle.get(cycleId);
+      if (
+        cycleReset &&
+        points.length &&
+        cycleReset.timestampMs < points[0].timestampMs
+      ) {
+        points.unshift({
+          x: cycleReset.x,
+          y: yForRemaining(100),
+          remainingPercent: 100,
+          timestampMs: cycleReset.timestampMs,
+          syntheticReset: true,
+        });
+      }
+
+      // Carry the previous reading to the exact reset boundary. The former
+      // renderer stopped at the last observation and restarted at a nudged
+      // marker, leaving a visible gap that looked like a broken series.
+      const nextCycleId = orderedCycles[cycleIndex + 1]?.[0];
+      const nextReset = resetByCycle.get(nextCycleId);
+      const lastPoint = points.at(-1);
+      if (
+        nextReset &&
+        lastPoint &&
+        lastPoint.timestampMs < nextReset.timestampMs
+      ) {
+        points.push({
+          ...lastPoint,
+          x: nextReset.x,
+          timestampMs: nextReset.timestampMs,
+          carriedToReset: true,
+        });
+      }
+
       // Thin to at most one point per 2px so the path stays light while the
       // spline still follows every meaningful movement.
       const thinned = [];
-      for (const point of cyclePoints) {
-        const x = xForTimestamp(point.timestampMs);
-        const y = yForRemaining(point.remainingPercent);
+      for (const point of points) {
+        const { x, y } = point;
         const previous = thinned.at(-1);
         if (previous && x - previous.x < 2) {
-          previous.y = y;
-          previous.remainingPercent = point.remainingPercent;
-          previous.timestampMs = point.timestampMs;
-        } else {
-          thinned.push({
-            x,
-            y,
-            remainingPercent: point.remainingPercent,
-            timestampMs: point.timestampMs,
-          });
-        }
-      }
-      if (cycleIndex > 0 && thinned.length) {
-        const reset = resetMarks[cycleIndex - 1];
-        if (reset) {
-          // Observations between the true reset moment and the nudged break
-          // would draw left of the dashed line; drop them when enough of the
-          // cycle remains to its right.
-          const beyond = thinned.filter((point) => point.x > reset.x + 1);
-          if (beyond.length >= 2) thinned.splice(0, thinned.length - beyond.length);
-          if (reset.x < thinned[0].x - 1) {
-            thinned.unshift({
-              x: reset.x,
-              y: yForRemaining(100),
-              synthetic: true,
-            });
+          if (previous.syntheticReset && Math.abs(previous.y - y) > 0.5) {
+            thinned.push({ ...point, x: Math.max(x, previous.x + 0.75) });
+          } else {
+            Object.assign(previous, point);
           }
+        } else {
+          thinned.push({ ...point });
         }
       }
       const path = monotonePath(thinned);
       if (path) {
-        elements.push(`<path d="${path}" fill="none" stroke="${COLORS.line}" stroke-width="3" stroke-linecap="round"/>`);
+        elements.push(`<path d="${path}" fill="none" stroke="${COLORS.background}" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round" opacity=".88" clip-path="url(#trend-plot-clip)"/>`);
+        elements.push(`<path d="${path}" fill="none" stroke="${COLORS.line}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" clip-path="url(#trend-plot-clip)" data-series="weekly-meter" data-cycle="${escapeXml(cycleId)}"/>`);
         lineSegments.push(thinned);
       }
     }
@@ -1186,59 +1293,102 @@ export function renderTrendImage({
         x: xForTimestamp(point.timestampMs),
         y: yForRemaining(point.remainingPercent),
         remainingPercent: point.remainingPercent,
+        cycle: point.cycle,
       });
     }
     for (const dot of binDots) {
-      elements.push(`<circle cx="${dot.x.toFixed(2)}" cy="${dot.y.toFixed(2)}" r="4" fill="${COLORS.line}"/>`);
+      elements.push(`<circle cx="${dot.x.toFixed(2)}" cy="${dot.y.toFixed(2)}" r="3.5" fill="${COLORS.line}" stroke="${COLORS.background}" stroke-width="1.5"/>`);
     }
 
     // Stagger dense reset labels across lanes: a label joins the first lane
     // whose previous label sits far enough to its left.
     const laneRight = [];
     for (const reset of resetMarks) {
-      elements.push(`<line x1="${reset.x.toFixed(2)}" y1="${plotTop}" x2="${reset.x.toFixed(2)}" y2="${plotBottom}" stroke="rgba(246,183,60,.5)" stroke-width="2" stroke-dasharray="5 6"/>`);
-      let lane = laneRight.findIndex((right) => reset.x - right >= 112);
+      const resetBinIndex = Math.max(
+        0,
+        Math.min(binCount - 1, Math.floor((reset.x - plotLeft) / slotWidth)),
+      );
+      const resetBar = barGeometry[resetBinIndex];
+      const crossesBar = resetBar &&
+        reset.x >= resetBar.x - 2 &&
+        reset.x <= resetBar.x + barWidth + 2;
+      const resetLineBottom = crossesBar
+        ? Math.max(plotTop + 36, resetBar.topY - 8)
+        : plotBottom;
+      elements.push(`<line x1="${reset.x.toFixed(2)}" y1="${plotTop}" x2="${reset.x.toFixed(2)}" y2="${resetLineBottom.toFixed(2)}" stroke="rgba(246,183,60,.48)" stroke-width="1.5" stroke-dasharray="5 6"/>`);
+      if (!labeledResetCycles.has(reset.cycle)) continue;
+      const labelWidth = textWidth(reset.label, 11, 700) + 14;
+      const labelCenterX = Math.max(
+        plotLeft + labelWidth / 2,
+        Math.min(plotRight - labelWidth / 2, reset.x),
+      );
+      const labelLeft = labelCenterX - labelWidth / 2;
+      let lane = laneRight.findIndex((right) => labelLeft - right >= 8);
       if (lane < 0) {
         lane = laneRight.length < 3
           ? laneRight.length
           : laneRight.indexOf(Math.min(...laneRight));
       }
-      laneRight[lane] = reset.x;
+      laneRight[lane] = labelCenterX + labelWidth / 2;
+      const labelBaseline = plotTop + 20 + lane * 21;
+      elements.push(svgRect(
+        labelCenterX - labelWidth / 2,
+        labelBaseline - 14,
+        labelWidth,
+        19,
+        {
+          rx: 5,
+          fill: COLORS.background,
+          stroke: "rgba(246,183,60,.42)",
+          "stroke-width": 1,
+        },
+      ));
       elements.push(svgText({
-        x: reset.x,
-        y: chartBlockTop + 26 - lane * 16,
+        x: labelCenterX,
+        y: labelBaseline,
         value: reset.label,
         fill: COLORS.line,
-        size: 13,
+        size: 11,
+        weight: 700,
         anchor: "middle",
         mono: true,
       }));
     }
 
-    // Callout pills: at most four, spread across the observed dots; the last
-    // one sits under its own point so it never covers a post-reset stroke.
-    const pillSources = binDots;
-    let picked = pillSources;
-    if (pillSources.length > 4) {
-      const lastIndex = pillSources.length - 1;
-      const indexes = [...new Set([
-        0,
-        Math.round(lastIndex / 3),
-        Math.round((2 * lastIndex) / 3),
-        lastIndex,
-      ])];
-      picked = indexes.map((index) => pillSources[index]);
+    // Keep the line readable with no more than two decision-useful labels:
+    // the first reading after the latest reset (or the range start when no
+    // reset exists) and the latest reading.
+    const picked = [];
+    const latestReset = resetMarks.at(-1);
+    if (latestReset) {
+      const afterReset = binDots.find((dot) => dot.x > latestReset.x + 2);
+      if (afterReset) picked.push(afterReset);
+    } else if (binDots.length) {
+      picked.push(binDots[0]);
     }
-    pills = picked.map((dot, pickIndex) => {
+    if (binDots.length > 1) picked.push(binDots.at(-1));
+    const uniquePicks = [...new Map(picked.map((dot) => [dot.binIndex, dot])).values()];
+    pills = uniquePicks.map((dot, pickIndex) => {
       const label = meterLabel(dot.remainingPercent);
-      const pillWidth = label.length * 8.4 + 18;
-      const below = pickIndex === picked.length - 1;
-      let x = below ? dot.x - pillWidth / 2 : dot.x + barWidth / 2 + 10;
-      if (x + pillWidth > plotRight + 30) x = dot.x - pillWidth - barWidth / 2 - 10;
-      const centerY = below
-        ? Math.min(plotBottom - 14, dot.y + 26)
-        : Math.max(plotTop + 14, dot.y - 24);
-      return { x, y: centerY - 13, w: pillWidth, h: 26, tx: x + pillWidth / 2, ty: centerY + 5, label };
+      const pillWidth = textWidth(label, 12, 700) + 18;
+      const preferLeft = pickIndex === uniquePicks.length - 1 ||
+        dot.x + pillWidth + 16 > plotRight;
+      let x = preferLeft ? dot.x - pillWidth - 13 : dot.x + 13;
+      x = Math.max(plotLeft + 3, Math.min(plotRight - pillWidth - 3, x));
+      let y = dot.y - 32;
+      if (y < plotTop + 7) y = dot.y + 11;
+      y = Math.max(plotTop + 7, Math.min(plotBottom - 31, y));
+      return {
+        x,
+        y,
+        w: pillWidth,
+        h: 24,
+        tx: x + pillWidth / 2,
+        ty: y + 16,
+        label,
+        dotX: dot.x,
+        dotY: dot.y,
+      };
     });
   }
 
@@ -1320,18 +1470,22 @@ export function renderTrendImage({
     }
   }
   for (const pill of pills) {
+    const leaderX = pill.x > pill.dotX ? pill.x : pill.x + pill.w;
+    const leaderY = Math.max(pill.y + 6, Math.min(pill.y + pill.h - 6, pill.dotY));
+    elements.push(`<line x1="${pill.dotX.toFixed(2)}" y1="${pill.dotY.toFixed(2)}" x2="${leaderX.toFixed(2)}" y2="${leaderY.toFixed(2)}" stroke="rgba(246,183,60,.58)" stroke-width="1"/>`);
     elements.push(svgRect(pill.x, pill.y, pill.w, pill.h, {
-      rx: 6,
+      rx: 5,
       fill: COLORS.background,
       stroke: COLORS.line,
-      "stroke-width": 1.2,
+      "stroke-width": 1,
     }));
     elements.push(svgText({
       x: pill.tx,
       y: pill.ty,
       value: pill.label,
       fill: COLORS.line,
-      size: 13,
+      size: 12,
+      weight: 700,
       anchor: "middle",
       mono: true,
     }));
@@ -1374,8 +1528,8 @@ export function renderTrendImage({
       svgRect(legendX, legendBaseline - 6, 20, 3, { fill: COLORS.line }),
       20,
       percentMode
-        ? "Bars = observed meter drops · line = weekly meter remaining (%)"
-        : "Observed weekly meter remaining (%)",
+        ? "Amber = observed meter remaining · columns = estimated model split"
+        : "Weekly meter remaining · observed",
     );
   }
 
@@ -1575,8 +1729,15 @@ export function renderTrendImage({
   const projectBarX = nameX + 190 + rowGap;
   const tokensRight = leftColumnRight - 62 - rowGap;
   const projectBarWidth = tokensRight - (86 + rowGap) - projectBarX;
+  const projectNameWidth = projectBarX - nameX - rowGap;
   displayRows.forEach((row, index) => {
     const centerY = bottomTop + 29 + index * 29 + 9;
+    const projectName = truncateText(
+      row.name,
+      projectNameWidth,
+      15,
+      row.muted ? 400 : 700,
+    );
     if (row.rank) {
       elements.push(svgText({
         x: rankX,
@@ -1590,7 +1751,7 @@ export function renderTrendImage({
     elements.push(svgText({
       x: nameX,
       y: centerY + 5,
-      value: row.name,
+      value: projectName,
       fill: row.muted ? COLORS.muted : COLORS.ink,
       size: 15,
       weight: row.muted ? 400 : 700,
