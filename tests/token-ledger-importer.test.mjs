@@ -239,3 +239,168 @@ test("private snapshots replace atomically and enforce mode 0600", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+function turnStart(timestamp, turnId, model = "gpt-5.5") {
+  return [
+    {
+      timestamp,
+      type: "event_msg",
+      payload: {
+        type: "task_started",
+        turn_id: turnId,
+        started_at: Date.parse(timestamp) / 1000,
+      },
+    },
+    {
+      timestamp,
+      type: "turn_context",
+      payload: { turn_id: turnId, model, effort: "medium" },
+    },
+  ];
+}
+
+test("source labels resolve structured, encoded, and plain thread sources", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
+  const parentId = "99999999-9999-4999-8999-999999999999";
+  const threads = [
+    {
+      id: "44444444-4444-4444-8444-444444444444",
+      turn: "turn-a",
+      timestamp: "2026-08-18T10:00:00.000Z",
+      total: 100,
+      source: { subagent: { thread_spawn: { parent_thread_id: parentId } } },
+      expected: { source: "subagent", useType: "subagent" },
+    },
+    {
+      id: "55555555-5555-4555-8555-555555555555",
+      turn: "turn-b",
+      timestamp: "2026-08-18T11:00:00.000Z",
+      total: 200,
+      source: "exec",
+      expected: { source: "cli", useType: "cli" },
+    },
+    {
+      id: "66666666-6666-4666-8666-666666666666",
+      turn: "turn-c",
+      timestamp: "2026-08-18T12:00:00.000Z",
+      total: 300,
+      source: '{"subagent":{"id":"delegated"}}',
+      expected: { source: "subagent", useType: "subagent" },
+    },
+    {
+      id: "77777777-7777-4777-8777-777777777777",
+      turn: "turn-d",
+      timestamp: "2026-08-18T13:00:00.000Z",
+      total: 400,
+      source: "a custom launcher label that runs far past forty characters",
+      expected: {
+        source: "a custom launcher label that runs far pa",
+        useType: "interactive",
+      },
+    },
+    {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      turn: "turn-e",
+      timestamp: "2026-08-18T14:00:00.000Z",
+      total: 500,
+      source: { toString: null, valueOf: null },
+      expected: { source: "unknown", useType: "unknown" },
+    },
+  ];
+  try {
+    const rolloutDirectory = resolve(root, "sessions", "2026", "08", "18");
+    await mkdir(rolloutDirectory, { recursive: true });
+    for (const thread of threads) {
+      await writeFile(
+        resolve(rolloutDirectory, `rollout-${thread.id}.jsonl`),
+        serialize([
+          {
+            timestamp: thread.timestamp,
+            type: "session_meta",
+            payload: { id: thread.id, source: thread.source },
+          },
+          ...turnStart(thread.timestamp, thread.turn),
+          tokenCount(thread.timestamp, thread.total, thread.total),
+        ]),
+      );
+    }
+
+    const snapshot = await collectUsage({
+      output: resolve(root, "snapshot.json"),
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+    assert.equal(snapshot.events.length, threads.length);
+    for (const [index, thread] of threads.entries()) {
+      assert.equal(snapshot.events[index].source, thread.expected.source);
+      assert.equal(snapshot.events[index].useType, thread.expected.useType);
+    }
+    const subagentThread = snapshot.threads.find(
+      (thread) => thread.id === threads[0].id,
+    );
+    assert.equal(subagentThread.parentThreadId, parentId);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("malformed usage and rate-limit payloads are ignored safely", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
+  const threadId = "88888888-8888-4888-8888-888888888888";
+  const timestamp = "2026-08-18T10:00:00.000Z";
+  try {
+    const rolloutDirectory = resolve(root, "sessions", "2026", "08", "18");
+    await mkdir(rolloutDirectory, { recursive: true });
+    await writeFile(
+      resolve(rolloutDirectory, `rollout-${threadId}.jsonl`),
+      serialize([
+        ...turnStart(timestamp, "turn-1"),
+        {
+          timestamp,
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            rate_limits: "garbage",
+            info: { last_token_usage: "garbage", total_token_usage: 7 },
+          },
+        },
+        {
+          timestamp,
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            rate_limits: {
+              primary: {
+                window_minutes: 10080,
+                used_percent: 12.5,
+                resets_at: Date.parse("2026-08-24T00:00:00.000Z") / 1000,
+              },
+              plan_type: "plus",
+              limit_name: "weekly",
+            },
+          },
+        },
+        tokenCount("2026-08-18T10:00:01.000Z", 100, 100),
+      ]),
+    );
+
+    const snapshot = await collectUsage({
+      output: resolve(root, "snapshot.json"),
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+    assert.equal(snapshot.events.length, 1);
+    assert.equal(snapshot.events[0].totalTokens, 100);
+    assert.equal(snapshot.quotaObservations.length, 1);
+    const quota = snapshot.quotaObservations[0];
+    assert.equal(quota.usedPercent, 12.5);
+    assert.equal(quota.windowMinutes, 10080);
+    assert.equal(quota.planType, "plus");
+    assert.equal(quota.limitName, "weekly");
+    assert.equal(snapshot.coverage.parseErrors, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

@@ -86,3 +86,10 @@ test("rejects a reachable dev-only package", () => {
     /marked as dev-only/,
   );
 });
+
+test("rejects a lockfile without a packages map", () => {
+  assert.throws(
+    () => selectProductionPackageEntries({}, { name: "tledger" }),
+    /has no packages map/,
+  );
+});
