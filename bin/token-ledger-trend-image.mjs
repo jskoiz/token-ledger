@@ -456,6 +456,7 @@ export function renderTrendImage({
   const generatedAtMs = new Date(snapshot.generatedAt).getTime();
   const paceLines = [];
   let paceNote = null;
+  let paceRunwayBar = null;
   const dailyAverage = totalTokens / Math.max(1, days);
   if (hasLine && meterUsable && latestQuotaPoint && totalTokens > 0) {
     const tokensPerPercent = totalTokens / burn.totalPercent;
@@ -492,6 +493,7 @@ export function renderTrendImage({
     if (runwayDays !== null && daysToReset !== null && daysToReset > 0) {
       const resetIn = Math.max(1, Math.round(daysToReset));
       const resetInLabel = `${resetIn} ${resetIn === 1 ? "day" : "days"}`;
+      paceRunwayBar = { runwayDays, daysToReset, resetInLabel };
       const gap = runwayDays - daysToReset;
       if (Math.abs(gap) <= 1.5) {
         paceNote = `Next weekly reset in ${resetInLabel} — the current pace lands within ~${Math.max(1, Math.round(Math.abs(gap)))} day of it.`;
@@ -513,15 +515,23 @@ export function renderTrendImage({
   }
 
   // ---- Layout ----
-  // One uniform-height top band: five compact stat cards and a pace panel.
+  // One uniform-height top band: a 2x2 quad of stat cells, the weekly meter
+  // as its own panel, and a pace panel with a runway timeline.
   const headerBaseline = 53;
   const cardTop = 82;
   const topGap = 24;
-  const pacePanelWidth = 400;
+  const hasMeterCard = Boolean(hasLine && latestQuotaPoint);
+  const statCardCount = modelCards.length + (hasFast ? 1 : 0);
+  const pacePanelWidth = 432;
   const pacePanelX = contentRight - pacePanelWidth;
   const paceTextX = pacePanelX + 18;
   const paceInnerWidth = pacePanelWidth - 36;
-  const cardsRegionWidth = contentWidth - pacePanelWidth - topGap;
+  const meterPanelWidth = hasMeterCard ? 240 : 0;
+  const quadWidth = contentWidth - pacePanelWidth - topGap -
+    (hasMeterCard ? meterPanelWidth + topGap : 0);
+  const meterPanelX = outer + (statCardCount ? quadWidth + topGap : 0);
+  const quadColumns = statCardCount >= 2 ? 2 : 1;
+  const quadRows = Math.max(1, Math.ceil(statCardCount / quadColumns));
   const paceNoteLines = [];
   if (paceNote) {
     let current = "";
@@ -536,14 +546,13 @@ export function renderTrendImage({
     }
     if (current) paceNoteLines.push(current);
   }
-  // Baseline offsets inside the pace panel; the secondary stats sit as a
-  // two-column pair under the headline.
-  const paceStatBottom = paceLines.length > 1 ? 113 : 64;
+  // Baseline offsets inside the pace panel: headline, optional runway
+  // timeline, the two-column stat pair, then the note.
+  const paceStatValueBaseline = 54 + (paceRunwayBar ? 60 : 34);
+  const paceNoteStart = (paceLines.length > 1 ? paceStatValueBaseline + 16 : 54) + 24;
   const topRowHeight = Math.max(
-    150,
-    paceStatBottom +
-      (paceNoteLines.length ? 25 + (paceNoteLines.length - 1) * 16 + 6 : 0) +
-      14,
+    hasMeterCard ? 170 : 150,
+    paceNoteStart + (paceNoteLines.length - 1) * 16 + 14,
   );
   const chartBlockTop = cardTop + topRowHeight + 16;
   const plotTop = chartBlockTop + 40;
@@ -600,6 +609,7 @@ export function renderTrendImage({
 
   // ---- KPI cards ----
   const cards = [];
+  let meterCard = null;
   for (const { model, tokens } of modelCards) {
     const share = totalTokens > 0 ? (tokens / totalTokens) * 100 : 0;
     const priorValue = priorTotals.get(model) ?? 0;
@@ -657,7 +667,7 @@ export function renderTrendImage({
       : latestResetsAtSec
         ? `resets ${timestampDateLabel(latestResetsAtSec * 1_000, bounds.timeZone)}`
         : "no reset in range";
-    cards.push({
+    meterCard = ({
       swatch: COLORS.line,
       label: "Weekly meter",
       labelColor: COLORS.meterAxis,
@@ -675,58 +685,46 @@ export function renderTrendImage({
     });
   }
   if (cards.length) {
-    // One segmented strip: the stats share a panel with hairline dividers so
-    // the band reads as two calm blocks — stats + pace.
-    const segWidth = cardsRegionWidth / cards.length;
-    elements.push(svgRect(outer, cardTop, cardsRegionWidth, topRowHeight, {
+    // A 2x2 quad of stat cells inside one panel with hairline dividers.
+    const cellWidth = quadWidth / quadColumns;
+    const cellHeight = topRowHeight / quadRows;
+    elements.push(svgRect(outer, cardTop, quadWidth, topRowHeight, {
       rx: 7,
       fill: COLORS.panel,
     }));
+    if (quadColumns > 1) {
+      const dividerX = outer + cellWidth;
+      elements.push(`<line x1="${dividerX.toFixed(2)}" y1="${cardTop + 1}" x2="${dividerX.toFixed(2)}" y2="${cardTop + topRowHeight - 1}" stroke="${COLORS.panelBorder}" stroke-width="1"/>`);
+    }
+    if (quadRows > 1) {
+      const dividerY = cardTop + cellHeight;
+      elements.push(`<line x1="${outer + 1}" y1="${dividerY.toFixed(2)}" x2="${(outer + quadWidth - 1).toFixed(2)}" y2="${dividerY.toFixed(2)}" stroke="${COLORS.panelBorder}" stroke-width="1"/>`);
+    }
     cards.forEach((card, index) => {
-      const segX = outer + index * segWidth;
-      const contentX = segX + 17;
-      const innerWidth = segWidth - 34;
-      const tinted = card.panel !== COLORS.panel;
-      if (tinted) {
-        // The amber meter segment hugs the strip's rounded corner.
-        if (index === 0 && cards.length === 1) {
-          elements.push(svgRect(segX, cardTop, segWidth, topRowHeight, {
-            rx: 7,
-            fill: card.panel,
-          }));
-        } else {
-          const radius = 6.5;
-          const tintWidth = segWidth - 0.5;
-          const tintHeight = topRowHeight - 1;
-          const straightWidth = (tintWidth - radius).toFixed(2);
-          const straightHeight = (tintHeight - 2 * radius).toFixed(2);
-          elements.push(`<path d="M ${segX.toFixed(2)} ${(cardTop + 0.5).toFixed(2)} h ${straightWidth} a ${radius} ${radius} 0 0 1 ${radius} ${radius} v ${straightHeight} a ${radius} ${radius} 0 0 1 -${radius} ${radius} h -${straightWidth} z" fill="${card.panel}"/>`);
-        }
-      }
-      if (index > 0) {
-        elements.push(`<line x1="${segX.toFixed(2)}" y1="${cardTop + 1}" x2="${segX.toFixed(2)}" y2="${cardTop + topRowHeight - 1}" stroke="${tinted ? "rgba(246,183,60,.35)" : COLORS.panelBorder}" stroke-width="1"/>`);
-      }
-      elements.push(`<circle cx="${(contentX + 3.5).toFixed(2)}" cy="${cardTop + 20}" r="3.5" fill="${card.swatch}"/>`);
+      const cellX = outer + (index % quadColumns) * cellWidth;
+      const cellY = cardTop + Math.floor(index / quadColumns) * cellHeight;
+      const contentX = cellX + 17;
+      const innerWidth = cellWidth - 34;
+      elements.push(`<circle cx="${(contentX + 3.5).toFixed(2)}" cy="${(cellY + 19).toFixed(2)}" r="3.5" fill="${card.swatch}"/>`);
       elements.push(svgText({
         x: contentX + 15,
-        y: cardTop + 25,
+        y: cellY + 23,
         value: card.label.toUpperCase(),
         fill: card.labelColor,
         size: 10.5,
         spacing: ".9",
       }));
-      // The value cluster anchors to the strip's bottom edge.
-      const valueBaseline = cardTop + topRowHeight - 51;
+      const valueBaseline = cellY + cellHeight / 2 + 9;
       elements.push(svgText({
         x: contentX,
         y: valueBaseline,
         value: card.value,
         fill: card.valueColor,
-        size: 24,
+        size: 21,
         weight: 800,
-        spacing: "-0.55",
+        spacing: "-0.5",
       }));
-      const valueWidth = textWidth(card.value, 24, 800);
+      const valueWidth = textWidth(card.value, 21, 800);
       if (card.chip) {
         const chipTextWidth = textWidth(card.chip.text, 10, 700);
         const chipX = contentX + valueWidth + 7;
@@ -751,29 +749,98 @@ export function renderTrendImage({
           size: 10.5,
         }));
       }
+      // Caption on the cell's bottom line, share bar filling the width beside it.
       const caption = card.captionShort && textWidth(card.caption, 10.5) > innerWidth
         ? card.captionShort
         : card.caption;
+      const captionBaseline = cellY + cellHeight - 13;
       elements.push(svgText({
         x: contentX,
-        y: cardTop + topRowHeight - 29,
+        y: captionBaseline,
         value: caption,
         fill: COLORS.muted,
         size: 10.5,
       }));
-      const barY = cardTop + topRowHeight - 17;
-      elements.push(svgRect(contentX, barY, innerWidth, 3, { rx: 1.5, fill: card.track }));
-      const fillWidth = (Math.min(100, Math.max(0, card.barPercent)) / 100) * innerWidth;
-      if (fillWidth > 0) {
-        elements.push(svgRect(contentX, barY, fillWidth, 3, { rx: 1.5, fill: card.fill }));
+      const barStart = contentX + textWidth(caption, 10.5) + 14;
+      const barWidthAvail = contentX + innerWidth - barStart;
+      if (barWidthAvail >= 50) {
+        elements.push(svgRect(barStart, captionBaseline - 8, barWidthAvail, 3, {
+          rx: 1.5,
+          fill: card.track,
+        }));
+        const fillWidth = (Math.min(100, Math.max(0, card.barPercent)) / 100) * barWidthAvail;
+        if (fillWidth > 0) {
+          elements.push(svgRect(barStart, captionBaseline - 8, fillWidth, 3, {
+            rx: 1.5,
+            fill: card.fill,
+          }));
+        }
       }
     });
-    elements.push(svgRect(outer, cardTop, cardsRegionWidth, topRowHeight, {
+    elements.push(svgRect(outer, cardTop, quadWidth, topRowHeight, {
       rx: 7,
       fill: "none",
       stroke: COLORS.panelBorder,
       "stroke-width": 1,
     }));
+  }
+
+  // ---- Weekly meter panel ----
+  if (meterCard) {
+    elements.push(svgRect(meterPanelX, cardTop, meterPanelWidth, topRowHeight, {
+      rx: 7,
+      fill: meterCard.panel,
+      stroke: meterCard.border,
+      "stroke-width": 1,
+    }));
+    const meterContentX = meterPanelX + 17;
+    const meterInnerWidth = meterPanelWidth - 34;
+    elements.push(`<circle cx="${(meterContentX + 3.5).toFixed(2)}" cy="${cardTop + 19}" r="3.5" fill="${meterCard.swatch}"/>`);
+    elements.push(svgText({
+      x: meterContentX + 15,
+      y: cardTop + 23,
+      value: meterCard.label.toUpperCase(),
+      fill: meterCard.labelColor,
+      size: 10.5,
+      spacing: ".9",
+    }));
+    const meterValueBaseline = cardTop + topRowHeight / 2 + 14;
+    elements.push(svgText({
+      x: meterContentX,
+      y: meterValueBaseline,
+      value: meterCard.value,
+      fill: meterCard.valueColor,
+      size: 28,
+      weight: 800,
+      spacing: "-0.6",
+    }));
+    elements.push(svgText({
+      x: meterContentX + textWidth(meterCard.value, 28, 800) + 10,
+      y: meterValueBaseline,
+      value: meterCard.suffix,
+      fill: COLORS.secondary,
+      size: 11,
+    }));
+    elements.push(svgText({
+      x: meterContentX,
+      y: cardTop + topRowHeight - 31,
+      value: meterCard.caption,
+      fill: COLORS.muted,
+      size: 10.5,
+    }));
+    const meterBarY = cardTop + topRowHeight - 18;
+    elements.push(svgRect(meterContentX, meterBarY, meterInnerWidth, 4, {
+      rx: 2,
+      fill: meterCard.track,
+    }));
+    const meterFillWidth =
+      (Math.min(100, Math.max(0, meterCard.barPercent)) / 100) * meterInnerWidth;
+    if (meterFillWidth > 0) {
+      elements.push(svgRect(meterContentX, meterBarY, meterFillWidth, 4, {
+        rx: 2,
+        fill: meterCard.fill,
+      }));
+    }
   }
 
   // ---- Pace & runway panel (top right, same height as the cards) ----
@@ -785,7 +852,7 @@ export function renderTrendImage({
   }));
   elements.push(svgText({
     x: paceTextX,
-    y: cardTop + 24,
+    y: cardTop + 23,
     value: "PACE & RUNWAY",
     fill: COLORS.muted,
     size: 10.5,
@@ -794,7 +861,7 @@ export function renderTrendImage({
   const paceHeadline = paceLines[0];
   elements.push(svgText({
     x: paceTextX,
-    y: cardTop + 60,
+    y: cardTop + 54,
     value: paceHeadline.value,
     fill: paceHeadline.color,
     size: 26,
@@ -803,16 +870,56 @@ export function renderTrendImage({
   }));
   elements.push(svgText({
     x: paceTextX + textWidth(paceHeadline.value, 26, 800) + 10,
-    y: cardTop + 60,
+    y: cardTop + 54,
     value: paceHeadline.detail,
     fill: COLORS.muted,
     size: 12.5,
   }));
+  if (paceRunwayBar) {
+    // Runway timeline: amber fill = days of meter left, tick = the next
+    // weekly reset, both on a shared day scale.
+    const scaleDays = Math.max(paceRunwayBar.runwayDays, paceRunwayBar.daysToReset) * 1.06;
+    const trackY = cardTop + 62;
+    elements.push(svgRect(paceTextX, trackY, paceInnerWidth, 5, {
+      rx: 2.5,
+      fill: COLORS.track,
+    }));
+    const runwayWidth = Math.min(1, paceRunwayBar.runwayDays / scaleDays) * paceInnerWidth;
+    if (runwayWidth > 0) {
+      elements.push(svgRect(paceTextX, trackY, runwayWidth, 5, {
+        rx: 2.5,
+        fill: COLORS.line,
+      }));
+    }
+    const tickX = paceTextX +
+      Math.min(1, paceRunwayBar.daysToReset / scaleDays) * paceInnerWidth;
+    elements.push(`<line x1="${tickX.toFixed(2)}" y1="${trackY - 3}" x2="${tickX.toFixed(2)}" y2="${trackY + 8}" stroke="${COLORS.secondary}" stroke-width="2"/>`);
+    elements.push(svgText({
+      x: paceTextX,
+      y: cardTop + 84,
+      value: "now",
+      fill: COLORS.muted,
+      size: 10.5,
+    }));
+    const resetLabel = `reset in ${paceRunwayBar.resetInLabel}`;
+    const resetLabelX = Math.max(
+      paceTextX + 40,
+      Math.min(tickX, paceTextX + paceInnerWidth - textWidth(resetLabel, 10.5) / 2 - 2),
+    );
+    elements.push(svgText({
+      x: resetLabelX,
+      y: cardTop + 84,
+      value: resetLabel,
+      fill: COLORS.muted,
+      size: 10.5,
+      anchor: "middle",
+    }));
+  }
   paceLines.slice(1).forEach((line, index) => {
     const columnX = paceTextX + index * (paceInnerWidth / 2 + 8);
     elements.push(svgText({
       x: columnX,
-      y: cardTop + 96,
+      y: cardTop + paceStatValueBaseline,
       value: line.value,
       fill: line.color,
       size: 17,
@@ -820,13 +927,13 @@ export function renderTrendImage({
     }));
     elements.push(svgText({
       x: columnX,
-      y: cardTop + 113,
+      y: cardTop + paceStatValueBaseline + 16,
       value: line.detail,
       fill: COLORS.muted,
       size: 11,
     }));
   });
-  let paceNoteBaseline = cardTop + paceStatBottom + 25;
+  let paceNoteBaseline = cardTop + paceNoteStart;
   for (const line of paceNoteLines) {
     elements.push(svgText({
       x: paceTextX,
