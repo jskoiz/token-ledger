@@ -947,6 +947,18 @@ export function snapshotCacheIsFresh(
   );
 }
 
+export function shouldCheckSourceFreshness(
+  options = {},
+  snapshotMtimeMs,
+  nowMs = Date.now(),
+) {
+  // PNG reports are expected to reflect every completed local call. Checking
+  // source mtimes is much cheaper than parsing the rollouts again; the full
+  // collector only runs when one of those sources actually changed.
+  return Boolean(options.view === "trend" && options.image) ||
+    !snapshotCacheIsFresh(snapshotMtimeMs, nowMs);
+}
+
 function snapshotAgeLabel(ageMs) {
   if (ageMs < 60 * 1_000) return "now";
   const minutes = Math.floor(ageMs / (60 * 1_000));
@@ -1005,7 +1017,7 @@ async function loadSnapshot(options) {
       `Could not inspect snapshot ${safeDisplayLabel(options.input, "snapshot")}: ${safeErrorMessage(error, [options.input])}`,
     );
   }
-  if (snapshotCacheIsFresh(snapshotStat.mtimeMs)) {
+  if (!shouldCheckSourceFreshness(options, snapshotStat.mtimeMs)) {
     return readSnapshot(options.input);
   }
 
@@ -1027,7 +1039,16 @@ async function loadSnapshot(options) {
   return readSnapshot(options.input);
 }
 
-function render(options, snapshot, bounds, events, rows, allRows, freshness) {
+function render(
+  options,
+  snapshot,
+  bounds,
+  events,
+  rows,
+  allRows,
+  freshness,
+  reportTimeMs,
+) {
   if (options.view === "trend") {
     if (options.image && options.cacheRate) {
       return renderCacheReportImage({
@@ -1044,7 +1065,7 @@ function render(options, snapshot, bounds, events, rows, allRows, freshness) {
         bounds,
         trend,
         days: options.trendDays,
-        options,
+        options: { ...options, reportTimeMs },
         projectRows: allRows,
       });
     }
@@ -1169,6 +1190,10 @@ export async function run(options, { nowMs } = {}) {
   if (writingImage) {
     process.stderr.write(`Token Ledger: generating ${imageLabel} PNG…\n`);
   }
+  const reportTimeMs = hasInjectedNow ? now.getTime() : Date.now();
+  const verifiedSourceTimeMs = options.autoRefresh && !options.inputExplicit
+    ? reportTimeMs
+    : undefined;
   const output = render(
     options,
     snapshot,
@@ -1178,8 +1203,9 @@ export async function run(options, { nowMs } = {}) {
     allRows,
     snapshotFreshness(
       snapshot,
-      hasInjectedNow ? now.getTime() : Date.now(),
+      reportTimeMs,
     ),
+    verifiedSourceTimeMs,
   );
   if (writingImage) {
     await mkdir(dirname(outputPath), { recursive: true });

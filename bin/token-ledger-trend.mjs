@@ -151,12 +151,20 @@ export function trendModelLabel(value) {
 
 export function weeklyQuotaObservations(snapshot = {}) {
   let observations = (snapshot.quotaObservations ?? [])
-    .map((observation) => ({
-      ...observation,
-      timestampMs: finiteTimestamp(observation.timestamp),
-      resetsAt: Number(observation.resetsAt),
-      usedPercent: Number(observation.usedPercent),
-    }))
+    .map((observation) => {
+      const timestampMs = finiteTimestamp(observation.timestamp);
+      const lastSeenAtMs = finiteTimestamp(observation.lastSeenAt);
+      return {
+        ...observation,
+        timestampMs,
+        observedThroughMs:
+          timestampMs === null
+            ? lastSeenAtMs
+            : Math.max(timestampMs, lastSeenAtMs ?? timestampMs),
+        resetsAt: Number(observation.resetsAt),
+        usedPercent: Number(observation.usedPercent),
+      };
+    })
     .filter(
       (observation) =>
         Number(observation.windowMinutes) === WEEK_MINUTES &&
@@ -277,6 +285,12 @@ export function normalizeQuotaTimeline(observations) {
           : Math.max(usedPercent, observation.usedPercent);
       normalized.push({
         ...observation,
+        observedThroughMs: Math.min(
+          Number.isFinite(observation.observedThroughMs)
+            ? observation.observedThroughMs
+            : observation.timestampMs,
+          nextFirstMs,
+        ),
         cycle,
         reset: !emitted && previousEpoch !== null,
         resetKind,
@@ -617,6 +631,7 @@ export function buildUsageTrend(snapshot = {}, bounds) {
     }
     points.push({
       timestampMs: observation.timestampMs,
+      observedThroughMs: observation.observedThroughMs,
       cycle: observation.cycle,
       usedPercent: observation.normalizedUsedPercent,
       remainingPercent: 100 - observation.normalizedUsedPercent,
@@ -645,15 +660,46 @@ export function buildUsageTrend(snapshot = {}, bounds) {
       (point) => point.timestampMs > startMs && point.timestampMs < endMs,
     ),
   );
-  const lastPoint = displayPoints.at(-1);
-  if (lastPoint) {
-    displayPoints.push({
-      ...lastPoint,
-      timestampMs: endMs,
-      observed: false,
-      carried: true,
-    });
+
+  // Repeated equal meter readings are compacted into an observed span. Extend
+  // each displayed cycle only through its last real sample; never synthesize a
+  // flat line through the unobserved remainder of the report range.
+  const sourcePointsByCycle = new Map();
+  for (const point of points) {
+    const cyclePoints = sourcePointsByCycle.get(point.cycle) ?? [];
+    cyclePoints.push(point);
+    sourcePointsByCycle.set(point.cycle, cyclePoints);
   }
+  const displayedCycles = new Set(displayPoints.map((point) => point.cycle));
+  for (const cycle of displayedCycles) {
+    const cyclePoints = sourcePointsByCycle.get(cycle) ?? [];
+    const displayedCyclePoints = displayPoints.filter(
+      (point) => point.cycle === cycle,
+    );
+    const lastPoint = displayedCyclePoints.at(-1);
+    if (!lastPoint || !cyclePoints.length) continue;
+    const observedThroughMs = Math.max(
+      ...cyclePoints.map((point) => point.observedThroughMs),
+    );
+    const nextResetMs = resets.find((reset) => reset.cycle === cycle + 1)
+      ?.timestampMs;
+    const crossesNextReset = Number.isFinite(nextResetMs) &&
+      observedThroughMs >= nextResetMs;
+    const endpointMs = Math.min(observedThroughMs, endMs);
+    if (!crossesNextReset && endpointMs > lastPoint.timestampMs) {
+      displayPoints.push({
+        ...lastPoint,
+        timestampMs: endpointMs,
+        observedThroughMs: endpointMs,
+        observed: true,
+        carried: false,
+        confirmation: true,
+      });
+    }
+  }
+  displayPoints.sort(
+    (left, right) => left.timestampMs - right.timestampMs || left.cycle - right.cycle,
+  );
 
   const hasUnattributed = methods.has("unattributed");
   let allocationMethod = "unavailable";
@@ -699,7 +745,7 @@ export function buildUsageTrend(snapshot = {}, bounds) {
     ).length,
     allocationMethod,
     observedThroughMs:
-      [...points].reverse().find((point) => point.timestampMs < endMs)
+      [...displayPoints].reverse().find((point) => point.observed)
         ?.timestampMs ?? null,
     rateCardAsOf: snapshot.provenance?.rateCardAsOf ?? RATE_CARD_AS_OF,
   };

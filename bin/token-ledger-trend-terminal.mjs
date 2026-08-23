@@ -166,7 +166,7 @@ function zonedMidnight(
   const [year, month, day] = dateParts(dateString);
   const utcGuess = Date.UTC(year, month - 1, day);
   const first = new Date(utcGuess - timeZoneOffsetMs(new Date(utcGuess), formatter));
-  return new Date(first.getTime() - timeZoneOffsetMs(first, formatter));
+  return new Date(utcGuess - timeZoneOffsetMs(first, formatter));
 }
 
 function localDateString(

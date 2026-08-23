@@ -159,7 +159,9 @@ named pools are not stitched into that meter. Remaining percentage,
 observation time, and the selected window are local observations; the reset
 type (weekly expiry versus restart) is derived by comparing the prior window's
 reset timestamp with the first reading of the new window. None of this is an
-official account-wide quota or billing record.
+official account-wide quota or billing record. The percentage comes from the
+newest OpenAI reading recorded in a completed local Codex response; Token
+Ledger does not invent a newer percentage from token counts.
 
 The exported snapshot contains token metadata, model/use-type labels, project
 labels, and display titles. It omits message bodies, reasoning text, tool
