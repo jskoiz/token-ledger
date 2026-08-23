@@ -490,3 +490,23 @@ test("no-known-value-widening traverses inherited interface dictionaries", async
 		result.output,
 	);
 });
+
+test("anti-slop respects finite mapped key remapping", async () => {
+	const result = await lintTypeScript(`
+		const finite: { [K in string as "id"]: unknown } = { id: "ready" };
+		const broad: { [K in string as K]: unknown } = { id: "ready" };
+		void finite;
+		void broad;
+	`);
+	assert.equal(result.status, 1, result.output);
+	assert.equal(
+		result.output.match(/anti-slop\(no-unsafe-dictionary-type\)/g)?.length,
+		1,
+		result.output,
+	);
+	assert.equal(
+		result.output.match(/anti-slop\(no-known-value-widening\)/g)?.length,
+		1,
+		result.output,
+	);
+});

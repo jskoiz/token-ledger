@@ -15,9 +15,15 @@ const functionBoundaryTypes = new Set([
   "TSEmptyBodyFunctionExpression",
 ]);
 
-function unwrapExpressionParentheses(expression                   )                    {
+function unwrapTransparentExpression(expression                   )                    {
   let current = expression;
-  while (current.type === "ParenthesizedExpression") current = current.expression;
+  while (
+    current.type === "ParenthesizedExpression" ||
+    current.type === "TSNonNullExpression" ||
+    current.type === "TSSatisfiesExpression"
+  ) {
+    current = current.expression;
+  }
   return current;
 }
 
@@ -91,13 +97,13 @@ function broadTypeKind(type               )                       {
 function assertedExpression(
   node                                                ,
 )                    {
-  return unwrapExpressionParentheses(node.expression);
+  return unwrapTransparentExpression(node.expression);
 }
 
 function assertionFromExpression(
   expression                   ,
 )                                                        {
-  const unwrapped = unwrapExpressionParentheses(expression);
+  const unwrapped = unwrapTransparentExpression(expression);
   return unwrapped.type === "TSAsExpression" || unwrapped.type === "TSTypeAssertion"
     ? unwrapped
     : null;
@@ -203,7 +209,7 @@ function knownValueEvidence(
   boundary                    ,
   visitedVariables                       ,
 )                            {
-  const unwrapped = unwrapExpressionParentheses(expression);
+  const unwrapped = unwrapTransparentExpression(expression);
 
   if (unwrapped.type === "TSAsExpression" || unwrapped.type === "TSTypeAssertion") {
     if (broadTypeKind(unwrapped.typeAnnotation) !== null) return null;

@@ -40,6 +40,9 @@ test("no-object-parameters keeps empty object intersection members neutral", asy
     type Empty = {};
     type EmptyAlias<T> = {};
     type Identity<T> = T;
+    interface EmptyInterface {}
+    interface EmptyInterface {}
+    interface NonEmptyInterface { id: string }
     function direct(value: object & {}): void {}
     function alias(value: object & Empty): void {}
     function generic(value: object & EmptyAlias<number>): void {}
@@ -49,6 +52,9 @@ test("no-object-parameters keeps empty object intersection members neutral", asy
     function primitive(value: string & {}): void {}
     function impossible(value: object & never): void {}
     function unknownOnly(value: unknown & {}): void {}
+    function interfaceEmpty(value: object & EmptyInterface): void {}
+    function interfaceNested(value: object & (EmptyInterface & object)): void {}
+    function interfaceNarrowed(value: object & NonEmptyInterface): void {}
     void direct;
     void alias;
     void generic;
@@ -58,11 +64,14 @@ test("no-object-parameters keeps empty object intersection members neutral", asy
     void primitive;
     void impossible;
     void unknownOnly;
+    void interfaceEmpty;
+    void interfaceNested;
+    void interfaceNarrowed;
   `);
   assert.equal(result.status, 1, result.output);
   assert.equal(
     result.output.match(/anti-slop\(no-object-parameters\)/g)?.length,
-    5,
+    7,
     result.output,
   );
 });
