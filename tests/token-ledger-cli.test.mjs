@@ -1408,19 +1408,10 @@ test("cache report preserves proportions when token sums are normalized", () => 
     timestamp: "2026-08-15T12:00:00.000Z",
     model: "gpt-5.6-luna",
     totalTokens: token,
-    ...(measured
-      ? {
-          inputTokens: token,
-          cachedInputTokens,
-          outputTokens: 0,
-          breakdownAvailable: true,
-        }
-      : {
-          inputTokens: token,
-          cachedInputTokens: token,
-          outputTokens: 0,
-          breakdownAvailable: false,
-        }),
+    inputTokens: token,
+    cachedInputTokens: measured ? cachedInputTokens : token,
+    outputTokens: 0,
+    breakdownAvailable: measured,
   });
   const snapshot = {
     events: [
