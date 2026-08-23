@@ -74,6 +74,52 @@ test("no-module-mocking follows stable framework aliases and namespaces", async 
   );
 });
 
+test("no-module-mocking unwraps runtime-transparent TypeScript expressions", async () => {
+  const result = await lintTypeScript(`
+    import { vi as importedVi } from "vitest";
+    import { jest as importedJest } from "@jest/globals";
+
+    const wrappedVi = vi satisfies typeof vi;
+    // SAFETY: The assertion preserves the imported Jest value's exact type.
+    const assertedJest = importedJest as typeof importedJest;
+    // SAFETY: The assertion preserves the imported Vitest value's exact type.
+    const angleVi = <typeof importedVi>importedVi;
+    const wrappedMock = wrappedVi.mock satisfies typeof wrappedVi.mock;
+    // SAFETY: The assertion preserves the selected method's exact type.
+    const assertedMock = assertedJest.mock as typeof assertedJest.mock;
+    const { mock: importedMock } = importedVi satisfies typeof importedVi;
+    // SAFETY: The assertion preserves the global Jest value's exact type.
+    const { mock: globalJestMock } = <typeof jest>jest;
+
+    (vi satisfies typeof vi).mock("direct-satisfies");
+    // SAFETY: The assertion preserves the imported Jest value's exact type.
+    (importedJest as typeof importedJest).mock("direct-as");
+    // SAFETY: The assertion preserves the imported Vitest value's exact type.
+    (<typeof importedVi>importedVi).mock("direct-angle");
+    wrappedVi.mock("stable-satisfies");
+    assertedJest.mock("stable-as");
+    angleVi.mock("stable-angle");
+    wrappedMock("member-satisfies");
+    assertedMock("member-as");
+    importedMock("destructured-import");
+    globalJestMock("destructured-global");
+    // SAFETY: The assertion preserves the selected method's exact type.
+    (vi.mock as typeof vi.mock)("callee-as");
+    (jest.mock satisfies typeof jest.mock)("callee-satisfies");
+  `);
+  assert.equal(result.status, 1, result.output);
+  assert.equal(
+    result.output.match(/anti-slop\(no-module-mocking\)/g)?.length,
+    12,
+    result.output,
+  );
+  assert.equal(
+    result.output.match(/error anti-slop\(/g)?.length,
+    12,
+    result.output,
+  );
+});
+
 test("no-module-mocking ignores unrelated or mutable lookalikes", async () => {
   const result = await lintTypeScript(`
     const fake = { mock() {} };
@@ -89,6 +135,33 @@ test("no-module-mocking ignores unrelated or mutable lookalikes", async () => {
     mutable.mock("mutable");
     fakeMock("fake-destructured");
     void local;
+  `);
+  assert.equal(result.status, 0, result.output);
+  assert.doesNotMatch(result.output, /anti-slop\(no-module-mocking\)/);
+});
+
+test("no-module-mocking keeps wrapped controls and non-calls valid", async () => {
+  const result = await lintTypeScript(`
+    const fake = { mock() {} };
+    const wrappedFake = fake satisfies typeof fake;
+    // SAFETY: The assertion preserves the fake value's exact type.
+    const assertedFake = fake as typeof fake;
+    let mutable = vi satisfies typeof vi;
+    mutable = fake;
+    function local(vi) {
+      (vi satisfies typeof vi).mock("shadowed");
+    }
+    const checked = vi satisfies typeof vi;
+    // SAFETY: The assertion preserves the selected method's exact type.
+    const memberOnly = (vi as typeof vi).mock;
+
+    wrappedFake.mock("fake-satisfies");
+    assertedFake.mock("fake-as");
+    mutable.mock("mutable");
+    vi satisfies typeof vi;
+    void local;
+    void checked;
+    void memberOnly;
   `);
   assert.equal(result.status, 0, result.output);
   assert.doesNotMatch(result.output, /anti-slop\(no-module-mocking\)/);

@@ -86,7 +86,7 @@ export const noObjectParametersRule = defineRule({
       }
       if (type.type === "TSUnionType") {
         if (target === "empty-object") {
-          return type.types.every((member) =>
+          return type.types.some((member) =>
             resolvesToBroadType(member, target, visited, bindings),
           );
         }

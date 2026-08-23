@@ -40,6 +40,10 @@ test("no-object-parameters keeps empty object intersection members neutral", asy
     type Empty = {};
     type EmptyAlias<T> = {};
     type Identity<T> = T;
+    type Dominated = {} | string;
+    type DominatedAlias<T> = Empty | T;
+    type NestedDominated<T> = Identity<{} | T>;
+    type NarrowingUnion = { id: string } | { name: string };
     interface EmptyInterface {}
     interface EmptyInterface {}
     interface NonEmptyInterface { id: string }
@@ -55,6 +59,15 @@ test("no-object-parameters keeps empty object intersection members neutral", asy
     function interfaceEmpty(value: object & EmptyInterface): void {}
     function interfaceNested(value: object & (EmptyInterface & object)): void {}
     function interfaceNarrowed(value: object & NonEmptyInterface): void {}
+    function dominatedDirect(value: object & ({} | string)): void {}
+    function dominatedAlias(value: object & Dominated): void {}
+    function dominatedGeneric(value: object & DominatedAlias<string>): void {}
+    function dominatedNested(value: object & NestedDominated<string>): void {}
+    function narrowingUnion(value: object & NarrowingUnion): void {}
+    function nonemptyUnion(value: object & ({ id: string } | string)): void {}
+    function neverUnion(value: object & ({ id: string } | never)): void {}
+    function primitiveUnion(value: object & (string | number)): void {}
+    function unknownNarrowedUnion(value: object & ((unknown & string) | never)): void {}
     void direct;
     void alias;
     void generic;
@@ -67,11 +80,20 @@ test("no-object-parameters keeps empty object intersection members neutral", asy
     void interfaceEmpty;
     void interfaceNested;
     void interfaceNarrowed;
+    void dominatedDirect;
+    void dominatedAlias;
+    void dominatedGeneric;
+    void dominatedNested;
+    void narrowingUnion;
+    void nonemptyUnion;
+    void neverUnion;
+    void primitiveUnion;
+    void unknownNarrowedUnion;
   `);
   assert.equal(result.status, 1, result.output);
   assert.equal(
     result.output.match(/anti-slop\(no-object-parameters\)/g)?.length,
-    7,
+    11,
     result.output,
   );
 });
