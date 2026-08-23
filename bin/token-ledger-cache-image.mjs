@@ -31,6 +31,7 @@ const COLORS = {
 const MIN_BIN_WIDTH = 34;
 const MAX_MODEL_ROWS = 6;
 const MAX_FINITE_NUMBER = Number.MAX_VALUE;
+const SCALE_HEADROOM = 1 - Number.EPSILON;
 
 function percent(value) {
   if (!Number.isFinite(value)) return "—";
@@ -136,10 +137,37 @@ function nonNegativeFiniteNumber(value) {
   return Number.isFinite(number) && number > 0 ? number : 0;
 }
 
-function saturatingAdd(left, right) {
-  // Keep large but individually valid snapshots finite for ratios and SVG math.
-  const sum = left + right;
-  return Number.isFinite(sum) ? sum : MAX_FINITE_NUMBER;
+function scaleToFiniteSum(values) {
+  // Values are non-negative and finite; return one common factor for them.
+  const ratio = values.reduce(
+    (sum, value) => sum + value / MAX_FINITE_NUMBER,
+    0,
+  );
+  return ratio > 1 ? SCALE_HEADROOM / ratio : 1;
+}
+
+function scaleInputTokens(target, factor) {
+  target.inputTokens *= factor;
+  target.cachedInputTokens *= factor;
+  target.uncachedInputTokens *= factor;
+}
+
+function scaleAggregateTokens(target, factor) {
+  if (Number.isFinite(target.totalTokens)) target.totalTokens *= factor;
+  if (Number.isFinite(target.detailedTokens)) {
+    target.detailedTokens *= factor;
+  }
+  scaleInputTokens(target, factor);
+}
+
+function scaleBreakdown(breakdown, factor) {
+  return {
+    ...breakdown,
+    totalTokens: breakdown.totalTokens * factor,
+    inputTokens: breakdown.inputTokens * factor,
+    cachedInputTokens: breakdown.cachedInputTokens * factor,
+    uncachedInputTokens: breakdown.uncachedInputTokens * factor,
+  };
 }
 
 function safeModelLabel(value) {
@@ -149,16 +177,26 @@ function safeModelLabel(value) {
 
 function cacheBreakdown(event) {
   const reportedTotalTokens = nonNegativeFiniteNumber(event.totalTokens);
-  const inputTokens = nonNegativeFiniteNumber(event.inputTokens);
+  const rawInputTokens = nonNegativeFiniteNumber(event.inputTokens);
   const outputTokens = nonNegativeFiniteNumber(event.outputTokens);
-  const componentTotalTokens = saturatingAdd(inputTokens, outputTokens);
+  const rawCachedInputTokens = Math.min(
+    rawInputTokens,
+    nonNegativeFiniteNumber(event.cachedInputTokens),
+  );
+  const componentScale = scaleToFiniteSum([rawInputTokens, outputTokens]);
+  const inputTokens = rawInputTokens * componentScale;
+  const componentOutputTokens = outputTokens * componentScale;
+  const cachedInputTokens = Math.min(
+    inputTokens,
+    rawCachedInputTokens * componentScale,
+  );
+  const componentTotalTokens = Math.min(
+    MAX_FINITE_NUMBER,
+    inputTokens + componentOutputTokens,
+  );
   const totalTokens = reportedTotalTokens > 0
     ? reportedTotalTokens
     : componentTotalTokens;
-  const cachedInputTokens = Math.min(
-    inputTokens,
-    nonNegativeFiniteNumber(event.cachedInputTokens),
-  );
   const hasComponents = inputTokens > 0 || outputTokens > 0;
   const inferredDetailed = hasComponents && (
     reportedTotalTokens === 0 || componentTotalTokens === reportedTotalTokens
@@ -204,19 +242,32 @@ function emptyAggregate() {
 }
 
 function addInput(target, breakdown) {
-  target.inputTokens = saturatingAdd(target.inputTokens, breakdown.inputTokens);
-  target.cachedInputTokens = saturatingAdd(
+  const factor = scaleToFiniteSum([
+    target.inputTokens,
+    breakdown.inputTokens,
+  ]);
+  if (factor < 1) {
+    scaleInputTokens(target, factor);
+    breakdown = scaleBreakdown(breakdown, factor);
+  }
+  target.inputTokens += breakdown.inputTokens;
+  target.cachedInputTokens += breakdown.cachedInputTokens;
+  target.cachedInputTokens = Math.min(
+    target.inputTokens,
     target.cachedInputTokens,
-    breakdown.cachedInputTokens,
   );
-  target.uncachedInputTokens = saturatingAdd(
-    target.uncachedInputTokens,
-    breakdown.uncachedInputTokens,
+  target.uncachedInputTokens = Math.max(
+    0,
+    target.inputTokens - target.cachedInputTokens,
   );
-  target.inputEventCount = saturatingAdd(target.inputEventCount, 1);
+  target.inputEventCount += 1;
 }
 
 function finalizeAggregate(aggregate) {
+  const uncachedInputTokens = Math.max(
+    0,
+    aggregate.inputTokens - aggregate.cachedInputTokens,
+  );
   const measurementCoveragePercent = aggregate.totalTokens > 0
     ? (aggregate.detailedTokens / aggregate.totalTokens) * 100
     : aggregate.eventCount > 0
@@ -224,6 +275,7 @@ function finalizeAggregate(aggregate) {
       : null;
   return {
     ...aggregate,
+    uncachedInputTokens,
     rate: rateFor(aggregate.inputTokens, aggregate.cachedInputTokens),
     measurementCoveragePercent,
   };
@@ -234,6 +286,8 @@ function accumulateRange(snapshot, bounds, bins = null, dateIndexByString = null
   const endMs = bounds.end.getTime();
   const totals = emptyAggregate();
   const modelTotals = new Map();
+  // One shared scale keeps rates, shares, and coverage proportional everywhere.
+  const tokenScale = { value: 1 };
 
   const events = Array.isArray(snapshot?.events) ? snapshot.events : [];
   for (const event of events) {
@@ -245,32 +299,44 @@ function accumulateRange(snapshot, bounds, bins = null, dateIndexByString = null
     ) {
       continue;
     }
-    const { breakdown } = parsed;
+    let { breakdown } = parsed;
+    const scale = tokenScale.value;
+    const inputContribution = breakdown.detailed ? breakdown.inputTokens : 0;
+    const overflowRatio = Math.max(
+      totals.totalTokens / MAX_FINITE_NUMBER +
+        (breakdown.totalTokens * scale) / MAX_FINITE_NUMBER,
+      totals.inputTokens / MAX_FINITE_NUMBER +
+        (inputContribution * scale) / MAX_FINITE_NUMBER,
+    );
+    if (overflowRatio > 1) {
+      const factor = SCALE_HEADROOM / overflowRatio;
+      scaleAggregateTokens(totals, factor);
+      for (const bin of bins ?? []) scaleAggregateTokens(bin, factor);
+      for (const model of modelTotals.values()) {
+        scaleAggregateTokens(model, factor);
+      }
+      tokenScale.value *= factor;
+    }
+    breakdown = scaleBreakdown(breakdown, tokenScale.value);
     const dateString = bins
       ? localDateString(parsed.timestampMs, bounds.timeZone)
       : null;
     const binIndex = dateString === null ? null : dateIndexByString.get(dateString);
     const bin = binIndex === undefined || binIndex === null ? null : bins[binIndex];
 
-    totals.eventCount = saturatingAdd(totals.eventCount, 1);
-    totals.totalTokens = saturatingAdd(totals.totalTokens, breakdown.totalTokens);
+    totals.eventCount += 1;
+    totals.totalTokens += breakdown.totalTokens;
     if (bin) {
-      bin.eventCount = saturatingAdd(bin.eventCount, 1);
-      bin.totalTokens = saturatingAdd(bin.totalTokens, breakdown.totalTokens);
+      bin.eventCount += 1;
+      bin.totalTokens += breakdown.totalTokens;
     }
     if (!breakdown.detailed) continue;
 
-    totals.detailedEventCount = saturatingAdd(totals.detailedEventCount, 1);
-    totals.detailedTokens = saturatingAdd(
-      totals.detailedTokens,
-      breakdown.totalTokens,
-    );
+    totals.detailedEventCount += 1;
+    totals.detailedTokens += breakdown.totalTokens;
     if (bin) {
-      bin.detailedEventCount = saturatingAdd(bin.detailedEventCount, 1);
-      bin.detailedTokens = saturatingAdd(
-        bin.detailedTokens,
-        breakdown.totalTokens,
-      );
+      bin.detailedEventCount += 1;
+      bin.detailedTokens += breakdown.totalTokens;
     }
     if (!(breakdown.inputTokens > 0)) continue;
 
@@ -340,18 +406,12 @@ function combinedModelRows(models) {
   const visible = models.slice(0, MAX_MODEL_ROWS - 1);
   const remainder = models.slice(MAX_MODEL_ROWS - 1).reduce(
     (row, model) => {
-      row.inputTokens = saturatingAdd(row.inputTokens, model.inputTokens);
-      row.cachedInputTokens = saturatingAdd(
-        row.cachedInputTokens,
-        model.cachedInputTokens,
-      );
-      row.uncachedInputTokens = saturatingAdd(
-        row.uncachedInputTokens,
-        model.uncachedInputTokens,
-      );
-      row.inputEventCount = saturatingAdd(
-        row.inputEventCount,
-        model.inputEventCount,
+      row.inputTokens += model.inputTokens;
+      row.cachedInputTokens += model.cachedInputTokens;
+      row.inputEventCount += model.inputEventCount;
+      row.uncachedInputTokens = Math.max(
+        0,
+        row.inputTokens - row.cachedInputTokens,
       );
       return row;
     },
