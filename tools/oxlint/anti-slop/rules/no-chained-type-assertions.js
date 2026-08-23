@@ -7,9 +7,13 @@ function isTypeAssertionExpression(node             )                           
   return node.type === "TSAsExpression" || node.type === "TSTypeAssertion";
 }
 
-function unwrapParenthesizedExpression(expression                   )                    {
+function isTransparentAssertionWrapper(node             )          {
+  return node.type === "ParenthesizedExpression" || node.type === "TSNonNullExpression";
+}
+
+function unwrapAssertionExpression(expression                   )                    {
   let current = expression;
-  while (current.type === "ParenthesizedExpression") {
+  while (isTransparentAssertionWrapper(current)) {
     current = current.expression;
   }
   return current;
@@ -28,7 +32,7 @@ function isOutermostAssertionInChain(node                         )          {
   let current                    = node;
   let parent = node.parent;
 
-  while (parent.type === "ParenthesizedExpression" && parent.expression === current) {
+  while (isTransparentAssertionWrapper(parent) && parent.expression === current) {
     current = parent;
     parent = parent.parent;
   }
@@ -44,7 +48,7 @@ function isForbiddenAssertionChain(node                         )          {
   while (isTypeAssertionExpression(current)) {
     assertionCount += 1;
     hasNonConstAssertion ||= !isConstAssertion(current);
-    current = unwrapParenthesizedExpression(current.expression);
+    current = unwrapAssertionExpression(current.expression);
   }
 
   return assertionCount > 1 && hasNonConstAssertion;
