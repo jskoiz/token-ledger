@@ -15,14 +15,12 @@ Requires Node.js 22.13 or newer. From this checkout:
 
 ```bash
 npm install
-```
-
-The same local install provides both outputs. To install the `tledger` bin
-locally on your PATH instead:
-
-```bash
 npm install -g .
 ```
+
+The second command links the `tledger` executable on your PATH. Without a
+global link, run the examples below as `npx tledger ...` or
+`node bin/token-ledger.mjs ...` from this checkout.
 
 Generate the report as a PNG. `report` is the image form of the trend view;
 the default file is `token-ledger-report-7d.png` in the current directory.
@@ -124,9 +122,11 @@ thread metadata, then normalized for display.
 
 The weekly meter uses local rate-limit observations for the account-wide
 weekly window. Reset timestamps identify windows; stale readings and separate
-named pools are not stitched into that meter. Reset type, remaining
-percentage, observation time, and the selected window are local observations,
-not an official account-wide quota or billing record.
+named pools are not stitched into that meter. Remaining percentage,
+observation time, and the selected window are local observations; the reset
+type (weekly expiry versus restart) is derived by comparing the prior window's
+reset timestamp with the first reading of the new window. None of this is an
+official account-wide quota or billing record.
 
 The exported snapshot contains token metadata, model/use-type labels, project
 labels, and display titles. It omits message bodies, reasoning text, tool
@@ -147,8 +147,8 @@ When meter observations are available, report bars in `--drain` mode represent
 observed meter drops; model attribution within a drop uses rate-card weights
 when possible and token weights as a fallback. Long observation gaps are
 spread across local calendar days as estimates. Tokens-per-meter-point,
-model-split burn, runway, credit-per-percent, and CLI `View burn` are derived
-estimates. None is official billing, quota, or account-completeness truth.
+model-split burn, runway, and CLI `View burn` are derived estimates. None is
+official billing, quota, or account-completeness truth.
 
 ## Verify
 
