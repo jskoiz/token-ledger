@@ -10,7 +10,8 @@ function unwrapParentheses(node                   )                    {
 }
 
 function isEmptyObjectExpression(node                   )          {
-  return node.type === "ObjectExpression" && node.properties.length === 0;
+  const unwrapped = unwrapParentheses(node);
+  return unwrapped.type === "ObjectExpression" && unwrapped.properties.length === 0;
 }
 
 function isConditionalEmptyObjectSpread(node                   )          {
