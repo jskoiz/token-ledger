@@ -1,19 +1,9 @@
 import { defineRule } from "@oxlint/plugins";
 
-import { lexicalTypeParameterNames } from "../shared/lexical-type-parameters.js";
-
-function aliasReference(type) {
-  if (type.type === "TSParenthesizedType") {
-    return aliasReference(type.typeAnnotation);
-  }
-  if (type.type !== "TSTypeReference" || type.typeName.type !== "Identifier") {
-    return null;
-  }
-  return {
-    name: type.typeName.name,
-    arguments: type.typeArguments?.params ?? [],
-  };
-}
+import {
+  typeAliasReference,
+  visibleTypeAlias,
+} from "../shared/type-aliases.js";
 
 function parameterAnnotation(parameter) {
   if (parameter.type === "TSParameterProperty") {
@@ -48,47 +38,33 @@ export const noObjectParametersRule = defineRule({
     },
   },
   createOnce(context) {
-    const aliases = new Map();
-
     const resolvesToObject = (
       type,
-      shadowedAliases,
       visited = new Set(),
       bindings = new Map(),
     ) => {
       if (type.type === "TSObjectKeyword") return true;
       if (type.type === "TSParenthesizedType") {
-        return resolvesToObject(
-          type.typeAnnotation,
-          shadowedAliases,
-          visited,
-          bindings,
-        );
+        return resolvesToObject(type.typeAnnotation, visited, bindings);
       }
       if (type.type === "TSUnionType") {
         return type.types.some((member) =>
-          resolvesToObject(member, shadowedAliases, visited, bindings),
+          resolvesToObject(member, visited, bindings),
         );
       }
 
-      const reference = aliasReference(type);
+      const reference = typeAliasReference(type);
       if (reference === null) return false;
 
-      const binding = bindings.get(reference.name);
+      const binding = reference.namespace.length === 0
+        ? bindings.get(reference.name)
+        : undefined;
       if (binding !== undefined) {
-        return resolvesToObject(
-          binding.type,
-          shadowedAliases,
-          visited,
-          binding.bindings,
-        );
-      }
-      if (visited.has(reference.name) || shadowedAliases.has(reference.name)) {
-        return false;
+        return resolvesToObject(binding.type, visited, binding.bindings);
       }
 
-      const alias = aliases.get(reference.name);
-      if (alias === undefined) return false;
+      const alias = visibleTypeAlias(reference, type, context.sourceCode);
+      if (alias === null || visited.has(alias)) return false;
       const parameters = alias.typeParameters?.params ?? [];
       if (reference.arguments.length > parameters.length) return false;
 
@@ -104,26 +80,15 @@ export const noObjectParametersRule = defineRule({
       }
 
       const nextVisited = new Set(visited);
-      nextVisited.add(reference.name);
-      return resolvesToObject(
-        alias.typeAnnotation,
-        shadowedAliases,
-        nextVisited,
-        nextBindings,
-      );
+      nextVisited.add(alias);
+      return resolvesToObject(alias.typeAnnotation, nextVisited, nextBindings);
     };
 
     const checkParameters = (node) => {
-      const shadowedAliases = lexicalTypeParameterNames(
-        node,
-        context.sourceCode.visitorKeys,
-      );
       for (const parameter of node.params) {
         const annotation = parameterAnnotation(parameter);
         if (annotation === null || annotation === undefined) continue;
-        if (!resolvesToObject(annotation.typeAnnotation, shadowedAliases)) {
-          continue;
-        }
+        if (!resolvesToObject(annotation.typeAnnotation)) continue;
         context.report({
           node: annotation.typeAnnotation,
           messageId: "objectParameter",
@@ -133,16 +98,6 @@ export const noObjectParametersRule = defineRule({
     };
 
     return {
-      Program(node) {
-        aliases.clear();
-        for (const statement of node.body) {
-          const declaration =
-            statement.type === "ExportNamedDeclaration" ? statement.declaration : statement;
-          if (declaration?.type === "TSTypeAliasDeclaration") {
-            aliases.set(declaration.id.name, declaration);
-          }
-        }
-      },
       ArrowFunctionExpression: checkParameters,
       FunctionDeclaration: checkParameters,
       FunctionExpression: checkParameters,

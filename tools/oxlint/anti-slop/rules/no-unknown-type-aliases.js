@@ -1,17 +1,9 @@
 import { defineRule } from "@oxlint/plugins";
 
-function aliasReference(type) {
-  if (type.type === "TSParenthesizedType") {
-    return aliasReference(type.typeAnnotation);
-  }
-  if (type.type !== "TSTypeReference" || type.typeName.type !== "Identifier") {
-    return null;
-  }
-  return {
-    name: type.typeName.name,
-    arguments: type.typeArguments?.params ?? [],
-  };
-}
+import {
+  typeAliasReference,
+  visibleTypeAlias,
+} from "../shared/type-aliases.js";
 
 /** Ban named aliases that merely conceal TypeScript's unknown top type. */
 export const noUnknownTypeAliasesRule = defineRule({
@@ -27,8 +19,6 @@ export const noUnknownTypeAliasesRule = defineRule({
     },
   },
   createOnce(context) {
-    const aliases = new Map();
-
     const resolvesToUnknown = (
       type,
       visited = new Set(),
@@ -44,16 +34,17 @@ export const noUnknownTypeAliasesRule = defineRule({
         );
       }
 
-      const reference = aliasReference(type);
+      const reference = typeAliasReference(type);
       if (reference === null) return false;
-      const binding = bindings.get(reference.name);
+      const binding = reference.namespace.length === 0
+        ? bindings.get(reference.name)
+        : undefined;
       if (binding !== undefined) {
         return resolvesToUnknown(binding.type, visited, binding.bindings);
       }
-      if (visited.has(reference.name)) return false;
 
-      const alias = aliases.get(reference.name);
-      if (alias === undefined) return false;
+      const alias = visibleTypeAlias(reference, type, context.sourceCode);
+      if (alias === null || visited.has(alias)) return false;
       const parameters = alias.typeParameters?.params ?? [];
       if (reference.arguments.length > parameters.length) return false;
 
@@ -69,30 +60,18 @@ export const noUnknownTypeAliasesRule = defineRule({
       }
 
       const nextVisited = new Set(visited);
-      nextVisited.add(reference.name);
+      nextVisited.add(alias);
       return resolvesToUnknown(alias.typeAnnotation, nextVisited, nextBindings);
     };
 
     return {
-      Program(node) {
-        aliases.clear();
-        for (const statement of node.body) {
-          const declaration =
-            statement.type === "ExportNamedDeclaration" ? statement.declaration : statement;
-          if (declaration?.type === "TSTypeAliasDeclaration") {
-            aliases.set(declaration.id.name, declaration);
-          }
-        }
-        for (const alias of aliases.values()) {
-          if (!resolvesToUnknown(alias.typeAnnotation, new Set([alias.id.name]))) {
-            continue;
-          }
-          context.report({
-            node: alias.id,
-            messageId: "unknownAlias",
-            data: { alias: alias.id.name },
-          });
-        }
+      TSTypeAliasDeclaration(alias) {
+        if (!resolvesToUnknown(alias.typeAnnotation, new Set([alias]))) return;
+        context.report({
+          node: alias.id,
+          messageId: "unknownAlias",
+          data: { alias: alias.id.name },
+        });
       },
     };
   },
