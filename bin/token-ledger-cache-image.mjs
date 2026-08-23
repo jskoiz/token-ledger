@@ -42,13 +42,17 @@ function rateFor(inputTokens, cachedInputTokens) {
   return inputTokens > 0 ? (cachedInputTokens / inputTokens) * 100 : null;
 }
 
-function localDateString(timestampMs, timeZone) {
-  const parts = new Intl.DateTimeFormat("en-US", {
+function localDateFormatter(timeZone) {
+  return new Intl.DateTimeFormat("en-US", {
     timeZone,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
-  }).formatToParts(new Date(timestampMs));
+  });
+}
+
+function localDateString(timestampMs, formatter) {
+  const parts = formatter.formatToParts(new Date(timestampMs));
   const values = Object.fromEntries(
     parts
       .filter((part) => part.type !== "literal")
@@ -152,11 +156,13 @@ function generatedAtLabel(value, timeZone) {
   }).format(new Date(timestampMs));
 }
 
-function nonNegativeFiniteNumber(value) {
+function parsedNonNegativeFiniteNumber(value) {
   const primitive = primitiveNumber(value);
   const text = primitive === null ? primitiveString(value) : null;
-  const number = primitive ?? (text === null ? NaN : Number(text));
-  return Number.isFinite(number) && number > 0 ? number : 0;
+  const number = primitive ?? (
+    text === null || text.trim() === "" ? NaN : Number(text)
+  );
+  return Number.isFinite(number) && number >= 0 ? number : null;
 }
 
 function scaleToFiniteSum(values) {
@@ -219,12 +225,20 @@ function safeModelLabel(value) {
 }
 
 function cacheBreakdown(event) {
-  const reportedTotalTokens = nonNegativeFiniteNumber(event.totalTokens);
-  const rawInputTokens = nonNegativeFiniteNumber(event.inputTokens);
-  const outputTokens = nonNegativeFiniteNumber(event.outputTokens);
+  const parsedReportedTotalTokens = parsedNonNegativeFiniteNumber(
+    event.totalTokens,
+  );
+  const parsedInputTokens = parsedNonNegativeFiniteNumber(event.inputTokens);
+  const parsedCachedInputTokens = parsedNonNegativeFiniteNumber(
+    event.cachedInputTokens,
+  );
+  const parsedOutputTokens = parsedNonNegativeFiniteNumber(event.outputTokens);
+  const reportedTotalTokens = parsedReportedTotalTokens ?? 0;
+  const rawInputTokens = parsedInputTokens ?? 0;
+  const outputTokens = parsedOutputTokens ?? 0;
   const rawCachedInputTokens = Math.min(
     rawInputTokens,
-    nonNegativeFiniteNumber(event.cachedInputTokens),
+    parsedCachedInputTokens ?? 0,
   );
   const componentOverflowed = !Number.isFinite(rawInputTokens + outputTokens);
   const componentScale = scaleToFiniteSum([rawInputTokens, outputTokens]);
@@ -242,13 +256,19 @@ function cacheBreakdown(event) {
     ? reportedTotalTokens
     : componentTotalTokens;
   const hasComponents = inputTokens > 0 || outputTokens > 0;
-  const inferredDetailed = hasComponents && (
+  const hasReconciledBreakdown = hasComponents && (
     reportedTotalTokens === 0 ||
     componentTotalTokens === reportedTotalTokens ||
     (componentOverflowed && reportedTotalTokens === MAX_FINITE_NUMBER)
   );
-  const detailed = event.breakdownAvailable === true || (
-    event.breakdownAvailable !== false && inferredDetailed
+  const hasExplicitReconciledZeroBreakdown =
+    event.breakdownAvailable === true &&
+    parsedReportedTotalTokens === 0 &&
+    parsedInputTokens === 0 &&
+    parsedCachedInputTokens === 0 &&
+    parsedOutputTokens === 0;
+  const detailed = event.breakdownAvailable !== false && (
+    hasReconciledBreakdown || hasExplicitReconciledZeroBreakdown
   );
   return {
     totalTokens,
@@ -334,6 +354,9 @@ function accumulateRange(snapshot, bounds, bins = null, dateIndexByString = null
   const modelTotals = new Map();
   // One shared scale keeps rates, shares, and coverage proportional everywhere.
   const tokenScale = { value: 1 };
+  const dateFormatter = bins === null
+    ? null
+    : localDateFormatter(bounds.timeZone);
 
   const events = Array.isArray(snapshot?.events) ? snapshot.events : [];
   for (const event of events) {
@@ -346,9 +369,9 @@ function accumulateRange(snapshot, bounds, bins = null, dateIndexByString = null
       continue;
     }
     let { breakdown } = parsed;
-    const dateString = bins
-      ? localDateString(parsed.timestampMs, bounds.timeZone)
-      : null;
+    const dateString = dateFormatter === null
+      ? null
+      : localDateString(parsed.timestampMs, dateFormatter);
     const binIndex = dateString === null ? null : dateIndexByString.get(dateString);
     const bin = binIndex === undefined || binIndex === null ? null : bins[binIndex];
     const existingModelAggregate = breakdown.detailed && breakdown.inputTokens > 0

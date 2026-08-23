@@ -415,6 +415,9 @@ export function renderTrendImage({
   const latestQuotaPoint = [...(trend.points ?? [])]
     .filter((point) => point.timestampMs <= bounds.end.getTime())
     .at(-1);
+  const latestQuotaReadMs = Number.isFinite(trend.observedThroughMs)
+    ? trend.observedThroughMs
+    : null;
   const resetsInRange = trend.resets ?? [];
   const weeklyObservationsAll = weeklyQuotaObservations(snapshot).filter(
     (observation) => observation.timestampMs < bounds.end.getTime(),
@@ -522,7 +525,9 @@ export function renderTrendImage({
   const topGap = 24;
   const hasMeterCard = Boolean(hasLine && latestQuotaPoint);
   const statCardCount = modelCards.length + (hasFast ? 1 : 0);
-  const pacePanelWidth = hasMeterCard ? 560 : 432;
+  const pacePanelWidth = hasMeterCard
+    ? Math.min(560, Math.max(480, contentWidth * 0.55))
+    : 432;
   const pacePanelX = contentRight - pacePanelWidth;
   const paceTextX = pacePanelX + 18;
   const paceInnerWidth = pacePanelWidth - 36;
@@ -678,7 +683,9 @@ export function renderTrendImage({
       track: "rgba(246,183,60,.2)",
       fill: COLORS.line,
       barPercent: latestQuotaPoint.remainingPercent,
-      caption: `${resetCaption} · read ${timestampDateLabel(latestQuotaPoint.timestampMs, bounds.timeZone)}`,
+      caption: latestQuotaReadMs === null
+        ? resetCaption
+        : `${resetCaption} · read ${timestampDateLabel(latestQuotaReadMs, bounds.timeZone)}`,
       captionShort: resetCaption,
       panel: COLORS.meterPanel,
       border: COLORS.meterPanelBorder,
@@ -706,13 +713,14 @@ export function renderTrendImage({
       const contentX = cellX + 17;
       const innerWidth = cellWidth - 34;
       const innerRight = contentX + innerWidth;
+      const labelText = card.label.toUpperCase();
       // Each corner carries something: label top-left, delta chip top-right,
       // value bottom-left, share caption bottom-right, bar along the bottom.
       elements.push(`<circle cx="${(contentX + 3.5).toFixed(2)}" cy="${(cellY + 19).toFixed(2)}" r="3.5" fill="${card.swatch}"/>`);
       elements.push(svgText({
         x: contentX + 15,
         y: cellY + 23,
-        value: card.label.toUpperCase(),
+        value: labelText,
         fill: card.labelColor,
         size: 10.5,
         spacing: ".9",
@@ -721,18 +729,25 @@ export function renderTrendImage({
       if (card.chip) {
         const chipTextWidth = textWidth(card.chip.text, 10, 700);
         const chipX = innerRight - chipTextWidth - 10;
-        elements.push(svgRect(chipX, labelBaseline - 11, chipTextWidth + 10, 15, {
-          rx: 3,
-          fill: card.chip.fill,
-        }));
-        elements.push(svgText({
-          x: chipX + 5,
-          y: labelBaseline,
-          value: card.chip.text,
-          fill: card.chip.color,
-          size: 10,
-          weight: 700,
-        }));
+        const labelEnd =
+          contentX +
+          15 +
+          textWidth(labelText, 10.5) +
+          Math.max(0, labelText.length - 1) * 0.9;
+        if (chipX >= labelEnd + 10) {
+          elements.push(svgRect(chipX, labelBaseline - 11, chipTextWidth + 10, 15, {
+            rx: 3,
+            fill: card.chip.fill,
+          }));
+          elements.push(svgText({
+            x: chipX + 5,
+            y: labelBaseline,
+            value: card.chip.text,
+            fill: card.chip.color,
+            size: 10,
+            weight: 700,
+          }));
+        }
       }
       const valueBaseline = cellY + cellHeight / 2 + 9;
       elements.push(svgText({
@@ -904,9 +919,11 @@ export function renderTrendImage({
       size: 10.5,
     }));
     const resetLabel = `reset in ${paceRunwayBar.resetInLabel}`;
+    const resetLabelWidth = textWidth(resetLabel, 10.5);
+    const nowLabelWidth = textWidth("now", 10.5);
     const resetLabelX = Math.max(
-      paceTextX + 40,
-      Math.min(tickX, paceTextX + paceInnerWidth - textWidth(resetLabel, 10.5) / 2 - 2),
+      paceTextX + nowLabelWidth + 8 + resetLabelWidth / 2,
+      Math.min(tickX, paceTextX + paceInnerWidth - resetLabelWidth / 2 - 2),
     );
     elements.push(svgText({
       x: resetLabelX,
@@ -1491,15 +1508,21 @@ export function renderTrendImage({
   elements.push(`<line x1="${outer}" y1="${bottomRuleY}" x2="${contentRight}" y2="${bottomRuleY}" stroke="${COLORS.rule}" stroke-width="1"/>`);
   const sectionBaseline = bottomTop + 10;
   const columnGap = 28;
-  const leftColumnWidth = ((contentWidth - columnGap) * 2) / 3;
+  const modelColumnWidth = Math.min(
+    368,
+    Math.max(300, contentWidth * 0.32),
+  );
+  const leftColumnWidth =
+    contentWidth - columnGap - 28 - modelColumnWidth;
   const leftColumnRight = outer + leftColumnWidth;
   const dividerX = leftColumnRight + columnGap;
   const modelColumnX = dividerX + 28;
 
+  const projectHeader = "WHERE IT WENT · TOP PROJECTS";
   elements.push(svgText({
     x: outer,
     y: sectionBaseline,
-    value: "WHERE IT WENT · TOP PROJECTS",
+    value: projectHeader,
     fill: COLORS.muted,
     size: 12,
     spacing: "1.32",
@@ -1507,10 +1530,22 @@ export function renderTrendImage({
   const topRows = rows.slice(0, 3);
   const restRows = rows.slice(3);
   const topTokens = topRows.reduce((sum, row) => sum + row.totalTokens, 0);
+  const topShare = totalTokens > 0
+    ? percent((topTokens / totalTokens) * 100)
+    : "—";
+  const fullProjectSummary = `${rows.length} ${rows.length === 1 ? "project" : "projects"} active · top ${topRows.length} = ${topShare} of tokens`;
+  const shortProjectSummary = `top ${topRows.length} = ${topShare}`;
+  const projectHeaderWidth =
+    textWidth(projectHeader, 12) +
+    Math.max(0, projectHeader.length - 1) * 1.32;
+  const projectSummary = textWidth(fullProjectSummary, 12.5) <=
+      leftColumnRight - outer - projectHeaderWidth - 16
+    ? fullProjectSummary
+    : shortProjectSummary;
   elements.push(svgText({
     x: leftColumnRight,
     y: sectionBaseline,
-    value: `${rows.length} ${rows.length === 1 ? "project" : "projects"} active · top ${topRows.length} = ${totalTokens > 0 ? percent((topTokens / totalTokens) * 100) : "—"} of tokens`,
+    value: projectSummary,
     fill: COLORS.muted,
     size: 12.5,
     anchor: "end",
@@ -1609,9 +1644,32 @@ export function renderTrendImage({
       size: 13,
     }));
   }
-  const modelRateRight = modelColumnX + 165;
-  const modelBarX = modelColumnX + 180;
-  const modelBarWidth = contentRight - 58 - modelBarX;
+  const compactModelColumns = modelColumnWidth < 340;
+  const modelLabelSize = compactModelColumns ? 12.5 : 13.5;
+  const modelRateSize = compactModelColumns ? 11.5 : 12.5;
+  const widestModelLabel = cacheModelRows.reduce(
+    (width, model) => Math.max(
+      width,
+      textWidth(model.model, modelLabelSize, 700),
+    ),
+    0,
+  );
+  const minimumRateRight =
+    modelColumnX +
+    18 +
+    widestModelLabel +
+    8 +
+    textWidth("100.0%", modelRateSize, 700);
+  const modelRateRight = Math.max(
+    modelColumnX + modelColumnWidth * 0.42,
+    minimumRateRight,
+  );
+  const modelBarX = modelRateRight + 15;
+  const modelInputReserve = Math.min(
+    58,
+    Math.max(48, modelColumnWidth * 0.16),
+  );
+  const modelBarWidth = contentRight - modelInputReserve - modelBarX;
   cacheModelRows.forEach((model, index) => {
     const centerY = bottomTop + 29 + index * 30 + 9;
     if (!model.muted) {
@@ -1622,7 +1680,7 @@ export function renderTrendImage({
       y: centerY + 4,
       value: model.model,
       fill: model.muted ? COLORS.muted : COLORS.ink,
-      size: 13.5,
+      size: modelLabelSize,
       weight: model.muted ? 400 : 700,
     }));
     elements.push(svgText({
@@ -1630,7 +1688,7 @@ export function renderTrendImage({
       y: centerY + 4,
       value: percent(model.rate),
       fill: COLORS.secondary,
-      size: 12.5,
+      size: modelRateSize,
       weight: 700,
       anchor: "end",
       mono: true,

@@ -898,10 +898,18 @@ function snapshotAgeLabel(ageMs) {
   return `${Math.floor(hours / 24)}d old`;
 }
 
+function primitiveString(value) {
+  try {
+    const text = String.prototype.valueOf.call(value);
+    return text === value ? text : null;
+  } catch {
+    return null;
+  }
+}
+
 export function snapshotFreshness(snapshot = {}, nowMs = Date.now()) {
-  const generatedAtMs = typeof snapshot.generatedAt === "string"
-    ? Date.parse(snapshot.generatedAt)
-    : NaN;
+  const generatedAt = primitiveString(snapshot.generatedAt);
+  const generatedAtMs = generatedAt === null ? NaN : Date.parse(generatedAt);
   if (
     !Number.isFinite(generatedAtMs) ||
     !Number.isFinite(nowMs) ||
