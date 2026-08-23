@@ -28,6 +28,7 @@
   "files": [
     "bin",
     "lib",
+    "docs",
     "README.md"
   ],
   "bin": {
