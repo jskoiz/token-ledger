@@ -879,9 +879,9 @@ function snapshotAgeLabel(ageMs) {
 }
 
 export function snapshotFreshness(snapshot = {}, nowMs = Date.now()) {
-  const generatedAtMs = typeof snapshot.generatedAt === "string"
-    ? Date.parse(snapshot.generatedAt)
-    : NaN;
+  // generatedAt is an ISO string written by the importer; Date.parse maps a
+  // missing or malformed value to NaN, which reports as unknown below.
+  const generatedAtMs = Date.parse(snapshot.generatedAt ?? "");
   if (
     !Number.isFinite(generatedAtMs) ||
     !Number.isFinite(nowMs) ||

@@ -174,7 +174,7 @@ function dependencyEntries(packageEntry) {
 
 export function selectProductionPackageEntries(sourceLock, packageJson) {
   const sourcePackages = sourceLock.packages;
-  assert(sourcePackages && typeof sourcePackages === "object", "package-lock.json has no packages map.");
+  assert(sourcePackages, "package-lock.json has no packages map.");
 
   const selectedPackages = new Map();
   const pendingPackages = [[`node_modules/${packageJson.name}`, packageJson]];
