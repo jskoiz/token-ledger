@@ -159,10 +159,6 @@ function parsedNonNegativeFiniteNumber(value) {
   return Number.isFinite(number) && number >= 0 ? number : null;
 }
 
-function nonNegativeFiniteNumber(value) {
-  return parsedNonNegativeFiniteNumber(value) ?? 0;
-}
-
 function scaleToFiniteSum(values) {
   // Values are non-negative and finite; return one common factor for them.
   const ratio = values.reduce(
