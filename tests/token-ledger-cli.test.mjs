@@ -1729,6 +1729,72 @@ test("cache report wraps long timezone footer text at minimum width", () => {
   );
 });
 
+test("cache report wraps large measurement counts within the minimum-width footer column", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+  const event = {
+    timestamp: "2026-08-15T12:00:00.000Z",
+    model: "gpt-5.6-luna",
+    totalTokens: 1,
+    inputTokens: 1,
+    cachedInputTokens: 1,
+    outputTokens: 0,
+    breakdownAvailable: true,
+  };
+  const snapshot = {
+    generatedAt: "2026-08-15T12:00:00.000Z",
+    events: Array(100_000).fill(event),
+  };
+  const minimumSvg = renderCacheReportImage({
+    snapshot,
+    bounds,
+    days: 7,
+    options: { imageWidth: 900 },
+  });
+
+  const countLine = "100,000 of 100,000 calls";
+  const detailLine = "include component detail";
+  assert.match(minimumSvg, new RegExp(`>${countLine}<\\/text>`));
+  assert.match(minimumSvg, new RegExp(`>${detailLine}<\\/text>`));
+  assert.doesNotMatch(
+    minimumSvg,
+    /100,000 of 100,000 calls include component detail/,
+  );
+
+  const dividerX = 32 + ((900 - 64) / 3) * 2;
+  assert.match(
+    minimumSvg,
+    new RegExp(`<line x1="${dividerX.toFixed(2)}"[^>]*x2="${dividerX.toFixed(2)}"`),
+  );
+  for (const line of [countLine, detailLine]) {
+    const escapedLine = line.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = minimumSvg.match(
+      new RegExp(`<text x="([^"]+)"[^>]*font-size="12px"[^>]*>${escapedLine}<\\/text>`),
+    );
+    assert.ok(match, `expected footer line: ${line}`);
+    const rightEdge = Number(match[1]) + textWidth(line, 12);
+    assert.ok(rightEdge <= dividerX, `${line} crosses the footer divider`);
+  }
+
+  const normalSvg = renderCacheReportImage({
+    snapshot: { ...snapshot, events: [event] },
+    bounds,
+    days: 7,
+    options: { imageWidth: 900 },
+  });
+  assert.match(normalSvg, />1 of 1 calls include component detail<\/text>/);
+
+  const wideSvg = renderCacheReportImage({
+    snapshot,
+    bounds,
+    days: 7,
+    options: { imageWidth: 1_280 },
+  });
+  assert.match(
+    wideSvg,
+    />100,000 of 100,000 calls include component detail<\/text>/,
+  );
+});
+
 test("cache report moves long timezone header metadata below the title", () => {
   const timeZone = "America/Argentina/ComodRivadavia";
   const bounds = multiDayBounds("2026-08-15", timeZone, 7);
