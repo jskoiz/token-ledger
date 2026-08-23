@@ -487,6 +487,9 @@ export function renderTrendImage({
   const latestQuotaPoint = [...(trend.points ?? [])]
     .filter((point) => point.timestampMs <= bounds.end.getTime())
     .at(-1);
+  const latestQuotaReadMs = Number.isFinite(trend.observedThroughMs)
+    ? trend.observedThroughMs
+    : null;
   const rateCard = rateCardSummary(snapshot, bounds);
   const resetsInRange = trend.resets ?? [];
   const expiries = resetsInRange.filter((reset) => reset.kind === "weekly-expiry").length;
@@ -621,7 +624,9 @@ export function renderTrendImage({
       track: "rgba(246,183,60,.2)",
       fill: COLORS.line,
       barPercent: latestQuotaPoint.remainingPercent,
-      caption: `${resetCaption} · read ${timestampDateLabel(latestQuotaPoint.timestampMs, bounds.timeZone)}`,
+      caption: latestQuotaReadMs === null
+        ? resetCaption
+        : `${resetCaption} · read ${timestampDateLabel(latestQuotaReadMs, bounds.timeZone)}`,
       panel: COLORS.meterPanel,
       border: COLORS.meterPanelBorder,
     });
@@ -1375,8 +1380,8 @@ export function renderTrendImage({
       value: Number.isFinite(generatedAtMs)
         ? localDateTimeLabel(generatedAtMs, bounds.timeZone)
         : "unknown",
-      qualifier: latestQuotaPoint
-        ? `meter last read ${shortDateTimeLabel(latestQuotaPoint.timestampMs, bounds.timeZone)}`
+      qualifier: latestQuotaReadMs !== null
+        ? `meter last read ${shortDateTimeLabel(latestQuotaReadMs, bounds.timeZone)}`
         : "no weekly meter reads in range",
     },
   ];

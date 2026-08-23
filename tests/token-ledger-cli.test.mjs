@@ -1137,6 +1137,7 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
   const bounds = multiDayBounds("2026-08-15", "Pacific/Honolulu", 7);
   const resetOne = Date.parse("2026-08-11T10:00:00.000Z") / 1_000;
   const snapshot = {
+    generatedAt: "2026-08-15T12:00:00.000Z",
     events: [
       {
         timestamp: "2026-08-09T12:00:00.000Z",
@@ -1199,6 +1200,8 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
   assert.match(svg, /RESET 100%/);
   assert.match(svg, /1 scheduled · 0 early/);
   assert.match(svg, /was the normal weekly reset/);
+  assert.match(svg, /meter last read Aug 12, 2:00 AM/);
+  assert.doesNotMatch(svg, /meter last read Aug 16/);
   // The all-fast Sol segment gets the darker fast-mode shade, and the fast
   // mode stat card explains it.
   assert.match(svg, /fill="#0a655c"/);
