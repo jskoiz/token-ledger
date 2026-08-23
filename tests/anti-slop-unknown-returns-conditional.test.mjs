@@ -102,6 +102,25 @@ test("no-unknown-returns selects decidable conditional alias branches", async ()
     export function unknownTargetConcrete(): UnknownTarget<string> {
       throw new Error("unreachable");
     }
+    export function exhaustiveUnionUnknown(): unknown extends
+      {} | null | undefined ? unknown : number {
+      throw new Error("unreachable");
+    }
+    export function nonExhaustiveUnionUnknown(): unknown extends {} | null
+      ? number
+      : unknown {
+      throw new Error("unreachable");
+    }
+    export function anyIntersectionUnknown(): string extends any & number
+      ? unknown
+      : number {
+      throw new Error("unreachable");
+    }
+    export function anyNeverIntersectionUnknown(): string extends any & never
+      ? number
+      : unknown {
+      throw new Error("unreachable");
+    }
     export function anyDominated(): any extends string ? unknown : any {
       throw new Error("unreachable");
     }
@@ -127,11 +146,20 @@ test("no-unknown-returns selects decidable conditional alias branches", async ()
     export function unknownTargetTop(): UnknownTarget<unknown> {
       throw new Error("unreachable");
     }
+    export function exhaustiveUnionConcrete(): unknown extends
+      {} | null | undefined ? number : unknown {
+      throw new Error("unreachable");
+    }
+    export function anyIntersectionConcrete(): string extends any & number
+      ? number
+      : unknown {
+      throw new Error("unreachable");
+    }
   `);
   assert.equal(result.status, 1, result.output);
   assert.equal(
     result.output.match(/anti-slop\(no-unknown-returns\)/g)?.length,
-    14,
+    18,
     result.output,
   );
 });

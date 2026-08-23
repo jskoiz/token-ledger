@@ -100,6 +100,9 @@ function isGlobalReflect(sourceCode, expression) {
 }
 
 function memberValue(value, property) {
+  if (value?.kind === "globalThis" && property === "Reflect") {
+    return { kind: "reflect" };
+  }
   return value?.kind === "reflect"
     ? { kind: "method", method: property }
     : null;
@@ -108,6 +111,9 @@ function memberValue(value, property) {
 function resolveReflectValue(sourceCode, expression, visited = new Set()) {
   const current = unwrapExpression(expression);
   if (isGlobalReflect(sourceCode, current)) return { kind: "reflect" };
+  if (isGlobalIdentifier(sourceCode, current, "globalThis")) {
+    return { kind: "globalThis" };
+  }
   if (current.type === "Identifier") {
     const variable = resolveVariable(sourceCode, current);
     if (

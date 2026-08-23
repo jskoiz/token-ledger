@@ -62,11 +62,23 @@ test("no-unknown-type-aliases resolves conditional branches that expose unknown"
     type UnknownUnionFalse = unknown extends string | number ? number : unknown;
     type UnknownTarget<T> = unknown extends T ? number : unknown;
     type UnknownTargetConcrete = UnknownTarget<string>;
+    type ExhaustiveUnionUnknown = unknown extends {} | null | undefined
+      ? unknown
+      : number;
+    type NonExhaustiveUnionUnknown = unknown extends {} | null
+      ? number
+      : unknown;
+    type AnyIntersectionUnknown = string extends any & number
+      ? unknown
+      : number;
+    type AnyNeverIntersectionUnknown = string extends any & never
+      ? number
+      : unknown;
   `);
   assert.equal(result.status, 1, result.output);
   assert.equal(
     result.output.match(/anti-slop\(no-unknown-type-aliases\)/g)?.length,
-    16,
+    20,
     result.output,
   );
   for (const alias of [
@@ -86,6 +98,10 @@ test("no-unknown-type-aliases resolves conditional branches that expose unknown"
     "UnknownUnionUnknown",
     "UnknownUnionFalse",
     "UnknownTargetConcrete",
+    "ExhaustiveUnionUnknown",
+    "NonExhaustiveUnionUnknown",
+    "AnyIntersectionUnknown",
+    "AnyNeverIntersectionUnknown",
   ]) {
     assert.match(result.output, new RegExp("Type alias `" + alias + "` hides"));
   }
@@ -116,6 +132,12 @@ test("no-unknown-type-aliases preserves undecidable and concrete conditional con
     type UnknownUnionConcrete = unknown extends unknown | string ? number : unknown;
     type UnknownTarget<T> = unknown extends T ? number : unknown;
     type UnknownTargetTop = UnknownTarget<unknown>;
+    type ExhaustiveUnionConcrete = unknown extends {} | null | undefined
+      ? number
+      : unknown;
+    type AnyIntersectionConcrete = string extends any & number
+      ? number
+      : unknown;
   `);
   assert.equal(result.status, 0, result.output);
   assert.doesNotMatch(result.output, /anti-slop\(no-unknown-type-aliases\)/);
