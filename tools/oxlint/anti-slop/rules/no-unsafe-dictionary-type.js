@@ -4,8 +4,15 @@ import {
 	classifyUnsafeDictionary,
 	classifyUnsafeDictionaryValue,
 	createTypeEnvironment,
+	isClosedOmitSourceType,
+	isFilteredFiniteContainerValueType,
+	isFinitePickSourceType,
 
 } from "../shared/dictionary-types.js";
+import {
+	typeAliasReference,
+	visibleTypeBinding,
+} from "../shared/type-aliases.js";
 
 
 
@@ -53,8 +60,12 @@ function isTypeNode(node             )                        {
 	return typeNodeKinds.has(node.type);
 }
 
-function typeReferenceName(type                        )                {
-	return type.typeName.type === "Identifier" ? type.typeName.name : null;
+function aliasFromType(type               , environment                 )          {
+	const binding = environment.resolveTypeBinding?.(type);
+	if (binding !== undefined) return binding.alias ?? null;
+	if (typeAliasReference(type)?.namespace.length > 0) return null;
+	const name = type.typeName?.type === "Identifier" ? type.typeName.name : null;
+	return name === null ? null : environment.aliases.get(name) ?? null;
 }
 
 function isInsideTypeAliasDeclaration(node             )          {
@@ -97,10 +108,9 @@ function hasReportableType(node               , environment                 )   
 
 function isPlainAliasConsumerUse(node               , environment                 )          {
 	if (node.type !== "TSTypeReference" || node.typeArguments?.params.length) return false;
-	const name = typeReferenceName(node);
-	const alias = name === null ? undefined : environment.aliases.get(name);
+	const alias = aliasFromType(node, environment);
 	return (
-		alias !== undefined &&
+		alias !== null &&
 		!isInsideTypeAliasDeclaration(node) &&
 		hasReportableType(alias, environment)
 	);
@@ -111,8 +121,13 @@ function shouldReportType(node               , environment                 )    
 	if (classifyUnsafeDictionary(node, environment) === null) return false;
 	let current                     = node.parent;
 	while (current !== null && current.type !== "Program") {
-		if (isTypeNode(current) && classifyUnsafeDictionary(current, environment) !== null)
-			return false;
+		if (isTypeNode(current)) {
+				if (isFilteredFiniteContainerValueType(node, current, environment) ||
+					isFinitePickSourceType(node, current, environment) ||
+					isClosedOmitSourceType(node, current, environment))
+				return false;
+			if (classifyUnsafeDictionary(current, environment) !== null) return false;
+		}
 		current = current.parent;
 	}
 	return true;
@@ -146,6 +161,12 @@ export const noUnsafeDictionaryTypeRule = defineRule({
 		return {
 			Program(node) {
 				environment = createTypeEnvironment(node);
+				environment.resolveTypeBinding = (type) => {
+					const reference = typeAliasReference(type);
+					return reference === null
+						? undefined
+						: visibleTypeBinding(reference, type, context.sourceCode);
+				};
 			},
 			TSTypeReference: reportIfUnsafe,
 			TSTypeLiteral: reportIfUnsafe,
