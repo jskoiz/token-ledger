@@ -1139,11 +1139,17 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
         timestamp: "2026-08-09T12:00:00.000Z",
         model: "gpt-5.6-luna",
         totalTokens: 1_000,
+        inputTokens: 800,
+        cachedInputTokens: 600,
+        outputTokens: 200,
       },
       {
         timestamp: "2026-08-10T12:00:00.000Z",
         model: "gpt-5.6-sol",
         totalTokens: 2_000,
+        inputTokens: 1_000,
+        cachedInputTokens: 900,
+        outputTokens: 1_000,
         serviceTier: "priority",
       },
       {
@@ -1185,27 +1191,29 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
   assert.match(svg, /fill="#10a394"/);
   assert.match(svg, /ACTUAL TOKEN VOLUME/);
   assert.match(svg, /WEEKLY METER REMAINING/);
-  assert.match(svg, /35\.0 meter points/);
-  assert.match(svg, /ESTIMATED COST/);
   assert.match(svg, /stroke="#f6b73c"/);
   assert.match(svg, /Luna/);
   assert.match(svg, /Sol/);
   // The fixture's second window follows a genuine weekly expiry, so the
-  // reset break, its dated footnote, and the plain-language reset count all
-  // appear.
+  // reset break appears.
   assert.match(svg, /RESET 100%/);
-  assert.match(svg, /1 scheduled · 0 early/);
-  assert.match(svg, /was the normal weekly reset/);
   // The all-fast Sol segment gets the darker fast-mode shade, and the fast
   // mode stat card explains it.
   assert.match(svg, /fill="#0a655c"/);
   assert.match(svg, /FAST MODE/);
   assert.match(svg, /1\.50× rate/);
   assert.match(svg, /Darker shade = fast mode/);
-  // The projects and pace row is fed from the events in range.
+  // The projects row and the pace block sit in the combined layout.
   assert.match(svg, /WHERE IT WENT · TOP PROJECTS/);
   assert.match(svg, /PACE &amp; RUNWAY/);
   assert.match(svg, /tokens per meter point/);
+  // The compressed cache sections weight the fixture's measured input:
+  // (600 + 900) / (800 + 1000) = 83.3%.
+  assert.match(svg, /CACHE RATE BY PERIOD/);
+  assert.match(svg, /CACHE RATE BY MODEL/);
+  assert.match(svg, /83\.3% weighted/);
+  // The footnote quadrants are gone from the combined report.
+  assert.doesNotMatch(svg, /ESTIMATED COST|METER BURNED|DATA AS OF|NaN/);
   assert.ok((svg.match(/<rect /g) ?? []).length >= 4);
 
   const drainSvg = renderTrendImage({
@@ -1217,7 +1225,7 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
   });
   assert.match(drainSvg, /OBSERVED LIMIT DRAIN/);
   assert.match(drainSvg, /Bars = observed meter drops/);
-  assert.match(drainSvg, /35\.0 meter points/);
+  assert.match(drainSvg, /CACHE RATE BY PERIOD/);
 });
 
 test("cache report weights cached input, clamps event values, and keeps models secondary", () => {

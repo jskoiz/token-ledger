@@ -88,12 +88,12 @@ same way as on the standard report.
 
 The terminal trend view is a compact approximation of the image view. For the
 full chart grammar, use `--image`: it writes a single shareable report card as
-a PNG — model stat cards with week-over-week delta chips and share micro-bars,
-calendar-day columns of local token volume stacked by model, the observed
-weekly meter remaining overlaid as a smoothed amber line with dashed reset
-breaks and a few callout pills, a top-projects row with pace and runway
-figures, and a plain-language footnote strip (meter points burned, estimated
-cost, scheduled vs early resets, and data freshness).
+a PNG — compact model stat cards with week-over-week delta chips beside the
+pace and runway figures, calendar-day columns of local token volume stacked by
+model, the observed weekly meter remaining overlaid as a smoothed amber line
+with dashed reset breaks and a few callout pills, a compressed
+cache-rate-by-period strip aligned under the main chart, and a bottom row that
+pairs top projects with per-model cache rates.
 
 When run from a terminal, the finished PNG opens in the default image viewer
 automatically so the report lands on screen instead of in a file browser.
@@ -101,8 +101,8 @@ Pass `--no-open` to skip that; piped or scripted runs never open a window.
 
 Turns run in fast mode (service tier "priority") are drawn as a darker shade
 within their model's segment, with a legend entry explaining the shade;
-fast-mode turns are weighted 1.5× in the credit estimate because they debit
-the plan limit at a higher rate.
+fast-mode turns are weighted 1.5× in the rate-card credit weighting because
+they debit the plan limit at a higher rate.
 
 Pass `--drain` to flip the columns into limit-drain units instead: each column
 becomes the weekly limit percentage the meter dropped, stacked by model using
@@ -127,9 +127,8 @@ choose a width from 900 to 2400 pixels.
 Use `trend 14d` for daily columns across two weeks. At 30 days, the terminal
 uses readable multi-day bins: three-day bins at ordinary widths and two-day
 bins on wider terminals. The image view uses the same readable multi-day
-binning at 30 days. The image also reports the separate local rate-card credit
-estimate when token breakdowns are available; that estimate is an absolute
-credit count and never rescales the observed-drain columns.
+binning at 30 days, and the cache-rate strip follows the same bins so its
+columns stay aligned under the usage chart.
 
 The CLI automatically checks the local Codex source files before rendering. If
 they are newer than the local cache, it rebuilds the privacy-reduced snapshot.

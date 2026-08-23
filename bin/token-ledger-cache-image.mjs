@@ -430,9 +430,17 @@ export function aggregateCacheRange(snapshot, bounds) {
   return accumulateRange(snapshot, bounds);
 }
 
-export function buildCacheReportData(snapshot, bounds, days, plotWidth) {
+export function buildCacheReportData(
+  snapshot,
+  bounds,
+  days,
+  plotWidth,
+  binSizeOverride = null,
+) {
   const rangeDays = Math.max(1, Number(days) || Number(bounds.rangeDays) || 7);
-  const binSize = chooseBinSize(rangeDays, plotWidth, {
+  // The combined report passes the trend chart's bin size so both charts'
+  // columns stay vertically aligned.
+  const binSize = binSizeOverride ?? chooseBinSize(rangeDays, plotWidth, {
     minBinWidth: MIN_BIN_WIDTH,
     preferDaily: true,
   });

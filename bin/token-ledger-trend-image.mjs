@@ -7,11 +7,9 @@ import {
   buildUsageTrend,
   weeklyQuotaObservations,
 } from "./token-ledger-trend.mjs";
-import {
-  creditsForUsage,
-  FAST_MODE_MULTIPLIER,
-} from "./token-ledger-rates.mjs";
+import { FAST_MODE_MULTIPLIER } from "./token-ledger-rates.mjs";
 import { buildActualTokenBins } from "./token-ledger-trend-terminal.mjs";
+import { buildCacheReportData } from "./token-ledger-cache-image.mjs";
 
 const MODEL_ORDER = [
   "Luna",
@@ -65,6 +63,10 @@ const COLORS = {
   deltaDownFill: "rgba(217,83,79,.16)",
   remainderBar: "#475569",
   onFill: "rgba(255,255,255,.82)",
+  cached: "#2ec4a1",
+  uncached: "#d88362",
+  weighted: "#c7d2e8",
+  cacheTrack: "#202a3a",
 };
 
 const FONT_FAMILY = "system-ui, -apple-system, 'Segoe UI', sans-serif";
@@ -151,60 +153,6 @@ function sortedModelEntries(values) {
     .sort(([left], [right]) => modelSort(left, right));
 }
 
-function eventRateCardCredits(event) {
-  // Recompute from token components first so the current rate card applies;
-  // snapshots can carry credits stored under an outdated card. Fast-mode
-  // turns (service tier "priority") debit the limit at a higher rate.
-  const computed = creditsForUsage(event.model, event);
-  if (Number.isFinite(computed) && computed >= 0) {
-    return event.serviceTier === "priority"
-      ? computed * FAST_MODE_MULTIPLIER
-      : computed;
-  }
-  // Stored credits from current snapshots already include the fast-mode
-  // multiplier.
-  const stored = Number(event.rateCardCredits);
-  if (
-    event.rateCardCredits !== null &&
-    event.rateCardCredits !== undefined &&
-    Number.isFinite(stored) &&
-    stored >= 0
-  ) {
-    return stored;
-  }
-  return null;
-}
-
-function rateCardSummary(snapshot, bounds) {
-  const startMs = bounds.start.getTime();
-  const endMs = bounds.end.getTime();
-  let totalTokens = 0;
-  let ratedTokens = 0;
-  let credits = 0;
-  let fastCredits = 0;
-  for (const event of snapshot.events ?? []) {
-    const timestampMs = new Date(event.timestamp).getTime();
-    if (!Number.isFinite(timestampMs) || timestampMs < startMs || timestampMs >= endMs) {
-      continue;
-    }
-    const tokens = Math.max(0, Number(event.totalTokens) || 0);
-    totalTokens += tokens;
-    const eventCredits = eventRateCardCredits(event);
-    if (Number.isFinite(eventCredits) && eventCredits >= 0) {
-      ratedTokens += tokens;
-      credits += eventCredits;
-      if (event.serviceTier === "priority") fastCredits += eventCredits;
-    }
-  }
-  return {
-    totalTokens,
-    ratedTokens,
-    credits,
-    fastCredits,
-    coveragePercent: totalTokens > 0 ? (ratedTokens / totalTokens) * 100 : 0,
-  };
-}
-
 function dateParts(dateString) {
   return dateString.split("-").map(Number);
 }
@@ -260,26 +208,6 @@ function localWeekdayLabel(dateString, timeZone) {
     timeZone,
     weekday: "short",
   }).format(zonedMidnight(dateString, timeZone));
-}
-
-function localDateTimeLabel(timestampMs, timeZone) {
-  if (!Number.isFinite(timestampMs)) return "unknown time";
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(new Date(timestampMs));
-}
-
-function shortDateTimeLabel(timestampMs, timeZone) {
-  if (!Number.isFinite(timestampMs)) return "unknown time";
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(new Date(timestampMs));
 }
 
 function timestampDateLabel(timestampMs, timeZone) {
@@ -487,12 +415,7 @@ export function renderTrendImage({
   const latestQuotaPoint = [...(trend.points ?? [])]
     .filter((point) => point.timestampMs <= bounds.end.getTime())
     .at(-1);
-  const rateCard = rateCardSummary(snapshot, bounds);
   const resetsInRange = trend.resets ?? [];
-  const expiries = resetsInRange.filter((reset) => reset.kind === "weekly-expiry").length;
-  const restarts = resetsInRange.filter(
-    (reset) => reset.kind !== "weekly-expiry" && reset.kind !== "start",
-  ).length;
   const weeklyObservationsAll = weeklyQuotaObservations(snapshot).filter(
     (observation) => observation.timestampMs < bounds.end.getTime(),
   );
@@ -500,34 +423,148 @@ export function renderTrendImage({
 
   const rows = projectRows ?? fallbackProjectRows(snapshot, bounds);
 
+  // Cache bins share the trend chart's bin size so both charts' columns stay
+  // vertically aligned.
+  const cacheData = buildCacheReportData(
+    snapshot,
+    bounds,
+    days,
+    plotWidth,
+    actual.binSize,
+  );
+  const hasCache = cacheData.inputTokens > 0;
+  const cacheModelRows = (() => {
+    if (!hasCache) return [];
+    const models = cacheData.models;
+    if (models.length <= 4) return models;
+    const rest = models.slice(3);
+    const restInput = rest.reduce((sum, model) => sum + model.inputTokens, 0);
+    const restCached = rest.reduce(
+      (sum, model) => sum + model.cachedInputTokens,
+      0,
+    );
+    return [...models.slice(0, 3), {
+      model: `${rest.length} other models`,
+      inputTokens: restInput,
+      cachedInputTokens: restCached,
+      rate: restInput > 0 ? (restCached / restInput) * 100 : null,
+      muted: true,
+    }];
+  })();
+
+  // ---- Pace & runway (computed early: its height shapes the top row) ----
+  const generatedAtMs = new Date(snapshot.generatedAt).getTime();
+  const paceLines = [];
+  let paceNote = null;
+  const dailyAverage = totalTokens / Math.max(1, days);
+  if (hasLine && meterUsable && latestQuotaPoint && totalTokens > 0) {
+    const tokensPerPercent = totalTokens / burn.totalPercent;
+    const burnPerDay = dailyAverage / tokensPerPercent;
+    const runwayDays = burnPerDay > 0
+      ? latestQuotaPoint.remainingPercent / burnPerDay
+      : null;
+    if (runwayDays !== null) {
+      paceLines.push({
+        value: `${runwayDays.toFixed(1)} days`,
+        size: 23,
+        weight: 800,
+        color: COLORS.line,
+        detail: "of meter left at this pace",
+      });
+    }
+    paceLines.push({
+      value: `${compact(dailyAverage)} / day`,
+      size: 17,
+      weight: 700,
+      color: COLORS.ink,
+      detail: `${days}-day average · ${burnPerDay.toFixed(1)}% of meter`,
+    });
+    paceLines.push({
+      value: `${compact(tokensPerPercent)} / 1%`,
+      size: 17,
+      weight: 700,
+      color: COLORS.ink,
+      detail: "tokens per meter point",
+    });
+    const daysToReset = latestResetsAtSec !== null && Number.isFinite(generatedAtMs)
+      ? (latestResetsAtSec * 1_000 - generatedAtMs) / 86_400_000
+      : null;
+    if (runwayDays !== null && daysToReset !== null && daysToReset > 0) {
+      const resetIn = Math.max(1, Math.round(daysToReset));
+      const resetInLabel = `${resetIn} ${resetIn === 1 ? "day" : "days"}`;
+      const gap = runwayDays - daysToReset;
+      if (Math.abs(gap) <= 1.5) {
+        paceNote = `Next weekly reset in ${resetInLabel} — the current pace lands within ~${Math.max(1, Math.round(Math.abs(gap)))} day of it.`;
+      } else if (gap > 0) {
+        paceNote = `Next weekly reset in ${resetInLabel} — the current pace leaves ~${Math.round(gap)} days of headroom past it.`;
+      } else {
+        paceNote = `Next weekly reset in ${resetInLabel} — the current pace runs the meter out ~${Math.round(-gap)} days before it.`;
+      }
+    }
+  } else {
+    paceLines.push({
+      value: `${compact(dailyAverage)} / day`,
+      size: 17,
+      weight: 700,
+      color: COLORS.ink,
+      detail: `${days}-day average`,
+    });
+    paceNote = "No usable weekly meter drain in this range, so runway cannot be estimated.";
+  }
+
   // ---- Layout ----
   const headerBaseline = 53;
   const cardTop = 82;
-  const cardHeight = 121;
-  const chartBlockTop = cardTop + cardHeight + 18;
+  const cardHeight = 96;
+  const topGap = 26;
+  const paceWidth = 424;
+  const cardsRegionWidth = contentWidth - paceWidth - topGap;
+  const paceX = outer + cardsRegionWidth + topGap;
+  const paceNoteLines = [];
+  if (paceNote) {
+    let current = "";
+    for (const word of paceNote.split(" ")) {
+      const candidate = current ? `${current} ${word}` : word;
+      if (textWidth(candidate, 12) > paceWidth && current) {
+        paceNoteLines.push(current);
+        current = word;
+      } else {
+        current = candidate;
+      }
+    }
+    if (current) paceNoteLines.push(current);
+  }
+  const paceBlockHeight = 44 + (paceLines.length - 1) * 33 +
+    (paceNoteLines.length ? 12 + paceNoteLines.length * 17 : 0);
+  const chartBlockTop = Math.max(cardTop + cardHeight, cardTop + paceBlockHeight) + 14;
   const plotTop = chartBlockTop + 40;
   const plotHeight = 430;
   const plotBottom = plotTop + plotHeight;
   const chartBlockBottom = plotBottom + 70;
   const legendBaseline = chartBlockBottom + 25;
-  const projectsRuleY = legendBaseline + 23;
-  const projectsTop = projectsRuleY + 20;
+  const cacheRuleY = legendBaseline + 23;
+  const cacheHeaderBaseline = cacheRuleY + 27;
+  const cachePlotTop = cacheHeaderBaseline + 34;
+  const cachePlotHeight = 128;
+  const cachePlotBottom = hasCache
+    ? cachePlotTop + cachePlotHeight
+    : cacheHeaderBaseline + 26;
+  const bottomRuleY = cachePlotBottom + 30;
+  const bottomTop = bottomRuleY + 20;
   const projectRowCount = Math.min(4, rows.length > 3 ? 4 : rows.length);
-  const paceLineCount = hasLine && meterUsable ? 3 : 1;
-  const projectsBlockHeight = Math.max(
+  const bottomBlockHeight = Math.max(
     29 + projectRowCount * 29,
-    29 + paceLineCount * 34 + 44,
-    178,
+    29 + Math.max(1, cacheModelRows.length) * 30,
+    120,
   );
-  const footnotesRuleY = projectsTop + projectsBlockHeight + 34;
-  const height = footnotesRuleY + 18 + 53 + 30;
+  const height = bottomTop + bottomBlockHeight + 34;
 
   const yearLabel = bounds.endDateString.slice(0, 4);
   const title = `TOKEN LEDGER · ${days}-DAY TREND`;
   const subtitle = `${localDateLabel(bounds.startDateString, bounds.timeZone)} – ${localDateLabel(bounds.endDateString, bounds.timeZone)}, ${yearLabel} · ${bounds.timeZone}`;
   const description = percentMode
-    ? "Dark report card: model stat cards with share micro-bars, stacked columns of the observed weekly-limit percentage consumed per column split by model via rate-card credit weights, the observed weekly meter remaining as a smoothed amber line with reset breaks and callout pills, top projects with pace and runway, and provenance footnotes."
-    : "Dark report card: model stat cards with week-over-week delta chips and share micro-bars, stacked columns of local token volume by model with fast-mode usage in a darker shade, the observed weekly meter remaining as a smoothed amber line with reset breaks and callout pills, top projects with pace and runway, and provenance footnotes.";
+    ? "Dark report card: compact model stat cards beside pace and runway, stacked columns of the observed weekly-limit percentage consumed per column split by model via rate-card credit weights, the observed weekly meter remaining as a smoothed amber line with reset breaks and callout pills, a compressed cache-rate-by-period strip, and top projects beside per-model cache rates."
+    : "Dark report card: compact model stat cards with week-over-week delta chips beside pace and runway, stacked columns of local token volume by model with fast-mode usage in a darker shade, the observed weekly meter remaining as a smoothed amber line with reset breaks and callout pills, a compressed cache-rate-by-period strip, and top projects beside per-model cache rates.";
 
   const elements = [
     `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="trend-title trend-description">`,
@@ -599,6 +636,7 @@ export function renderTrendImage({
       fill: FAST_MODE_LABEL_COLOR,
       barPercent: fastShare,
       caption: `${percent(fastShare)} of tokens · darker bar shade`,
+      captionShort: `${percent(fastShare)} of tokens`,
       panel: COLORS.panel,
       border: COLORS.panelBorder,
     });
@@ -622,13 +660,15 @@ export function renderTrendImage({
       fill: COLORS.line,
       barPercent: latestQuotaPoint.remainingPercent,
       caption: `${resetCaption} · read ${timestampDateLabel(latestQuotaPoint.timestampMs, bounds.timeZone)}`,
+      captionShort: resetCaption,
       panel: COLORS.meterPanel,
       border: COLORS.meterPanelBorder,
     });
   }
   if (cards.length) {
-    const gap = 12;
-    const cardWidth = (contentWidth - gap * (cards.length - 1)) / cards.length;
+    const gap = 10;
+    const cardWidth = (cardsRegionWidth - gap * (cards.length - 1)) / cards.length;
+    const innerWidth = cardWidth - 26;
     cards.forEach((card, index) => {
       const x = outer + index * (cardWidth + gap);
       elements.push(svgRect(x, cardTop, cardWidth, cardHeight, {
@@ -637,65 +677,108 @@ export function renderTrendImage({
         stroke: card.border,
         "stroke-width": 1,
       }));
-      elements.push(`<circle cx="${(x + 19.5).toFixed(2)}" cy="${cardTop + 21.5}" r="4.5" fill="${card.swatch}"/>`);
+      elements.push(`<circle cx="${(x + 16.5).toFixed(2)}" cy="${cardTop + 17.5}" r="3.5" fill="${card.swatch}"/>`);
       elements.push(svgText({
-        x: x + 32,
-        y: cardTop + 26,
+        x: x + 26,
+        y: cardTop + 21,
         value: card.label.toUpperCase(),
         fill: card.labelColor,
-        size: 13,
-        spacing: "1.17",
+        size: 10,
+        spacing: ".9",
       }));
-      const valueBaseline = cardTop + 63;
+      const valueBaseline = cardTop + 50;
       elements.push(svgText({
-        x: x + 15,
+        x: x + 13,
         y: valueBaseline,
         value: card.value,
         fill: card.valueColor,
-        size: 29,
+        size: 20,
         weight: 800,
-        spacing: "-0.72",
+        spacing: "-0.5",
       }));
-      const valueWidth = textWidth(card.value, 29, 800);
+      const valueWidth = textWidth(card.value, 20, 800);
       if (card.chip) {
-        const chipTextWidth = textWidth(card.chip.text, 12.5, 700);
-        const chipX = x + 15 + valueWidth + 9;
-        elements.push(svgRect(chipX, valueBaseline - 13, chipTextWidth + 12, 19, {
-          rx: 4,
+        const chipTextWidth = textWidth(card.chip.text, 10, 700);
+        const chipX = x + 13 + valueWidth + 7;
+        elements.push(svgRect(chipX, valueBaseline - 11, chipTextWidth + 10, 15, {
+          rx: 3,
           fill: card.chip.fill,
         }));
         elements.push(svgText({
-          x: chipX + 6,
+          x: chipX + 5,
           y: valueBaseline,
           value: card.chip.text,
           fill: card.chip.color,
-          size: 12.5,
+          size: 10,
           weight: 700,
         }));
       } else if (card.suffix) {
         elements.push(svgText({
-          x: x + 15 + valueWidth + 9,
+          x: x + 13 + valueWidth + 7,
           y: valueBaseline,
           value: card.suffix,
           fill: COLORS.secondary,
-          size: 12.5,
+          size: 10,
         }));
       }
-      const barY = cardTop + 82;
-      const barWidth = cardWidth - 30;
-      elements.push(svgRect(x + 15, barY, barWidth, 4, { rx: 2, fill: card.track }));
-      const fillWidth = (Math.min(100, Math.max(0, card.barPercent)) / 100) * barWidth;
+      const barY = cardTop + 62;
+      elements.push(svgRect(x + 13, barY, innerWidth, 3, { rx: 1.5, fill: card.track }));
+      const fillWidth = (Math.min(100, Math.max(0, card.barPercent)) / 100) * innerWidth;
       if (fillWidth > 0) {
-        elements.push(svgRect(x + 15, barY, fillWidth, 4, { rx: 2, fill: card.fill }));
+        elements.push(svgRect(x + 13, barY, fillWidth, 3, { rx: 1.5, fill: card.fill }));
       }
+      const caption = card.captionShort && textWidth(card.caption, 10) > innerWidth
+        ? card.captionShort
+        : card.caption;
       elements.push(svgText({
-        x: x + 15,
-        y: cardTop + 103,
-        value: card.caption,
+        x: x + 13,
+        y: cardTop + 82,
+        value: caption,
         fill: COLORS.muted,
-        size: 12.5,
+        size: 10,
       }));
     });
+  }
+
+  // ---- Pace & runway (top right) ----
+  elements.push(svgText({
+    x: paceX,
+    y: cardTop + 10,
+    value: "PACE & RUNWAY",
+    fill: COLORS.muted,
+    size: 12,
+    spacing: "1.32",
+  }));
+  let paceBaseline = cardTop + 44;
+  for (const line of paceLines) {
+    elements.push(svgText({
+      x: paceX,
+      y: paceBaseline,
+      value: line.value,
+      fill: line.color,
+      size: line.size,
+      weight: line.weight,
+      spacing: line.size >= 23 ? "-0.46" : null,
+    }));
+    elements.push(svgText({
+      x: paceX + textWidth(line.value, line.size, line.weight) + 10,
+      y: paceBaseline,
+      value: line.detail,
+      fill: COLORS.muted,
+      size: 12.5,
+    }));
+    paceBaseline += 33;
+  }
+  let paceNoteBaseline = paceBaseline - 33 + 29;
+  for (const line of paceNoteLines) {
+    elements.push(svgText({
+      x: paceX,
+      y: paceNoteBaseline,
+      value: line,
+      fill: COLORS.muted,
+      size: 12,
+    }));
+    paceNoteBaseline += 17;
   }
 
   // ---- Chart grid + axes ----
@@ -1110,14 +1193,139 @@ export function renderTrendImage({
     );
   }
 
-  // ---- Projects + pace ----
-  elements.push(`<line x1="${outer}" y1="${projectsRuleY}" x2="${contentRight}" y2="${projectsRuleY}" stroke="${COLORS.rule}" stroke-width="1"/>`);
-  const sectionBaseline = projectsTop + 10;
+  // ---- Cache rate by period (compressed strip) ----
+  elements.push(`<line x1="${outer}" y1="${cacheRuleY}" x2="${contentRight}" y2="${cacheRuleY}" stroke="${COLORS.rule}" stroke-width="1"/>`);
+  elements.push(svgText({
+    x: outer,
+    y: cacheHeaderBaseline,
+    value: "CACHE RATE BY PERIOD",
+    fill: COLORS.muted,
+    size: 12,
+    spacing: "1.32",
+  }));
+  if (hasCache) {
+    const cacheLegendItems = [
+      { swatch: COLORS.cached, label: "Cached" },
+      { swatch: COLORS.uncached, label: "Uncached" },
+      {
+        swatch: null,
+        label: `${percent(cacheData.rate)} weighted · ${compact(cacheData.cachedInputTokens)} of ${compact(cacheData.inputTokens)} input cached`,
+      },
+    ];
+    let cacheLegendX = contentRight - cacheLegendItems.reduce(
+      (sum, item) =>
+        sum + (item.swatch ? 20 : 0) + textWidth(item.label, 12.5) + 18,
+      -18,
+    );
+    for (const item of cacheLegendItems) {
+      if (item.swatch) {
+        elements.push(svgRect(cacheLegendX, cacheHeaderBaseline - 10, 13, 11, {
+          rx: 2,
+          fill: item.swatch,
+        }));
+        cacheLegendX += 20;
+      }
+      elements.push(svgText({
+        x: cacheLegendX,
+        y: cacheHeaderBaseline,
+        value: item.label,
+        fill: COLORS.muted,
+        size: 12.5,
+      }));
+      cacheLegendX += textWidth(item.label, 12.5) + 18;
+    }
+    for (const value of [100, 50, 0]) {
+      const y = cachePlotBottom - (value / 100) * cachePlotHeight;
+      elements.push(`<line x1="${plotLeft}" y1="${y.toFixed(2)}" x2="${plotRight}" y2="${y.toFixed(2)}" stroke="${value === 0 ? COLORS.baseline : COLORS.grid}" stroke-width="1"/>`);
+      elements.push(svgText({
+        x: plotLeft - 14,
+        y: y + 4,
+        value: `${value}%`,
+        fill: COLORS.muted,
+        size: 11.5,
+        anchor: "end",
+        mono: true,
+      }));
+    }
+    const cacheSlotWidth = plotWidth / cacheData.binCount;
+    const cacheBarWidth = Math.min(
+      74,
+      Math.max(MIN_BAR_WIDTH, cacheSlotWidth * 0.6),
+    );
+    const showCacheRateLabels = cacheSlotWidth >= 46 && cacheData.binCount <= 20;
+    cacheData.bins.forEach((bin, binIndex) => {
+      const centerX = plotLeft + (binIndex + 0.5) * cacheSlotWidth;
+      const barX = centerX - cacheBarWidth / 2;
+      if (Number.isFinite(bin.rate)) {
+        elements.push(svgRect(barX, cachePlotTop, cacheBarWidth, cachePlotHeight, {
+          rx: 3,
+          fill: COLORS.uncached,
+          opacity: ".88",
+        }));
+        const cachedHeight = cachePlotHeight * (bin.rate / 100);
+        if (cachedHeight > 0) {
+          elements.push(svgRect(
+            barX,
+            cachePlotBottom - cachedHeight,
+            cacheBarWidth,
+            cachedHeight,
+            { rx: 2, fill: COLORS.cached },
+          ));
+        }
+        if (showCacheRateLabels) {
+          elements.push(svgText({
+            x: centerX,
+            y: cachePlotTop - 9,
+            value: percent(bin.rate),
+            fill: COLORS.secondary,
+            size: 11.5,
+            weight: 700,
+            anchor: "middle",
+            mono: true,
+          }));
+        }
+      } else {
+        // No measured input this period: an empty track with a midline dash.
+        elements.push(svgRect(barX, cachePlotTop, cacheBarWidth, cachePlotHeight, {
+          rx: 3,
+          fill: COLORS.cacheTrack,
+          stroke: COLORS.baseline,
+          "stroke-width": 1,
+        }));
+        elements.push(`<line x1="${(barX + 5).toFixed(2)}" y1="${cachePlotTop + cachePlotHeight / 2}" x2="${(barX + cacheBarWidth - 5).toFixed(2)}" y2="${cachePlotTop + cachePlotHeight / 2}" stroke="${COLORS.muted}" stroke-width="1"/>`);
+      }
+    });
+    if (Number.isFinite(cacheData.rate)) {
+      const lineY = cachePlotBottom - (cacheData.rate / 100) * cachePlotHeight;
+      elements.push(`<line x1="${plotLeft}" y1="${lineY.toFixed(2)}" x2="${plotRight}" y2="${lineY.toFixed(2)}" stroke="${COLORS.weighted}" stroke-width="1.6" stroke-dasharray="6 5"/>`);
+      elements.push(svgText({
+        x: plotRight + 8,
+        y: lineY + 4,
+        value: percent(cacheData.rate),
+        fill: COLORS.weighted,
+        size: 11.5,
+        weight: 700,
+        mono: true,
+      }));
+    }
+  } else {
+    elements.push(svgText({
+      x: outer,
+      y: cacheHeaderBaseline + 24,
+      value: "No events with a usable input-token breakdown in this range.",
+      fill: COLORS.secondary,
+      size: 13,
+    }));
+  }
+
+  // ---- Top projects + cache rate by model ----
+  elements.push(`<line x1="${outer}" y1="${bottomRuleY}" x2="${contentRight}" y2="${bottomRuleY}" stroke="${COLORS.rule}" stroke-width="1"/>`);
+  const sectionBaseline = bottomTop + 10;
   const columnGap = 28;
-  const leftColumnWidth = ((contentWidth - columnGap) * 1.55) / 2.55;
+  const leftColumnWidth = ((contentWidth - columnGap) * 2) / 3;
   const leftColumnRight = outer + leftColumnWidth;
   const dividerX = leftColumnRight + columnGap;
-  const paceX = dividerX + 28;
+  const modelColumnX = dividerX + 28;
 
   elements.push(svgText({
     x: outer,
@@ -1164,7 +1372,7 @@ export function renderTrendImage({
   const tokensRight = leftColumnRight - 62 - rowGap;
   const projectBarWidth = tokensRight - (86 + rowGap) - projectBarX;
   displayRows.forEach((row, index) => {
-    const centerY = projectsTop + 29 + index * 29 + 9;
+    const centerY = bottomTop + 29 + index * 29 + 9;
     if (row.rank) {
       elements.push(svgText({
         x: rankX,
@@ -1214,202 +1422,73 @@ export function renderTrendImage({
     }));
   });
 
-  elements.push(`<line x1="${dividerX}" y1="${projectsTop}" x2="${dividerX}" y2="${projectsTop + projectsBlockHeight}" stroke="${COLORS.rule}" stroke-width="1"/>`);
+  elements.push(`<line x1="${dividerX}" y1="${bottomTop}" x2="${dividerX}" y2="${bottomTop + bottomBlockHeight}" stroke="${COLORS.rule}" stroke-width="1"/>`);
   elements.push(svgText({
-    x: paceX,
+    x: modelColumnX,
     y: sectionBaseline,
-    value: "PACE & RUNWAY",
+    value: "CACHE RATE BY MODEL",
     fill: COLORS.muted,
     size: 12,
     spacing: "1.32",
   }));
-
-  const generatedAtMs = new Date(snapshot.generatedAt).getTime();
-  const paceLines = [];
-  let paceNote = null;
-  const dailyAverage = totalTokens / Math.max(1, days);
-  if (hasLine && meterUsable && latestQuotaPoint && totalTokens > 0) {
-    const tokensPerPercent = totalTokens / burn.totalPercent;
-    const burnPerDay = dailyAverage / tokensPerPercent;
-    const runwayDays = burnPerDay > 0
-      ? latestQuotaPoint.remainingPercent / burnPerDay
-      : null;
-    if (runwayDays !== null) {
-      paceLines.push({
-        value: `${runwayDays.toFixed(1)} days`,
-        size: 24,
-        weight: 800,
-        color: COLORS.line,
-        detail: "of meter left at this pace",
-      });
-    }
-    paceLines.push({
-      value: `${compact(dailyAverage)} / day`,
-      size: 18,
-      weight: 700,
-      color: COLORS.ink,
-      detail: `${days}-day average · ${burnPerDay.toFixed(1)}% of meter`,
-    });
-    paceLines.push({
-      value: `${compact(tokensPerPercent)} / 1%`,
-      size: 18,
-      weight: 700,
-      color: COLORS.ink,
-      detail: "tokens per meter point",
-    });
-    const daysToReset = latestResetsAtSec !== null && Number.isFinite(generatedAtMs)
-      ? (latestResetsAtSec * 1_000 - generatedAtMs) / 86_400_000
-      : null;
-    if (runwayDays !== null && daysToReset !== null && daysToReset > 0) {
-      const resetIn = Math.max(1, Math.round(daysToReset));
-      const resetInLabel = `${resetIn} ${resetIn === 1 ? "day" : "days"}`;
-      const gap = runwayDays - daysToReset;
-      if (Math.abs(gap) <= 1.5) {
-        paceNote = `Next weekly reset in ${resetInLabel} — the current pace lands within ~${Math.max(1, Math.round(Math.abs(gap)))} day of it.`;
-      } else if (gap > 0) {
-        paceNote = `Next weekly reset in ${resetInLabel} — the current pace leaves ~${Math.round(gap)} days of headroom past it.`;
-      } else {
-        paceNote = `Next weekly reset in ${resetInLabel} — the current pace runs the meter out ~${Math.round(-gap)} days before it.`;
-      }
-    }
-  } else {
-    paceLines.push({
-      value: `${compact(dailyAverage)} / day`,
-      size: 18,
-      weight: 700,
-      color: COLORS.ink,
-      detail: `${days}-day average`,
-    });
-    paceNote = "No usable weekly meter drain in this range, so runway cannot be estimated.";
-  }
-  let paceBaseline = projectsTop + 48;
-  for (const line of paceLines) {
+  if (cacheModelRows.length === 0) {
     elements.push(svgText({
-      x: paceX,
-      y: paceBaseline,
-      value: line.value,
-      fill: line.color,
-      size: line.size,
-      weight: line.weight,
-      spacing: line.size >= 24 ? "-0.48" : null,
-    }));
-    elements.push(svgText({
-      x: paceX + textWidth(line.value, line.size, line.weight) + 10,
-      y: paceBaseline,
-      value: line.detail,
-      fill: COLORS.muted,
+      x: modelColumnX,
+      y: bottomTop + 29 + 14,
+      value: "No measured input to break out.",
+      fill: COLORS.secondary,
       size: 13,
     }));
-    paceBaseline += 34;
   }
-  if (paceNote) {
-    const noteWidth = contentRight - paceX;
-    const words = paceNote.split(" ");
-    const noteLines = [];
-    let current = "";
-    for (const word of words) {
-      const candidate = current ? `${current} ${word}` : word;
-      if (textWidth(candidate, 12.5) > noteWidth && current) {
-        noteLines.push(current);
-        current = word;
-      } else {
-        current = candidate;
-      }
-    }
-    if (current) noteLines.push(current);
-    let noteBaseline = paceBaseline - 6;
-    for (const line of noteLines) {
-      elements.push(svgText({
-        x: paceX,
-        y: noteBaseline,
-        value: line,
-        fill: COLORS.muted,
-        size: 12.5,
-      }));
-      noteBaseline += 19;
-    }
-  }
-
-  // ---- Footnote strip ----
-  elements.push(`<line x1="${outer}" y1="${footnotesRuleY}" x2="${contentRight}" y2="${footnotesRuleY}" stroke="${COLORS.rule}" stroke-width="1"/>`);
-  const totalResets = expiries + restarts;
-  let resetsValue = "no meter reads in range";
-  let resetsQualifier = "resets refill the meter to 100%";
-  if (hasLine && totalResets === 0) {
-    resetsValue = "none in this window";
-    resetsQualifier = latestResetsAtSec
-      ? `next scheduled reset ${timestampDateLabel(latestResetsAtSec * 1_000, bounds.timeZone)}`
-      : "resets refill the meter to 100%";
-  } else if (hasLine && restarts === 0) {
-    resetsValue = `${totalResets} scheduled · 0 early`;
-    const lastReset = resetsInRange.at(-1);
-    resetsQualifier = totalResets === 1 && lastReset
-      ? `${timestampDateLabel(lastReset.timestampMs, bounds.timeZone)} was the normal weekly reset`
-      : "all were normal weekly resets";
-  } else if (hasLine) {
-    resetsValue = `${totalResets} total · ${restarts} early`;
-    resetsQualifier = "early resets are provider-initiated";
-  }
-  const footnotes = [
-    {
-      label: "Meter burned this range",
-      value: meterUsable
-        ? `${burn.totalPercent.toFixed(1)} meter points`
-        : "no usable meter drain",
-      qualifier: "total fall of the amber line, across resets",
-    },
-    {
-      label: "Estimated cost",
-      value: rateCard.credits > 0
-        ? `≈${compact(rateCard.credits)} credits`
-        : "no rated tokens in range",
-      qualifier: `priced at published rates${rateCard.fastCredits > 0 ? ` · fast mode ×${FAST_MODE_MULTIPLIER}` : ""}`,
-    },
-    {
-      label: "Weekly resets",
-      value: resetsValue,
-      qualifier: resetsQualifier,
-    },
-    {
-      label: "Data as of",
-      value: Number.isFinite(generatedAtMs)
-        ? localDateTimeLabel(generatedAtMs, bounds.timeZone)
-        : "unknown",
-      qualifier: latestQuotaPoint
-        ? `meter last read ${shortDateTimeLabel(latestQuotaPoint.timestampMs, bounds.timeZone)}`
-        : "no weekly meter reads in range",
-    },
-  ];
-  const footnoteTop = footnotesRuleY + 18;
-  const footnoteColumnWidth = contentWidth / 4;
-  footnotes.forEach((note, index) => {
-    const columnX = outer + index * footnoteColumnWidth;
-    const x = index === 0 ? columnX : columnX + 22;
-    if (index > 0) {
-      elements.push(`<line x1="${columnX.toFixed(2)}" y1="${footnoteTop}" x2="${columnX.toFixed(2)}" y2="${footnoteTop + 53}" stroke="${COLORS.rule}" stroke-width="1"/>`);
+  const modelRateRight = modelColumnX + 165;
+  const modelBarX = modelColumnX + 180;
+  const modelBarWidth = contentRight - 58 - modelBarX;
+  cacheModelRows.forEach((model, index) => {
+    const centerY = bottomTop + 29 + index * 30 + 9;
+    if (!model.muted) {
+      elements.push(`<circle cx="${(modelColumnX + 5).toFixed(2)}" cy="${centerY}" r="4" fill="${styleForModel(model.model)}"/>`);
     }
     elements.push(svgText({
-      x,
-      y: footnoteTop + 10,
-      value: note.label.toUpperCase(),
-      fill: COLORS.muted,
-      size: 12,
-      spacing: "1.32",
+      x: modelColumnX + 18,
+      y: centerY + 4,
+      value: model.model,
+      fill: model.muted ? COLORS.muted : COLORS.ink,
+      size: 13.5,
+      weight: model.muted ? 400 : 700,
     }));
     elements.push(svgText({
-      x,
-      y: footnoteTop + 31,
-      value: note.value,
-      fill: COLORS.ink,
-      size: 16,
-      weight: 700,
-    }));
-    elements.push(svgText({
-      x,
-      y: footnoteTop + 48,
-      value: note.qualifier,
-      fill: COLORS.muted,
+      x: modelRateRight,
+      y: centerY + 4,
+      value: percent(model.rate),
+      fill: COLORS.secondary,
       size: 12.5,
+      weight: 700,
+      anchor: "end",
+      mono: true,
+    }));
+    elements.push(svgRect(modelBarX, centerY - 5, modelBarWidth, 10, {
+      rx: 3,
+      fill: COLORS.uncached,
+      opacity: ".7",
+    }));
+    const rateFill = Number.isFinite(model.rate)
+      ? modelBarWidth * (model.rate / 100)
+      : 0;
+    if (rateFill > 0) {
+      elements.push(svgRect(modelBarX, centerY - 5, rateFill, 10, {
+        rx: 3,
+        fill: COLORS.cached,
+      }));
+    }
+    elements.push(svgText({
+      x: contentRight,
+      y: centerY + 4,
+      value: compact(model.inputTokens),
+      fill: COLORS.secondary,
+      size: 12.5,
+      weight: 700,
+      anchor: "end",
+      mono: true,
     }));
   });
 

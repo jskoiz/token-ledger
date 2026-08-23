@@ -85,8 +85,11 @@ Options:
 
 The report command writes the dashboard PNG (same as trend --image) to
 token-ledger-report-<period>.png; use --image-output to choose the path.
-Use report --cache-rate for the separate cache-focused visual, written to
-token-ledger-cache-report-<period>.png by default.
+The dashboard combines usage and cache reporting: stat cards with pace and
+runway up top, the stacked usage chart with the weekly meter line, a
+compressed cache-rate-by-period strip, and top projects beside per-model
+cache rates. Use report --cache-rate for the separate cache-only visual,
+written to token-ledger-cache-report-<period>.png by default.
 
 The command reads a privacy-reduced Token Ledger snapshot. It never uploads
 the snapshot or prints message bodies, tool payloads, credentials, or local
