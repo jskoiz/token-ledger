@@ -22,7 +22,11 @@ export function startInteractive(view) {
   } = view;
   const stdin = process.stdin;
   const stdout = process.stdout;
-  if (!stdin.isTTY || !stdout.isTTY || typeof stdin.setRawMode !== "function") {
+  // Interactive mode needs a raw-mode-capable terminal on both ends. Capture
+  // the capability once here; the handlers below rely on it unconditionally.
+  const setRawMode =
+    stdin.isTTY && stdout.isTTY ? stdin.setRawMode?.bind(stdin) : null;
+  if (!setRawMode) {
     throw new Error("Interactive mode requires a terminal. Use --static when redirecting output.");
   }
 
@@ -53,7 +57,7 @@ export function startInteractive(view) {
       stdin.off("data", onData);
       stdout.off("resize", draw);
       process.off("SIGINT", onSignal);
-      if (stdin.isTTY) stdin.setRawMode(false);
+      setRawMode(false);
       stdin.pause();
       stdout.write(`${RESET}${SHOW_CURSOR}${EXIT_ALT_SCREEN}`);
       if (error) reject(error);
@@ -79,7 +83,7 @@ export function startInteractive(view) {
       }
     };
 
-    stdin.setRawMode(true);
+    setRawMode(true);
     stdin.setEncoding("utf8");
     stdin.resume();
     stdin.on("data", onData);

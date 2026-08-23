@@ -72,7 +72,7 @@ const MONO_FAMILY = "ui-monospace, Menlo, monospace";
 const FAST_MODE_LABEL_COLOR = "#a78bfa";
 const MIN_BAR_WIDTH = 26;
 
-function escapeXml(value) {
+export function escapeXml(value) {
   return String(value)
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
@@ -81,7 +81,7 @@ function escapeXml(value) {
     .replaceAll("'", "&apos;");
 }
 
-function compact(value, digits = 2) {
+export function compact(value, digits = 2) {
   if (!Number.isFinite(value)) return "—";
   const absolute = Math.abs(value);
   const units = [
@@ -217,7 +217,7 @@ function dateStringFromParts(year, month, day) {
     .join("-");
 }
 
-function shiftCalendarDate(dateString, amount) {
+export function shiftCalendarDate(dateString, amount) {
   const [year, month, day] = dateParts(dateString);
   const date = new Date(Date.UTC(year, month - 1, day + amount));
   return dateStringFromParts(
@@ -300,7 +300,7 @@ function binDateLabel(bin, timeZone) {
 
 // Rough sans-serif advance widths in em units, for placing inline runs
 // (value + chip, legend items, pace rows). SVG has no flow layout.
-function textWidth(text, size, weight = 400) {
+export function textWidth(text, size, weight = 400) {
   let units = 0;
   for (const character of String(text)) {
     if (/[il.,:;'|!]/.test(character)) units += 0.3;
@@ -313,7 +313,7 @@ function textWidth(text, size, weight = 400) {
   return units * size * (weight >= 700 ? 1.05 : 1);
 }
 
-function svgText({
+export function svgText({
   x,
   y,
   value,
@@ -331,7 +331,7 @@ function svgText({
   return `<text x="${x}" y="${y}" fill="${fill}" font-family="${family}" font-size="${size}px" font-weight="${weight}" text-anchor="${anchor}"${spacingAttr}${opacityAttr}>${escapeXml(value)}</text>`;
 }
 
-function svgRect(x, y, width, height, attrs = {}) {
+export function svgRect(x, y, width, height, attrs = {}) {
   const pieces = [
     `x="${Number(x).toFixed(2)}"`,
     `y="${Number(y).toFixed(2)}"`,
@@ -487,6 +487,9 @@ export function renderTrendImage({
   const latestQuotaPoint = [...(trend.points ?? [])]
     .filter((point) => point.timestampMs <= bounds.end.getTime())
     .at(-1);
+  const latestQuotaReadMs = Number.isFinite(trend.observedThroughMs)
+    ? trend.observedThroughMs
+    : null;
   const rateCard = rateCardSummary(snapshot, bounds);
   const resetsInRange = trend.resets ?? [];
   const expiries = resetsInRange.filter((reset) => reset.kind === "weekly-expiry").length;
@@ -621,7 +624,9 @@ export function renderTrendImage({
       track: "rgba(246,183,60,.2)",
       fill: COLORS.line,
       barPercent: latestQuotaPoint.remainingPercent,
-      caption: `${resetCaption} · read ${timestampDateLabel(latestQuotaPoint.timestampMs, bounds.timeZone)}`,
+      caption: latestQuotaReadMs === null
+        ? resetCaption
+        : `${resetCaption} · read ${timestampDateLabel(latestQuotaReadMs, bounds.timeZone)}`,
       panel: COLORS.meterPanel,
       border: COLORS.meterPanelBorder,
     });
@@ -1375,8 +1380,8 @@ export function renderTrendImage({
       value: Number.isFinite(generatedAtMs)
         ? localDateTimeLabel(generatedAtMs, bounds.timeZone)
         : "unknown",
-      qualifier: latestQuotaPoint
-        ? `meter last read ${shortDateTimeLabel(latestQuotaPoint.timestampMs, bounds.timeZone)}`
+      qualifier: latestQuotaReadMs !== null
+        ? `meter last read ${shortDateTimeLabel(latestQuotaReadMs, bounds.timeZone)}`
         : "no weekly meter reads in range",
     },
   ];

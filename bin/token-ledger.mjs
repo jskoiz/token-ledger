@@ -20,6 +20,7 @@ import {
   renderTrendImage,
   writeTrendPng,
 } from "./token-ledger-trend-image.mjs";
+import { renderCacheReportImage } from "./token-ledger-cache-image.mjs";
 import { renderTrendCombo } from "./token-ledger-trend-terminal.mjs";
 import { startInteractive } from "./token-ledger-tui.mjs";
 
@@ -74,6 +75,7 @@ Options:
   --ascii              Use ASCII bars instead of Unicode blocks
   --static             Print once instead of opening the interactive dashboard
   --drain               Trend columns show observed limit drain percent instead of token volume
+  --cache-rate          Write a separate cache-focused report visual (report only)
   --image               Write trend view as a PNG image and open it on screen
   --image-output <file> PNG output path for trend view
   --image-width <px>   PNG image width from 900 to 2400 pixels
@@ -83,6 +85,8 @@ Options:
 
 The report command writes the dashboard PNG (same as trend --image) to
 token-ledger-report-<period>.png; use --image-output to choose the path.
+Use report --cache-rate for the separate cache-focused visual, written to
+token-ledger-cache-report-<period>.png by default.
 
 The command reads a privacy-reduced Token Ledger snapshot. It never uploads
 the snapshot or prints message bodies, tool payloads, credentials, or local
@@ -173,6 +177,7 @@ export function parseArgs(argv) {
     imageWidth: null,
     openImage: true,
     drain: false,
+    cacheRate: false,
     legacyPlot: false,
     help: false,
   };
@@ -246,6 +251,11 @@ export function parseArgs(argv) {
         throw new Error("--drain is only available for the trend view.");
       }
       options.drain = true;
+    } else if (argument === "--cache-rate") {
+      if (!options.report) {
+        throw new Error("--cache-rate is only available with the report command.");
+      }
+      options.cacheRate = true;
     } else if (argument === "--image") {
       if (options.view !== "trend") {
         throw new Error("--image is only available for the trend view.");
@@ -330,6 +340,9 @@ export function parseArgs(argv) {
   }
   if (!options.help && options.view === "trend" && options.legacyPlot) {
     throw new Error("--youplot is only available for the project view.");
+  }
+  if (!options.help && options.cacheRate && options.drain) {
+    throw new Error("--cache-rate cannot be combined with --drain.");
   }
   return options;
 }
@@ -584,8 +597,12 @@ export function filterDayEvents(snapshot, bounds) {
   const start = bounds.start.getTime();
   const end = bounds.end.getTime();
   return (snapshot.events ?? []).filter((event) => {
-    const timestamp = new Date(event.timestamp).getTime();
-    return Number.isFinite(timestamp) && timestamp >= start && timestamp < end;
+    try {
+      const timestamp = new Date(event?.timestamp).getTime();
+      return Number.isFinite(timestamp) && timestamp >= start && timestamp < end;
+    } catch {
+      return false;
+    }
   });
 }
 
@@ -878,10 +895,18 @@ function snapshotAgeLabel(ageMs) {
   return `${Math.floor(hours / 24)}d old`;
 }
 
+function primitiveString(value) {
+  try {
+    const text = String.prototype.valueOf.call(value);
+    return text === value ? text : null;
+  } catch {
+    return null;
+  }
+}
+
 export function snapshotFreshness(snapshot = {}, nowMs = Date.now()) {
-  const generatedAtMs = typeof snapshot.generatedAt === "string"
-    ? Date.parse(snapshot.generatedAt)
-    : NaN;
+  const generatedAt = primitiveString(snapshot.generatedAt);
+  const generatedAtMs = generatedAt === null ? NaN : Date.parse(generatedAt);
   if (
     !Number.isFinite(generatedAtMs) ||
     !Number.isFinite(nowMs) ||
@@ -943,6 +968,14 @@ async function loadSnapshot(options) {
 
 function render(options, snapshot, bounds, events, rows, allRows, freshness) {
   if (options.view === "trend") {
+    if (options.image && options.cacheRate) {
+      return renderCacheReportImage({
+        snapshot,
+        bounds,
+        days: options.trendDays,
+        options,
+      });
+    }
     const trend = buildUsageTrend(snapshot, bounds);
     if (options.image) {
       return renderTrendImage({
@@ -1048,23 +1081,30 @@ export async function run(options, { nowMs } = {}) {
   const bounds = boundsForOptions(options, now);
   const snapshot = await loadSnapshot(options);
   const events = filterDayEvents(snapshot, bounds);
-  if (events.length === 0) {
+  const writingImage = options.view === "trend" && options.image;
+  const writingEmptyCacheReport = writingImage && options.cacheRate;
+  if (events.length === 0 && !writingEmptyCacheReport) {
     return [
       `No model-call events found for ${rangeDescription(options, bounds)} (${bounds.timeZone}).`,
       `Source: ${sourceLabel(options.input, snapshot)}`,
     ].join("\n");
   }
-  const allRows = aggregateProjects(snapshot, events, options);
+  const allRows = options.cacheRate
+    ? []
+    : aggregateProjects(snapshot, events, options);
   const rows = allRows.slice(0, options.top);
-  const writingImage = options.view === "trend" && options.image;
   const outputPath = writingImage
     ? options.imageOutput ??
       resolve(
         process.cwd(),
-        `token-ledger-${options.report ? "report" : "trend"}-${options.trendDays}d.png`,
+        `token-ledger-${options.cacheRate ? "cache-report" : options.report ? "report" : "trend"}-${options.trendDays}d.png`,
       )
     : null;
-  const imageLabel = options.report ? "report" : "trend image";
+  const imageLabel = options.cacheRate
+    ? "cache report"
+    : options.report
+      ? "report"
+      : "trend image";
   if (writingImage) {
     process.stderr.write(`Token Ledger: generating ${imageLabel} PNG…\n`);
   }
@@ -1086,7 +1126,7 @@ export async function run(options, { nowMs } = {}) {
     await writeTrendPng(output, outputPath);
     process.stderr.write(`Token Ledger: finished ${imageLabel} PNG.\n`);
     const lines = [
-      `Wrote ${options.report ? "report" : "trend image"}: ${outputPath}`,
+      `Wrote ${imageLabel}: ${outputPath}`,
       `Range: ${bounds.startDateString} through ${bounds.endDateString} (${bounds.timeZone})`,
     ];
     // Show the finished report on screen right away instead of leaving it to
