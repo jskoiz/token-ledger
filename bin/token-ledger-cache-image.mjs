@@ -242,14 +242,12 @@ function cacheBreakdown(event) {
     ? reportedTotalTokens
     : componentTotalTokens;
   const hasComponents = inputTokens > 0 || outputTokens > 0;
-  const inferredDetailed = hasComponents && (
+  const hasReconciledBreakdown = hasComponents && (
     reportedTotalTokens === 0 ||
     componentTotalTokens === reportedTotalTokens ||
     (componentOverflowed && reportedTotalTokens === MAX_FINITE_NUMBER)
   );
-  const detailed = event.breakdownAvailable === true || (
-    event.breakdownAvailable !== false && inferredDetailed
-  );
+  const detailed = event.breakdownAvailable !== false && hasReconciledBreakdown;
   return {
     totalTokens,
     inputTokens,
