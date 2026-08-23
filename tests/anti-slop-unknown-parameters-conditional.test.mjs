@@ -71,6 +71,18 @@ test("no-unknown-parameters resolves conditional aliases", async () => {
       value: unknown extends string | number ? number : unknown,
     ): void {}
     export function unknownTargetConcrete(value: UnknownTarget<string>): void {}
+    export function exhaustiveUnionUnknown(
+      value: unknown extends {} | null | undefined ? unknown : number,
+    ): void {}
+    export function nonExhaustiveUnionUnknown(
+      value: unknown extends {} | null ? number : unknown,
+    ): void {}
+    export function anyIntersectionUnknown(
+      value: string extends any & number ? unknown : number,
+    ): void {}
+    export function anyNeverIntersectionUnknown(
+      value: string extends any & never ? number : unknown,
+    ): void {}
 
     export function concrete(value: Select<number>): void {}
     export function unresolved<T>(value: Select<T>): void {}
@@ -95,11 +107,17 @@ test("no-unknown-parameters resolves conditional aliases", async () => {
       value: unknown extends T ? number : unknown,
     ): void {}
     export function unknownTargetTop(value: UnknownTarget<unknown>): void {}
+    export function exhaustiveUnionConcrete(
+      value: unknown extends {} | null | undefined ? number : unknown,
+    ): void {}
+    export function anyIntersectionConcrete(
+      value: string extends any & number ? number : unknown,
+    ): void {}
   `);
   assert.equal(result.status, 1, result.output);
   assert.equal(
     result.output.match(/anti-slop\(no-unknown-parameters\)/g)?.length,
-    12,
+    16,
     result.output,
   );
 });

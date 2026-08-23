@@ -130,6 +130,134 @@ export function createUnknownTypeResolver(
     }
   };
 
+  const comparisonShape = (
+    type,
+    bindings,
+    visited = new Set(),
+  ) => {
+    const resolved = resolveComparisonType(type, bindings, visited);
+    if (visited.has(resolved)) {
+      return {
+        kind: "other",
+        coversNonNullish: false,
+        coversNull: false,
+        coversUndefined: false,
+      };
+    }
+
+    if (resolved.type === "TSAnyKeyword") {
+      return {
+        kind: "any",
+        coversNonNullish: true,
+        coversNull: true,
+        coversUndefined: true,
+      };
+    }
+    if (resolved.type === "TSUnknownKeyword") {
+      return {
+        kind: "unknown",
+        coversNonNullish: true,
+        coversNull: true,
+        coversUndefined: true,
+      };
+    }
+    if (resolved.type === "TSNeverKeyword") {
+      return {
+        kind: "never",
+        coversNonNullish: false,
+        coversNull: false,
+        coversUndefined: false,
+      };
+    }
+
+    const nextVisited = new Set(visited);
+    nextVisited.add(resolved);
+    if (resolved.type === "TSUnionType") {
+      const shapes = resolved.types.map((member) =>
+        comparisonShape(member, bindings, nextVisited)
+      );
+      if (shapes.some((shape) => shape.kind === "any")) {
+        return {
+          kind: "any",
+          coversNonNullish: true,
+          coversNull: true,
+          coversUndefined: true,
+        };
+      }
+      if (shapes.some((shape) => shape.kind === "unknown")) {
+        return {
+          kind: "unknown",
+          coversNonNullish: true,
+          coversNull: true,
+          coversUndefined: true,
+        };
+      }
+      const coversNonNullish = shapes.some((shape) => shape.coversNonNullish);
+      const coversNull = shapes.some((shape) => shape.coversNull);
+      const coversUndefined = shapes.some((shape) => shape.coversUndefined);
+      return {
+        kind: coversNonNullish && coversNull && coversUndefined
+          ? "unknown"
+          : shapes.every((shape) => shape.kind === "never")
+            ? "never"
+            : "other",
+        coversNonNullish,
+        coversNull,
+        coversUndefined,
+      };
+    }
+    if (resolved.type === "TSIntersectionType") {
+      const shapes = resolved.types.map((member) =>
+        comparisonShape(member, bindings, nextVisited)
+      );
+      if (shapes.some((shape) => shape.kind === "never")) {
+        return {
+          kind: "never",
+          coversNonNullish: false,
+          coversNull: false,
+          coversUndefined: false,
+        };
+      }
+      if (shapes.some((shape) => shape.kind === "any")) {
+        return {
+          kind: "any",
+          coversNonNullish: true,
+          coversNull: true,
+          coversUndefined: true,
+        };
+      }
+      if (shapes.every((shape) => shape.kind === "unknown")) {
+        return {
+          kind: "unknown",
+          coversNonNullish: true,
+          coversNull: true,
+          coversUndefined: true,
+        };
+      }
+      const constrained = shapes.filter((shape) => shape.kind !== "unknown");
+      return {
+        kind: "other",
+        coversNonNullish:
+          constrained.length > 0 &&
+          constrained.every((shape) => shape.coversNonNullish),
+        coversNull:
+          constrained.length > 0 &&
+          constrained.every((shape) => shape.coversNull),
+        coversUndefined:
+          constrained.length > 0 &&
+          constrained.every((shape) => shape.coversUndefined),
+      };
+    }
+
+    return {
+      kind: "other",
+      coversNonNullish:
+        resolved.type === "TSTypeLiteral" && resolved.members.length === 0,
+      coversNull: resolved.type === "TSNullKeyword",
+      coversUndefined: resolved.type === "TSUndefinedKeyword",
+    };
+  };
+
   const isDefinitelyAssignable = (
     source,
     target,
@@ -140,10 +268,8 @@ export function createUnknownTypeResolver(
     const targetType = resolveComparisonType(target, bindings, visited);
     if (sourceType === targetType) return true;
     if (sourceType.type === "TSNeverKeyword") return true;
-    if (
-      targetType.type === "TSAnyKeyword" ||
-      targetType.type === "TSUnknownKeyword"
-    ) {
+    const targetShape = comparisonShape(targetType, bindings);
+    if (targetShape.kind === "any" || targetShape.kind === "unknown") {
       return true;
     }
 
