@@ -73,11 +73,26 @@ test("no-unknown-returns selects decidable conditional alias branches", async ()
     export function distributedNever(): Branch<never> {
       throw new Error("unreachable");
     }
+    export function anyTrue(): any extends string ? unknown : number {
+      throw new Error("unreachable");
+    }
+    export function anyFalse(): any extends string ? number : unknown {
+      throw new Error("unreachable");
+    }
+    export function unknownFalse(): unknown extends string ? number : unknown {
+      throw new Error("unreachable");
+    }
+    export function anyDominated(): any extends string ? unknown : any {
+      throw new Error("unreachable");
+    }
+    export function unknownConcrete(): unknown extends string ? unknown : number {
+      throw new Error("unreachable");
+    }
   `);
   assert.equal(result.status, 1, result.output);
   assert.equal(
     result.output.match(/anti-slop\(no-unknown-returns\)/g)?.length,
-    6,
+    9,
     result.output,
   );
 });

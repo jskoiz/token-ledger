@@ -48,16 +48,31 @@ test("no-unknown-parameters resolves conditional aliases", async () => {
     export function literalNever(
       value: never extends string ? unknown : number,
     ): void {}
+    export function anyTrue(
+      value: any extends string ? unknown : number,
+    ): void {}
+    export function anyFalse(
+      value: any extends string ? number : unknown,
+    ): void {}
+    export function unknownFalse(
+      value: unknown extends string ? number : unknown,
+    ): void {}
 
     export function concrete(value: Select<number>): void {}
     export function unresolved<T>(value: Select<T>): void {}
     export function distributedNever(value: Select<never>): void {}
     export function allowedCause(cause: Select<string>): void {}
+    export function anyDominated(
+      value: any extends string ? unknown : any,
+    ): void {}
+    export function unknownConcrete(
+      value: unknown extends string ? unknown : number,
+    ): void {}
   `);
   assert.equal(result.status, 1, result.output);
   assert.equal(
     result.output.match(/anti-slop\(no-unknown-parameters\)/g)?.length,
-    4,
+    7,
     result.output,
   );
 });
