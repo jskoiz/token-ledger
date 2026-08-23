@@ -30,6 +30,7 @@ const COLORS = {
 
 const MIN_BIN_WIDTH = 34;
 const MAX_MODEL_ROWS = 6;
+const MAX_FINITE_NUMBER = Number.MAX_VALUE;
 
 function percent(value) {
   if (!Number.isFinite(value)) return "—";
@@ -135,6 +136,12 @@ function nonNegativeFiniteNumber(value) {
   return Number.isFinite(number) && number > 0 ? number : 0;
 }
 
+function saturatingAdd(left, right) {
+  // Keep large but individually valid snapshots finite for ratios and SVG math.
+  const sum = left + right;
+  return Number.isFinite(sum) ? sum : MAX_FINITE_NUMBER;
+}
+
 function safeModelLabel(value) {
   const model = primitiveString(value);
   return model === null ? "Unknown" : trendModelLabel(model);
@@ -144,7 +151,7 @@ function cacheBreakdown(event) {
   const reportedTotalTokens = nonNegativeFiniteNumber(event.totalTokens);
   const inputTokens = nonNegativeFiniteNumber(event.inputTokens);
   const outputTokens = nonNegativeFiniteNumber(event.outputTokens);
-  const componentTotalTokens = nonNegativeFiniteNumber(inputTokens + outputTokens);
+  const componentTotalTokens = saturatingAdd(inputTokens, outputTokens);
   const totalTokens = reportedTotalTokens > 0
     ? reportedTotalTokens
     : componentTotalTokens;
@@ -197,10 +204,16 @@ function emptyAggregate() {
 }
 
 function addInput(target, breakdown) {
-  target.inputTokens += breakdown.inputTokens;
-  target.cachedInputTokens += breakdown.cachedInputTokens;
-  target.uncachedInputTokens += breakdown.uncachedInputTokens;
-  target.inputEventCount += 1;
+  target.inputTokens = saturatingAdd(target.inputTokens, breakdown.inputTokens);
+  target.cachedInputTokens = saturatingAdd(
+    target.cachedInputTokens,
+    breakdown.cachedInputTokens,
+  );
+  target.uncachedInputTokens = saturatingAdd(
+    target.uncachedInputTokens,
+    breakdown.uncachedInputTokens,
+  );
+  target.inputEventCount = saturatingAdd(target.inputEventCount, 1);
 }
 
 function finalizeAggregate(aggregate) {
@@ -239,19 +252,25 @@ function accumulateRange(snapshot, bounds, bins = null, dateIndexByString = null
     const binIndex = dateString === null ? null : dateIndexByString.get(dateString);
     const bin = binIndex === undefined || binIndex === null ? null : bins[binIndex];
 
-    totals.eventCount += 1;
-    totals.totalTokens += breakdown.totalTokens;
+    totals.eventCount = saturatingAdd(totals.eventCount, 1);
+    totals.totalTokens = saturatingAdd(totals.totalTokens, breakdown.totalTokens);
     if (bin) {
-      bin.eventCount += 1;
-      bin.totalTokens += breakdown.totalTokens;
+      bin.eventCount = saturatingAdd(bin.eventCount, 1);
+      bin.totalTokens = saturatingAdd(bin.totalTokens, breakdown.totalTokens);
     }
     if (!breakdown.detailed) continue;
 
-    totals.detailedEventCount += 1;
-    totals.detailedTokens += breakdown.totalTokens;
+    totals.detailedEventCount = saturatingAdd(totals.detailedEventCount, 1);
+    totals.detailedTokens = saturatingAdd(
+      totals.detailedTokens,
+      breakdown.totalTokens,
+    );
     if (bin) {
-      bin.detailedEventCount += 1;
-      bin.detailedTokens += breakdown.totalTokens;
+      bin.detailedEventCount = saturatingAdd(bin.detailedEventCount, 1);
+      bin.detailedTokens = saturatingAdd(
+        bin.detailedTokens,
+        breakdown.totalTokens,
+      );
     }
     if (!(breakdown.inputTokens > 0)) continue;
 
@@ -321,10 +340,19 @@ function combinedModelRows(models) {
   const visible = models.slice(0, MAX_MODEL_ROWS - 1);
   const remainder = models.slice(MAX_MODEL_ROWS - 1).reduce(
     (row, model) => {
-      row.inputTokens += model.inputTokens;
-      row.cachedInputTokens += model.cachedInputTokens;
-      row.uncachedInputTokens += model.uncachedInputTokens;
-      row.inputEventCount += model.inputEventCount;
+      row.inputTokens = saturatingAdd(row.inputTokens, model.inputTokens);
+      row.cachedInputTokens = saturatingAdd(
+        row.cachedInputTokens,
+        model.cachedInputTokens,
+      );
+      row.uncachedInputTokens = saturatingAdd(
+        row.uncachedInputTokens,
+        model.uncachedInputTokens,
+      );
+      row.inputEventCount = saturatingAdd(
+        row.inputEventCount,
+        model.inputEventCount,
+      );
       return row;
     },
     {
