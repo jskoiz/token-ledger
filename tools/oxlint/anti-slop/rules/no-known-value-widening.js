@@ -7,6 +7,7 @@ import {
 
 
 } from "../shared/dictionary-types.js";
+import { typeAliasReference, visibleTypeBinding } from "../shared/type-aliases.js";
 
 
 
@@ -172,6 +173,12 @@ export const noKnownValueWideningRule = defineRule({
 		return {
 			Program(node) {
 				environment = createTypeEnvironment(node);
+				environment.resolveTypeBinding = (type) => {
+					const reference = typeAliasReference(type);
+					return reference === null
+						? undefined
+						: visibleTypeBinding(reference, type, context.sourceCode);
+				};
 			},
 			VariableDeclarator(node) {
 				if (node.init === null || node.id.type !== "Identifier") return;
