@@ -1,21 +1,27 @@
 import { defineRule } from "@oxlint/plugins";
 
 
-function unwrapParentheses(node                   )                    {
+function unwrapTypeOnlyExpression(node                   )                    {
   let current = node;
-  while (current.type === "ParenthesizedExpression") {
+  while (
+    current.type === "ParenthesizedExpression" ||
+    current.type === "TSAsExpression" ||
+    current.type === "TSTypeAssertion" ||
+    current.type === "TSSatisfiesExpression" ||
+    current.type === "TSNonNullExpression"
+  ) {
     current = current.expression;
   }
   return current;
 }
 
 function isEmptyObjectExpression(node                   )          {
-  const unwrapped = unwrapParentheses(node);
+  const unwrapped = unwrapTypeOnlyExpression(node);
   return unwrapped.type === "ObjectExpression" && unwrapped.properties.length === 0;
 }
 
 function isConditionalEmptyObjectSpread(node                   )          {
-  const conditional = unwrapParentheses(node);
+  const conditional = unwrapTypeOnlyExpression(node);
   return (
     conditional.type === "ConditionalExpression" &&
     (isEmptyObjectExpression(conditional.consequent) ||
