@@ -358,10 +358,14 @@ function periodComparison(currentRate, priorRate) {
   return `Prior ${percent(priorRate)} · ${deltaLabel}`;
 }
 
-function labelEvery(binCount) {
-  if (binCount <= 14) return 1;
-  if (binCount <= 24) return 2;
-  return Math.max(2, Math.ceil(binCount / 12));
+const AXIS_LABEL_GAP = 12;
+
+function labelEvery(bins, slotWidth) {
+  if (bins.length === 0 || slotWidth <= 0) return 1;
+  const widestLabel = Math.max(
+    ...bins.map((bin) => textWidth(binDateLabel(bin), 13)),
+  );
+  return Math.max(1, Math.ceil((widestLabel + AXIS_LABEL_GAP) / slotWidth));
 }
 
 function pushLegendItem(elements, { x, y, color, label, line = false }) {
@@ -396,6 +400,12 @@ export function renderCacheReportImage({
   const data = buildCacheReportData(snapshot, bounds, days, plotWidth);
   const prior = priorPeriodSummary(snapshot, bounds, days);
   const models = combinedModelRows(data.models);
+  const headerTitle = "TOKEN LEDGER · CACHE REPORT";
+  const headerMetadata = `${periodLabel(bounds)} · ${bounds.timeZone}`;
+  const headerTitleWidth = textWidth(headerTitle, 27, 800) -
+    0.27 * (headerTitle.length - 1);
+  const headerMetadataFits = headerTitleWidth + textWidth(headerMetadata, 14) + 24 <=
+    contentRight - outer;
 
   const ratePlotTop = 320;
   const ratePlotHeight = 270;
@@ -422,15 +432,15 @@ export function renderCacheReportImage({
     svgText({
       x: outer,
       y: 53,
-      value: "TOKEN LEDGER · CACHE REPORT",
+      value: headerTitle,
       size: 27,
       weight: 800,
       spacing: "-0.27",
     }),
     svgText({
       x: contentRight,
-      y: 53,
-      value: `${periodLabel(bounds)} · ${bounds.timeZone}`,
+      y: headerMetadataFits ? 53 : 77,
+      value: headerMetadata,
       fill: COLORS.muted,
       size: 14,
       anchor: "end",
@@ -568,7 +578,7 @@ export function renderCacheReportImage({
     ...data.bins.map((bin) => bin.inputTokens),
   );
   const maxInput = Math.max(1, observedMaxInput);
-  const dateStep = labelEvery(data.binCount);
+  const dateStep = labelEvery(data.bins, slotWidth);
   data.bins.forEach((bin, index) => {
     const centerX = plotLeft + (index + 0.5) * slotWidth;
     const barX = centerX - barWidth / 2;

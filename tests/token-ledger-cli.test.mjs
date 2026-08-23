@@ -44,6 +44,7 @@ import {
 import { creditsForUsage } from "../bin/token-ledger-rates.mjs";
 import {
   renderTrendImage,
+  textWidth,
   writeTrendPng,
 } from "../bin/token-ledger-trend-image.mjs";
 import {
@@ -1576,6 +1577,80 @@ test("cache report wraps long timezone footer text at minimum width", () => {
     wideSvg,
     />America\/Argentina\/ComodRivadavia · 7-day calendar window<\/text>/,
   );
+});
+
+test("cache report moves long timezone header metadata below the title", () => {
+  const timeZone = "America/Argentina/ComodRivadavia";
+  const bounds = multiDayBounds("2026-08-15", timeZone, 7);
+  const minimumSvg = renderCacheReportImage({
+    snapshot: { events: [] },
+    bounds,
+    days: 7,
+    options: { imageWidth: 900 },
+  });
+
+  assert.match(
+    minimumSvg,
+    /<text x="32" y="53"[^>]*>TOKEN LEDGER · CACHE REPORT<\/text>/,
+  );
+  assert.match(
+    minimumSvg,
+    /<text x="868" y="77"[^>]*>Aug 9 – Aug 15, 2026 · America\/Argentina\/ComodRivadavia<\/text>/,
+  );
+
+  const shortZoneSvg = renderCacheReportImage({
+    snapshot: { events: [] },
+    bounds: multiDayBounds("2026-08-15", "UTC", 7),
+    days: 7,
+    options: { imageWidth: 900 },
+  });
+  assert.match(
+    shortZoneSvg,
+    /<text x="868" y="53"[^>]*>Aug 9 – Aug 15, 2026 · UTC<\/text>/,
+  );
+  assert.doesNotMatch(
+    shortZoneSvg,
+    /<text x="868" y="77"[^>]*>Aug 9 – Aug 15, 2026 · UTC<\/text>/,
+  );
+
+  const wideSvg = renderCacheReportImage({
+    snapshot: { events: [] },
+    bounds,
+    days: 7,
+    options: { imageWidth: 1_280 },
+  });
+  assert.match(
+    wideSvg,
+    /<text x="1248" y="53"[^>]*>Aug 9 – Aug 15, 2026 · America\/Argentina\/ComodRivadavia<\/text>/,
+  );
+});
+
+test("cache report spaces long multi-day labels at minimum width", () => {
+  const bounds = multiDayBounds("2026-08-20", "UTC", 180);
+  const svg = renderCacheReportImage({
+    snapshot: { events: [] },
+    bounds,
+    days: 180,
+    options: { imageWidth: 900 },
+  });
+  const labels = [...svg.matchAll(
+    /<text x="([^"]+)" y="730"[^>]*>([^<]+)<\/text>/g,
+  )].map((match) => ({
+    x: Number(match[1]),
+    value: match[2],
+  }));
+
+  assert.ok(labels.length >= 2, "expected multiple date labels");
+  for (let index = 1; index < labels.length; index += 1) {
+    const previous = labels[index - 1];
+    const current = labels[index];
+    const minimumDistance =
+      (textWidth(previous.value, 13) + textWidth(current.value, 13)) / 2 + 12;
+    assert.ok(
+      current.x - previous.x >= minimumDistance,
+      `${previous.value} overlaps ${current.value}`,
+    );
+  }
 });
 
 test("PNG image output has a real PNG signature", async () => {
