@@ -131,6 +131,62 @@ test("anti-slop resolves applied generic aliases in object parameters", async ()
   );
 });
 
+test("anti-slop resolves intersections that remain broad object parameters", async () => {
+  const result = await lintTypeScript(`
+    type Broad = object;
+    type Unknown = unknown;
+    type Identity<T> = T;
+    type Pair<T, U> = T & U;
+    export function consumeInline(value: object & object): void {}
+    export function consumeAliases(value: Broad & Unknown): void {}
+    export function consumeIdentity(value: Identity<object & object>): void {}
+    export function consumePair(value: Pair<object, unknown>): void {}
+    export function keepUnknown(value: unknown & unknown): void {}
+    export function keepPrimitive(value: unknown & string): void {}
+    export function keepNever(value: object & string): void {}
+    export function keepNarrowed(value: object & { id: string }): void {}
+    export function keepGeneric<T>(value: T & object): void {}
+  `);
+  assert.equal(result.status, 1, result.output);
+  assert.equal(
+    result.output.match(/anti-slop\(no-object-parameters\)/g)?.length,
+    4,
+    result.output,
+  );
+  assert.equal(
+    result.output.match(/anti-slop\(no-unknown-parameters\)/g)?.length,
+    1,
+    result.output,
+  );
+});
+
+test("anti-slop reports unapplied aliases whose defaults resolve to unknown", async () => {
+  const result = await lintTypeScript(`
+    type Identity<T> = T;
+    type Payload<T = unknown> = Identity<T>;
+    type Partial<T, U = unknown> = U;
+    type Wrapper = Payload;
+    namespace Box {
+      export type Payload<T = unknown> = T;
+    }
+    export let unsafe: Payload;
+    export let partiallyApplied: Partial<string>;
+    export let qualified: Box.Payload;
+    export let safe: Payload<string>;
+    export function local(): void {
+      type Local<T = unknown> = T;
+      let value: Local;
+      void value;
+    }
+  `);
+  assert.equal(result.status, 1, result.output);
+  assert.equal(
+    result.output.match(/anti-slop\(no-unknown-type-aliases\)/g)?.length,
+    5,
+    result.output,
+  );
+});
+
 test("anti-slop resolves aliases declared in function scope", async () => {
   const result = await lintTypeScript(`
     export function outer(): void {
