@@ -1342,15 +1342,18 @@ test("cache report contains non-finite snapshot token values", () => {
 test("cache report saturates finite token sums before rendering", () => {
   const bounds = multiDayBounds("2026-08-15", "UTC", 7);
   const huge = Number.MAX_VALUE;
-  const eventFor = (model, includeReportedTotal = true) => ({
-    timestamp: "2026-08-15T12:00:00.000Z",
-    model,
-    ...(includeReportedTotal ? { totalTokens: huge } : {}),
-    inputTokens: huge,
-    cachedInputTokens: huge,
-    outputTokens: huge,
-    breakdownAvailable: true,
-  });
+  const eventFor = (model, includeReportedTotal = true) => {
+    const event = {
+      timestamp: "2026-08-15T12:00:00.000Z",
+      model,
+      inputTokens: huge,
+      cachedInputTokens: huge,
+      outputTokens: huge,
+      breakdownAvailable: true,
+    };
+    if (includeReportedTotal) event.totalTokens = huge;
+    return event;
+  };
   const snapshot = {
     generatedAt: "2026-08-15T12:00:00.000Z",
     events: [
