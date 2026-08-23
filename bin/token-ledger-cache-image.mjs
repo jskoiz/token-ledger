@@ -155,7 +155,9 @@ function generatedAtLabel(value, timeZone) {
 function parsedNonNegativeFiniteNumber(value) {
   const primitive = primitiveNumber(value);
   const text = primitive === null ? primitiveString(value) : null;
-  const number = primitive ?? (text === null ? NaN : Number(text));
+  const number = primitive ?? (
+    text === null || text.trim() === "" ? NaN : Number(text)
+  );
   return Number.isFinite(number) && number >= 0 ? number : null;
 }
 

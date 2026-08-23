@@ -1593,6 +1593,41 @@ test("cache report preserves explicit reconciled zero-token breakdowns", () => {
   assert.match(svg, /1 of 1 calls/);
 });
 
+test("cache report rejects blank explicit zero-token breakdowns", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+  const snapshot = {
+    events: [
+      {
+        timestamp: "2026-08-15T12:00:00.000Z",
+        totalTokens: "",
+        inputTokens: "",
+        cachedInputTokens: "",
+        outputTokens: "",
+        breakdownAvailable: true,
+      },
+      {
+        timestamp: "2026-08-15T13:00:00.000Z",
+        totalTokens: " \t",
+        inputTokens: " \t",
+        cachedInputTokens: " \t",
+        outputTokens: " \t",
+        breakdownAvailable: true,
+      },
+    ],
+  };
+
+  const data = buildCacheReportData(snapshot, bounds, 7, 1_100);
+  assert.equal(data.eventCount, 2);
+  assert.equal(data.detailedEventCount, 0);
+  assert.equal(data.totalTokens, 0);
+  assert.equal(data.inputTokens, 0);
+  assert.equal(data.measurementCoveragePercent, 0);
+
+  const svg = renderCacheReportImage({ snapshot, bounds, days: 7 });
+  assert.match(svg, /0\.00% of calls/);
+  assert.match(svg, /0 of 2 calls/);
+});
+
 test("cache report contains hostile object-shaped snapshot fields", () => {
   const bounds = multiDayBounds("2026-08-15", "UTC", 7);
   const hostileValue = () => ({ toString: null, valueOf: null });
