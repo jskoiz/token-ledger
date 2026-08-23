@@ -54,55 +54,78 @@ const MODEL_COLORS = {
   other: TERMINAL_MODEL_COLORS.other,
 };
 
-function usage() {
-  return `Token Ledger terminal usage
+export function usage() {
+  return `Token Ledger
 
 Usage:
-  tledger 1d                 Rolling 24-hour project breakdown (ends now)
-  tledger <N>d               Rolling N-day project breakdown (ends now)
-  tledger <N>w               Rolling N-week project breakdown (ends now)
-  tledger day <YYYY-MM-DD>
-  tledger week [end-day]
-  tledger trend [Nd|Nw]
-  tledger report [Nd|Nw]
-  npm run usage:day -- <YYYY-MM-DD>
-  npm run usage:week -- [end-day]
+  tledger 1d                         Last 24 hours in the terminal
+  tledger week                       Last 7 calendar days in the terminal
+  tledger 30d                        Rolling 30 days in the terminal
+  tledger report 7d                  Write the 7-day PNG report
+  tledger report 7d --cache-rate     Write the cache-only PNG report
 
-Options:
-  --date <day>         Date as YYYY-MM-DD, today, or yesterday
-  --period <window>    Trend window, for example 7d, 14d, or 2w
-  --input <file>       Snapshot to read (default: ~/.token-ledger/token-ledger-snapshot-v2.json.gz)
-  --refresh            Rebuild the default snapshot from CODEX_HOME or ~/.codex
-  --no-refresh         Use the cached snapshot without checking local JSONL files
-  --codex-home <dir>   Codex data root used when refreshing
-  --tz <name>          IANA timezone (default: machine timezone)
-  --top <number>       Number of projects to show (default: 10)
-  --width <number>     Terminal layout width in columns
-  --raw-projects       Keep singleton thread labels instead of grouping them
-  --no-archived        Skip archived_sessions when refreshing
-  --plain              Disable terminal colors
-  --ascii              Use ASCII bars instead of Unicode blocks
-  --static             Print once instead of opening the interactive dashboard
-  --drain               Trend columns show observed limit drain percent instead of token volume
-  --cache-rate          Write a separate cache-focused report visual (report only)
-  --image               Write trend view as a PNG image and open it on screen
-  --image-output <file> PNG output path for trend view
-  --image-width <px>   PNG image width from 900 to 2400 pixels
-  --no-open            Skip opening the finished PNG in the default viewer
-  --youplot            Use the legacy single-series YouPlot renderer
-  --help               Show this help
+Common options:
+  --static                  Print once instead of opening the dashboard
+  --refresh                 Rebuild the local usage cache
+  --image-output <file>     Choose where to save a PNG
+  --no-open                 Do not open a generated PNG
+  -h, --help                Show this quick guide
+  --help-all                Show every command and option
 
-The report command writes the dashboard PNG (same as trend --image) to
-token-ledger-report-<period>.png; use --image-output to choose the path.
-The dashboard combines usage and cache reporting: stat cards with pace and
-runway up top, the stacked usage chart with the weekly meter line, a
-compressed cache-rate-by-period strip, and top projects beside per-model
-cache rates. Use report --cache-rate for the separate cache-only visual,
-written to token-ledger-cache-report-<period>.png by default.
+Token Ledger reads local Codex data only. It does not upload your usage.`;
+}
 
-The command reads a privacy-reduced Token Ledger snapshot. It never uploads
-the snapshot or prints message bodies, tool payloads, credentials, or local
-input/source paths. Explicit PNG output paths are reported after writing.`;
+export function advancedUsage() {
+  return `Token Ledger command reference
+
+Terminal commands:
+  tledger 1d                         Rolling 24-hour project breakdown
+  tledger <N>d                       Rolling N-day project breakdown
+  tledger <N>w                       Rolling N-week project breakdown
+  tledger day <YYYY-MM-DD>           One local calendar day
+  tledger week [end-day]             Seven local calendar days
+  tledger trend [Nd|Nw]              Multi-day terminal trend
+
+Report commands:
+  tledger report [Nd|Nw]             Write the usage dashboard PNG
+  tledger report [Nd|Nw] --cache-rate
+                                      Write the cache-only PNG
+
+Dates and ranges:
+  --date <day>               YYYY-MM-DD, today, or yesterday
+  --period <window>          Trend window such as 7d, 14d, or 2w
+  --tz <name>                IANA timezone (default: machine timezone)
+
+Data and refresh:
+  --input <file>             Read an explicit snapshot
+  --refresh                  Rebuild the default snapshot from local Codex data
+  --no-refresh               Use the cached snapshot without checking source files
+  --codex-home <dir>         Codex data root used when refreshing
+  --no-archived              Skip archived sessions when refreshing
+
+Terminal output:
+  --top <number>             Projects to show, from 1 to 100 (default: 10)
+  --width <number>           Layout width, from 40 to 200 columns
+  --raw-projects             Keep singleton thread labels ungrouped
+  --plain                    Disable terminal colors
+  --ascii                    Use ASCII bars instead of Unicode blocks
+  --static                   Print once instead of opening the dashboard
+  --youplot                  Use the legacy single-series renderer
+
+Report output:
+  --drain                    Chart estimated meter drain instead of token volume
+  --cache-rate               Write the cache-only report (report command only)
+  --image                    Write the trend view as a PNG
+  --image-output <file>      Choose the PNG output path
+  --image-width <px>         Set PNG width from 900 to 2400 pixels
+  --no-open                  Do not open the finished PNG
+
+Help:
+  -h, --help                Show the quick guide
+  --help-all                Show this complete reference
+
+The default snapshot is ~/.token-ledger/token-ledger-snapshot-v2.json.gz.
+Token Ledger reads local Codex data only. It does not upload your usage.`;
 }
 
 function durationAlias(value) {
@@ -147,6 +170,7 @@ function readOption(argv, index, name) {
 }
 
 export function parseArgs(argv) {
+  const helpCommand = argv[0] === "help";
   const alias = durationAlias(argv[0]);
   const rolling24hCommand = argv[0] === "1d";
   const rollingDurationCommand = Boolean(alias) && !rolling24hCommand;
@@ -191,15 +215,19 @@ export function parseArgs(argv) {
     drain: false,
     cacheRate: false,
     legacyPlot: false,
-    help: false,
+    help: argv.length === 0 || helpCommand,
+    helpAll: false,
   };
 
   let trendPeriodSeen = false;
-  let index = alias || ["day", "week", "trend", "report"].includes(argv[0]) ? 1 : 0;
+  let index = alias || ["day", "week", "trend", "report", "help"].includes(argv[0]) ? 1 : 0;
   for (; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--help" || argument === "-h") {
       options.help = true;
+    } else if (argument === "--help-all") {
+      options.help = true;
+      options.helpAll = true;
     } else if (argument === "--date") {
       options.date = readOption(argv, index, "--date");
       index += 1;
@@ -1235,7 +1263,7 @@ async function main() {
   try {
     options = parseArgs(process.argv.slice(2));
     if (options.help) {
-      process.stdout.write(`${usage()}\n`);
+      process.stdout.write(`${options.helpAll ? advancedUsage() : usage()}\n`);
       return;
     }
     if (shouldUseInteractive(options)) {
@@ -1245,11 +1273,11 @@ async function main() {
     }
   } catch (error) {
     process.stderr.write(
-      `Token Ledger CLI failed: ${safeErrorMessage(error, [
+      `Token Ledger: ${safeErrorMessage(error, [
         options?.input,
         options?.codexHome,
         options?.imageOutput,
-      ])}\n\n${usage()}\n`,
+      ])}\nRun \`tledger --help\` for examples or \`tledger --help-all\` for every option.\n`,
     );
     process.exitCode = 1;
   }

@@ -9,7 +9,7 @@ Token Ledger is a local-only Codex usage dashboard with two outputs:
 This README describes the local checkout. It does not assume a hosted report
 or a published npm package.
 
-## Install and use
+## Install
 
 Requires Node.js 22.13 or newer. From this checkout:
 
@@ -18,38 +18,33 @@ npm install
 npm install -g .
 ```
 
-The second command links the `tledger` executable on your PATH. Without a
-global link, run the examples below as `npx tledger ...` or
-`node bin/token-ledger.mjs ...` from this checkout.
+The second command installs `tledger` on your PATH. From the checkout, you can
+use `npx tledger` instead.
 
-Generate the report as a PNG. `report` is the image form of the trend view and
-combines usage, weekly-meter pace and runway, period and per-model cache rates,
-and top projects. The default file is `token-ledger-report-7d.png` in the
-current directory.
+## Basics
 
-```bash
-tledger report 7d --no-open
-tledger report 7d --cache-rate --no-open
-# choose a destination explicitly
-tledger report 7d --image-output artifacts/token-ledger-report-7d.png --no-open
-```
+| What you need | Command |
+| --- | --- |
+| Quick guide | `tledger` |
+| Last 24 hours | `tledger 1d` |
+| Last 7 calendar days | `tledger week` |
+| Rolling 30 days | `tledger 30d` |
+| 7-day PNG report | `tledger report 7d` |
+| Cache-only PNG report | `tledger report 7d --cache-rate` |
 
-Use the terminal dashboard for the compact view:
+The main options are:
 
-```bash
-tledger week
-tledger week 2026-08-20 --static
-tledger 1d --static
-```
+- `--static` prints once instead of opening the terminal dashboard.
+- `--refresh` rebuilds the local usage cache.
+- `--image-output <file>` chooses where to save a PNG.
+- `--no-open` writes a PNG without opening it.
+- `--help-all` shows the complete command and option reference.
 
-`week` covers seven local calendar days ending on the selected day; its upper
-boundary is the next local midnight and is end-exclusive. `1d` is a rolling
-24-hour view ending when the command starts. In a TTY, the project dashboard
-is interactive; `--static` prints once, and `--plain` or `NO_COLOR=1` disables
-color. In the interactive view, `j`/`k` select a project; `q`, `Q`, `Esc`, or `Ctrl-C` exits.
-Enter does not inspect a project, and `d` / `w` / `m` do not change the range;
-choose the range in the command. `trend [Nd|Nw] --image` is equivalent to
-`report [Nd|Nw]`.
+`week` covers seven local calendar days ending on the selected day. `1d` is a
+rolling 24-hour view ending when the command starts. In a TTY, the project
+dashboard is interactive. `j`/`k` select a project; `q`, `Q`, `Esc`, or
+`Ctrl-C` exits. Enter does not inspect a project, and `d` / `w` / `m` do not
+change the range; choose the range in the command.
 
 ## Cache and input controls
 

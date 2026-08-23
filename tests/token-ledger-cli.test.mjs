@@ -82,6 +82,48 @@ test(
   },
 );
 
+test("bare CLI shows the concise quick guide", () => {
+  const result = spawnSync(process.execPath, [CLI_ENTRYPOINT], {
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  assert.match(result.stdout, /tledger 1d\s+Last 24 hours/);
+  assert.match(result.stdout, /tledger report 7d\s+Write the 7-day PNG report/);
+  assert.match(result.stdout, /--help-all\s+Show every command and option/);
+  assert.doesNotMatch(result.stdout, /--codex-home|--youplot|npm run/);
+});
+
+test("--help-all shows the complete command reference", () => {
+  const result = spawnSync(process.execPath, [CLI_ENTRYPOINT, "--help-all"], {
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  assert.match(result.stdout, /Token Ledger command reference/);
+  assert.match(result.stdout, /--codex-home <dir>/);
+  assert.match(result.stdout, /--youplot/);
+  assert.match(result.stdout, /--image-width <px>/);
+});
+
+test("CLI errors stay short and point to both help levels", () => {
+  const result = spawnSync(
+    process.execPath,
+    [CLI_ENTRYPOINT, "week", "--not-a-real-option"],
+    { encoding: "utf8" },
+  );
+
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, "");
+  assert.match(result.stderr, /Token Ledger: Unknown option: --not-a-real-option/);
+  assert.match(result.stderr, /tledger --help/);
+  assert.match(result.stderr, /tledger --help-all/);
+  assert.doesNotMatch(result.stderr, /Common options:|Data and refresh:/);
+  assert.equal(result.stderr.trimEnd().split("\n").length, 2);
+});
+
 test("dayBounds uses local calendar midnights for an explicit timezone", () => {
   const bounds = dayBounds("2026-08-01", "Pacific/Honolulu");
   assert.equal(bounds.start.toISOString(), "2026-08-01T10:00:00.000Z");
@@ -225,6 +267,16 @@ test("parseArgs accepts the day subcommand and date option", () => {
   assert.equal(options.date, "2026-08-01");
   assert.equal(options.top, 5);
   assert.equal(options.rawProjects, true);
+});
+
+test("parseArgs treats an empty command and help aliases as help", () => {
+  assert.equal(parseArgs([]).help, true);
+  assert.equal(parseArgs(["help"]).help, true);
+  assert.equal(parseArgs(["--help"]).help, true);
+
+  const complete = parseArgs(["--help-all"]);
+  assert.equal(complete.help, true);
+  assert.equal(complete.helpAll, true);
 });
 
 test("parseArgs defaults the week end day to today", () => {
@@ -786,9 +838,9 @@ test("interactive controls stay aligned with rendered and documented help", asyn
     fileURLToPath(new URL("../README.md", import.meta.url)),
     "utf8",
   );
-  assert.match(readme, /`q`, `Q`, `Esc`, or `Ctrl-C` exits\./);
+  assert.match(readme, /`q`, `Q`, `Esc`, or\s+`Ctrl-C` exits\./);
   assert.match(readme, /Enter does not inspect a project/);
-  assert.match(readme, /`d` \/ `w` \/ `m` do not change the\s+range/);
+  assert.match(readme, /`d` \/ `w` \/ `m` do not\s+change the range/);
 });
 
 test("terminal renderer produces the dashboard layout and scaled bars", () => {
