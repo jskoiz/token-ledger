@@ -39,6 +39,7 @@ test("no-unknown-returns selects decidable conditional alias branches", async ()
   const result = await lintTypeScript(`
     type Branch<T = number> = T extends string ? unknown : string;
     type AlwaysUnknown<T> = T extends string ? unknown : unknown;
+    type UnknownTarget<T> = unknown extends T ? number : unknown;
 
     export function safeNumber(): Branch<number> {
       throw new Error("unreachable");
@@ -82,17 +83,55 @@ test("no-unknown-returns selects decidable conditional alias branches", async ()
     export function unknownFalse(): unknown extends string ? number : unknown {
       throw new Error("unreachable");
     }
+    export function anyTopUnknown(): any extends unknown ? unknown : number {
+      throw new Error("unreachable");
+    }
+    export function anyAnyUnknown(): any extends any ? unknown : number {
+      throw new Error("unreachable");
+    }
+    export function unknownUnionUnknown(): unknown extends unknown | string
+      ? unknown
+      : number {
+      throw new Error("unreachable");
+    }
+    export function unknownUnionFalse(): unknown extends string | number
+      ? number
+      : unknown {
+      throw new Error("unreachable");
+    }
+    export function unknownTargetConcrete(): UnknownTarget<string> {
+      throw new Error("unreachable");
+    }
     export function anyDominated(): any extends string ? unknown : any {
       throw new Error("unreachable");
     }
     export function unknownConcrete(): unknown extends string ? unknown : number {
       throw new Error("unreachable");
     }
+    export function anyTopConcrete(): any extends unknown ? number : unknown {
+      throw new Error("unreachable");
+    }
+    export function anyAnyConcrete(): any extends any ? number : unknown {
+      throw new Error("unreachable");
+    }
+    export function unknownUnionConcrete(): unknown extends unknown | string
+      ? number
+      : unknown {
+      throw new Error("unreachable");
+    }
+    export function unresolvedUnknownTarget<T>(): unknown extends T
+      ? number
+      : unknown {
+      throw new Error("unreachable");
+    }
+    export function unknownTargetTop(): UnknownTarget<unknown> {
+      throw new Error("unreachable");
+    }
   `);
   assert.equal(result.status, 1, result.output);
   assert.equal(
     result.output.match(/anti-slop\(no-unknown-returns\)/g)?.length,
-    9,
+    14,
     result.output,
   );
 });

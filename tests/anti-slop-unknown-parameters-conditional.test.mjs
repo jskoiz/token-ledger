@@ -41,6 +41,7 @@ test("no-unknown-parameters resolves conditional aliases", async () => {
   const result = await lintTypeScript(`
     type Select<T> = T extends string ? unknown : number;
     type AlwaysUnknown<T> = T extends string ? unknown : unknown;
+    type UnknownTarget<T> = unknown extends T ? number : unknown;
 
     export function selected(value: Select<string>): void {}
     export function distributed(value: Select<string | number>): void {}
@@ -57,6 +58,19 @@ test("no-unknown-parameters resolves conditional aliases", async () => {
     export function unknownFalse(
       value: unknown extends string ? number : unknown,
     ): void {}
+    export function anyTopUnknown(
+      value: any extends unknown ? unknown : number,
+    ): void {}
+    export function anyAnyUnknown(
+      value: any extends any ? unknown : number,
+    ): void {}
+    export function unknownUnionUnknown(
+      value: unknown extends unknown | string ? unknown : number,
+    ): void {}
+    export function unknownUnionFalse(
+      value: unknown extends string | number ? number : unknown,
+    ): void {}
+    export function unknownTargetConcrete(value: UnknownTarget<string>): void {}
 
     export function concrete(value: Select<number>): void {}
     export function unresolved<T>(value: Select<T>): void {}
@@ -68,11 +82,24 @@ test("no-unknown-parameters resolves conditional aliases", async () => {
     export function unknownConcrete(
       value: unknown extends string ? unknown : number,
     ): void {}
+    export function anyTopConcrete(
+      value: any extends unknown ? number : unknown,
+    ): void {}
+    export function anyAnyConcrete(
+      value: any extends any ? number : unknown,
+    ): void {}
+    export function unknownUnionConcrete(
+      value: unknown extends unknown | string ? number : unknown,
+    ): void {}
+    export function unresolvedUnknownTarget<T>(
+      value: unknown extends T ? number : unknown,
+    ): void {}
+    export function unknownTargetTop(value: UnknownTarget<unknown>): void {}
   `);
   assert.equal(result.status, 1, result.output);
   assert.equal(
     result.output.match(/anti-slop\(no-unknown-parameters\)/g)?.length,
-    7,
+    12,
     result.output,
   );
 });

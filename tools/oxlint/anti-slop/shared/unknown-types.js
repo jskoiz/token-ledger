@@ -105,6 +105,31 @@ export function createUnknownTypeResolver(
     }
   };
 
+  const definitelyExcludesUnknown = (type) => {
+    switch (type.type) {
+      case "TSNeverKeyword":
+      case "TSStringKeyword":
+      case "TSNumberKeyword":
+      case "TSBooleanKeyword":
+      case "TSBigIntKeyword":
+      case "TSSymbolKeyword":
+      case "TSObjectKeyword":
+      case "TSNullKeyword":
+      case "TSUndefinedKeyword":
+      case "TSVoidKeyword":
+      case "TSLiteralType":
+      case "TSTemplateLiteralType":
+      case "TSTypeLiteral":
+      case "TSArrayType":
+      case "TSTupleType":
+      case "TSFunctionType":
+      case "TSConstructorType":
+        return true;
+      default:
+        return false;
+    }
+  };
+
   const isDefinitelyAssignable = (
     source,
     target,
@@ -121,14 +146,11 @@ export function createUnknownTypeResolver(
     ) {
       return true;
     }
-    if (sourceType.type === "TSAnyKeyword") return null;
-    if (sourceType.type === "TSUnknownKeyword") return false;
-    if (visited.has(sourceType) || visited.has(targetType)) return null;
-    const nextVisited = new Set(visited);
-    nextVisited.add(sourceType);
-    nextVisited.add(targetType);
 
     if (targetType.type === "TSUnionType") {
+      if (visited.has(targetType)) return null;
+      const nextVisited = new Set(visited);
+      nextVisited.add(targetType);
       let undecidable = false;
       for (const member of targetType.types) {
         const result = isDefinitelyAssignable(
@@ -143,6 +165,9 @@ export function createUnknownTypeResolver(
       return undecidable ? null : false;
     }
     if (sourceType.type === "TSUnionType") {
+      if (visited.has(sourceType)) return null;
+      const nextVisited = new Set(visited);
+      nextVisited.add(sourceType);
       let undecidable = false;
       for (const member of sourceType.types) {
         const result = isDefinitelyAssignable(
@@ -157,6 +182,9 @@ export function createUnknownTypeResolver(
       return undecidable ? null : true;
     }
     if (targetType.type === "TSIntersectionType") {
+      if (visited.has(targetType)) return null;
+      const nextVisited = new Set(visited);
+      nextVisited.add(targetType);
       let undecidable = false;
       for (const member of targetType.types) {
         const result = isDefinitelyAssignable(
@@ -171,6 +199,9 @@ export function createUnknownTypeResolver(
       return undecidable ? null : true;
     }
     if (sourceType.type === "TSIntersectionType") {
+      if (visited.has(sourceType)) return null;
+      const nextVisited = new Set(visited);
+      nextVisited.add(sourceType);
       let undecidable = false;
       for (const member of sourceType.types) {
         const result = isDefinitelyAssignable(
@@ -184,6 +215,12 @@ export function createUnknownTypeResolver(
       }
       return undecidable ? null : false;
     }
+
+    if (sourceType.type === "TSAnyKeyword") return null;
+    if (sourceType.type === "TSUnknownKeyword") {
+      return definitelyExcludesUnknown(targetType) ? false : null;
+    }
+    if (visited.has(sourceType) || visited.has(targetType)) return null;
 
     const sourceLiteral = literalValue(sourceType);
     const targetLiteral = literalValue(targetType);
@@ -260,7 +297,7 @@ export function createUnknownTypeResolver(
       const trueKind = () => resolveTopKind(type.trueType, visited, bindings);
       const falseKind = () => resolveTopKind(type.falseType, visited, bindings);
 
-      const evaluateBranch = (candidate) => {
+      const evaluateBranch = (candidate, combineIndeterminate = false) => {
         const selected = isDefinitelyAssignable(
           candidate,
           type.extendsType,
@@ -270,11 +307,15 @@ export function createUnknownTypeResolver(
         if (selected === false) return falseKind();
         const consequent = trueKind();
         const alternate = falseKind();
-        return consequent === alternate ? consequent : "other";
+        return combineIndeterminate
+          ? unionKind([consequent, alternate])
+          : consequent === alternate
+            ? consequent
+            : "other";
       };
 
       if (checkType.type === "TSAnyKeyword") {
-        return unionKind([trueKind(), falseKind()]);
+        return evaluateBranch(checkType, true);
       }
       if (
         checkType.type === "TSUnionType" &&
