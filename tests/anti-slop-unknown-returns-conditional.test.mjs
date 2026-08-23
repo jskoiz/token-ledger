@@ -67,11 +67,17 @@ test("no-unknown-returns selects decidable conditional alias branches", async ()
     export function promisedSafe(): Promise<Branch<number>> {
       throw new Error("unreachable");
     }
+    export function literalNever(): never extends string ? unknown : number {
+      throw new Error("unreachable");
+    }
+    export function distributedNever(): Branch<never> {
+      throw new Error("unreachable");
+    }
   `);
   assert.equal(result.status, 1, result.output);
   assert.equal(
     result.output.match(/anti-slop\(no-unknown-returns\)/g)?.length,
-    5,
+    6,
     result.output,
   );
 });

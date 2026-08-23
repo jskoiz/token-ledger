@@ -114,7 +114,7 @@ test("no-module-mocking unwraps runtime-transparent TypeScript expressions", asy
     result.output,
   );
   assert.equal(
-    result.output.match(/error anti-slop\(/g)?.length,
+    result.output.match(/anti-slop\(/g)?.length,
     12,
     result.output,
   );

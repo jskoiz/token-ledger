@@ -52,11 +52,12 @@ test("no-unknown-type-aliases resolves conditional branches that expose unknown"
     type Distributed = Select<string | number>;
     type PromiseWrapped<T> = Promise<T extends string ? unknown : unknown>;
     type PromiseLikeWrapped<T> = PromiseLike<T extends string ? unknown : unknown>;
+    type LiteralNever = never extends string ? unknown : number;
   `);
   assert.equal(result.status, 1, result.output);
   assert.equal(
     result.output.match(/anti-slop\(no-unknown-type-aliases\)/g)?.length,
-    7,
+    8,
     result.output,
   );
   for (const alias of [
@@ -67,6 +68,7 @@ test("no-unknown-type-aliases resolves conditional branches that expose unknown"
     "Nested",
     "Aliased",
     "Distributed",
+    "LiteralNever",
   ]) {
     assert.match(result.output, new RegExp("Type alias `" + alias + "` hides"));
   }
@@ -88,7 +90,9 @@ test("no-unknown-type-aliases preserves undecidable and concrete conditional con
     type UsesConcreteDefault = DefaultConcrete;
     type PromiseWrapped = Promise<unknown>;
     type PromiseLikeWrapped = PromiseLike<unknown>;
+    type DistributedNever = OneUnknown<never>;
   `);
   assert.equal(result.status, 0, result.output);
   assert.doesNotMatch(result.output, /anti-slop\(no-unknown-type-aliases\)/);
+  assert.doesNotMatch(result.output, /Type alias `DistributedNever` hides/);
 });

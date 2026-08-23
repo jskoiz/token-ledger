@@ -73,7 +73,7 @@ test("Reflect rules follow stable object, member, renamed, and destructured alia
     result.output,
   );
   assert.equal(
-    result.output.match(/error anti-slop\(/g)?.length,
+    result.output.match(/anti-slop\(/g)?.length,
     10,
     result.output,
   );
