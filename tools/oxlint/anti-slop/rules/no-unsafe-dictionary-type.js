@@ -66,10 +66,44 @@ function isInsideTypeAliasDeclaration(node             )          {
 	return false;
 }
 
+function hasReportableType(node               , environment                 )          {
+	if (node === null || typeof node !== "object") return false;
+	if (
+		typeNodeKinds.has(node.type) &&
+		classifyUnsafeDictionary(node, environment) !== null
+	)
+		return true;
+	if (
+		node.type === "TSIndexSignature" &&
+		node.typeAnnotation !== null &&
+		node.parent?.type !== "TSTypeLiteral" &&
+		classifyUnsafeDictionaryValue(
+			node.typeAnnotation.typeAnnotation,
+			environment,
+		) !== null
+	)
+		return true;
+
+	for (const [key, value] of Object.entries(node)) {
+		if (key === "parent") continue;
+		if (Array.isArray(value)) {
+			if (value.some((child) => hasReportableType(child, environment))) return true;
+			continue;
+		}
+		if (hasReportableType(value, environment)) return true;
+	}
+	return false;
+}
+
 function isPlainAliasConsumerUse(node               , environment                 )          {
 	if (node.type !== "TSTypeReference" || node.typeArguments?.params.length) return false;
 	const name = typeReferenceName(node);
-	return name !== null && environment.aliases.has(name) && !isInsideTypeAliasDeclaration(node);
+	const alias = name === null ? undefined : environment.aliases.get(name);
+	return (
+		alias !== undefined &&
+		!isInsideTypeAliasDeclaration(node) &&
+		hasReportableType(alias, environment)
+	);
 }
 
 function shouldReportType(node               , environment                 )          {
