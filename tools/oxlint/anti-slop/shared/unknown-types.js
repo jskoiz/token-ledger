@@ -238,7 +238,12 @@ export function createUnknownTypeResolver(
     }
     if (type.type === "TSConditionalType") {
       const checkType = resolveComparisonType(type.checkType, bindings);
-      if (checkType.type === "TSNeverKeyword") return false;
+      const checkReference = typeAliasReference(type.checkType);
+      const isBoundNakedCheck =
+        checkReference?.namespace.length === 0 &&
+        checkReference.arguments.length === 0 &&
+        bindings.has(checkReference.name);
+      if (checkType.type === "TSNeverKeyword" && isBoundNakedCheck) return false;
 
       const evaluateBranch = (candidate) => {
         const selected = isDefinitelyAssignable(
@@ -258,12 +263,9 @@ export function createUnknownTypeResolver(
         );
       };
 
-      const checkReference = typeAliasReference(type.checkType);
       if (
         checkType.type === "TSUnionType" &&
-        checkReference?.namespace.length === 0 &&
-        checkReference.arguments.length === 0 &&
-        bindings.has(checkReference.name)
+        isBoundNakedCheck
       ) {
         return checkType.types.some((member) => evaluateBranch(member));
       }
