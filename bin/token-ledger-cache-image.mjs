@@ -90,7 +90,21 @@ function binDateLabel(bin) {
 }
 
 function primitiveString(value) {
-  return typeof value === "string" ? value : null;
+  try {
+    const text = String.prototype.valueOf.call(value);
+    return text === value ? text : null;
+  } catch {
+    return null;
+  }
+}
+
+function primitiveNumber(value) {
+  try {
+    const number = Number.prototype.valueOf.call(value);
+    return number === value ? number : null;
+  } catch {
+    return null;
+  }
 }
 
 function finiteTimestamp(value) {
@@ -114,8 +128,9 @@ function generatedAtLabel(value, timeZone) {
 }
 
 function nonNegativeFiniteNumber(value) {
-  if (typeof value !== "number" && typeof value !== "string") return 0;
-  const number = Number(value);
+  const primitive = primitiveNumber(value);
+  const text = primitive === null ? primitiveString(value) : null;
+  const number = primitive ?? (text === null ? NaN : Number(text));
   return Number.isFinite(number) && number > 0 ? number : 0;
 }
 
@@ -146,6 +161,21 @@ function cacheBreakdown(event) {
     uncachedInputTokens: Math.max(0, inputTokens - cachedInputTokens),
     detailed,
   };
+}
+
+function parseCacheEvent(value) {
+  if (value == null) return null;
+  try {
+    const timestampMs = finiteTimestamp(value.timestamp);
+    if (timestampMs === null) return null;
+    return {
+      timestampMs,
+      model: safeModelLabel(value.model),
+      breakdown: cacheBreakdown(value),
+    };
+  } catch {
+    return null;
+  }
 }
 
 function emptyAggregate() {
@@ -189,14 +219,17 @@ function accumulateRange(snapshot, bounds, bins = null, dateIndexByString = null
 
   const events = Array.isArray(snapshot?.events) ? snapshot.events : [];
   for (const event of events) {
-    if (event === null || typeof event !== "object") continue;
-    const timestampMs = finiteTimestamp(event.timestamp);
-    if (timestampMs === null || timestampMs < startMs || timestampMs >= endMs) {
+    const parsed = parseCacheEvent(event);
+    if (
+      parsed === null ||
+      parsed.timestampMs < startMs ||
+      parsed.timestampMs >= endMs
+    ) {
       continue;
     }
-    const breakdown = cacheBreakdown(event);
+    const { breakdown } = parsed;
     const dateString = bins
-      ? localDateString(timestampMs, bounds.timeZone)
+      ? localDateString(parsed.timestampMs, bounds.timeZone)
       : null;
     const binIndex = dateString === null ? null : dateIndexByString.get(dateString);
     const bin = binIndex === undefined || binIndex === null ? null : bins[binIndex];
@@ -219,7 +252,7 @@ function accumulateRange(snapshot, bounds, bins = null, dateIndexByString = null
 
     addInput(totals, breakdown);
     if (bin) addInput(bin, breakdown);
-    const model = safeModelLabel(event.model);
+    const model = parsed.model;
     const modelAggregate = modelTotals.get(model) ?? {
       model,
       inputTokens: 0,
