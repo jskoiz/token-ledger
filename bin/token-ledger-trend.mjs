@@ -3,6 +3,7 @@ import {
   FAST_MODE_MULTIPLIER,
   RATE_CARD_AS_OF,
 } from "./token-ledger-rates.mjs";
+import { usageBuckets } from "../lib/token-ledger-usage.mjs";
 
 const WEEK_MINUTES = 10_080;
 const RESET_JITTER_SECONDS = 5 * 60;
@@ -497,7 +498,7 @@ function buildModelStats(displayedEvents, intervals, bounds) {
 export function buildUsageTrend(snapshot = {}, bounds) {
   const startMs = bounds.start.getTime();
   const endMs = bounds.end.getTime();
-  const displayedEvents = eventsInBounds(snapshot.events ?? [], bounds);
+  const displayedEvents = eventsInBounds(usageBuckets(snapshot), bounds);
   const observations = normalizeQuotaTimeline(
     weeklyQuotaObservations(snapshot),
   ).filter((observation) => observation.timestampMs < endMs);
@@ -516,7 +517,7 @@ export function buildUsageTrend(snapshot = {}, bounds) {
     };
   }
 
-  const sortedEvents = (snapshot.events ?? [])
+  const sortedEvents = usageBuckets(snapshot)
     .map((event) => ({ ...event, timestampMs: finiteTimestamp(event.timestamp) }))
     .filter((event) => event.timestampMs !== null && event.timestampMs < endMs)
     .sort((left, right) => left.timestampMs - right.timestampMs);

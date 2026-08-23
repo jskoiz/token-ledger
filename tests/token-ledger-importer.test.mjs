@@ -13,10 +13,17 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
 
+import { collectUsage } from "../lib/token-ledger-importer.mjs";
 import {
-  collectUsage,
+  DEFAULT_SNAPSHOT_MAX_BYTES,
+  readPrivateSnapshot,
   writePrivateSnapshot,
-} from "../lib/token-ledger-importer.mjs";
+} from "../lib/token-ledger-snapshot.mjs";
+import {
+  buildUsageBuckets,
+  SNAPSHOT_SCHEMA_VERSION,
+  usageBucketStats,
+} from "../lib/token-ledger-usage.mjs";
 
 function tokenCount(timestamp, total, last) {
   return {
@@ -235,6 +242,239 @@ test("private snapshots replace atomically and enforce mode 0600", async () => {
       (await readdir(root)).filter((name) => name.endsWith(".tmp")),
       [],
     );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("gzip snapshots are compact, readable, atomic, and private", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-gzip-write-"));
+  try {
+    const output = resolve(root, "snapshot.json.gz");
+    const snapshot = {
+      generatedAt: "2026-08-22T00:00:00.000Z",
+      events: Array.from({ length: 1_000 }, (_, index) => ({
+        id: `event-${index}`,
+        timestamp: "2026-08-22T00:00:00.000Z",
+        project: "repeated-project",
+        model: "gpt-5.6-sol",
+        totalTokens: index + 1,
+      })),
+    };
+
+    const result = await writePrivateSnapshot(output, snapshot);
+    const encoded = await readFile(output);
+
+    assert.deepEqual([...encoded.subarray(0, 2)], [0x1f, 0x8b]);
+    assert.deepEqual(await readPrivateSnapshot(output), snapshot);
+    assert.equal(result.encoding, "gzip");
+    assert.equal(result.bytesWritten, encoded.byteLength);
+    assert.ok(result.bytesWritten < result.jsonBytes / 4);
+    assert.equal(result.maxBytes, DEFAULT_SNAPSHOT_MAX_BYTES);
+    assert.equal((await stat(output)).mode & 0o777, 0o600);
+    assert.deepEqual(
+      (await readdir(root)).filter((name) => name.endsWith(".tmp")),
+      [],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("snapshot size limit preserves the previous cache", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-size-limit-"));
+  try {
+    const output = resolve(root, "snapshot.json.gz");
+    await writeFile(output, "previous-cache\n");
+
+    await assert.rejects(
+      () => writePrivateSnapshot(
+        output,
+        {
+          events: Array.from({ length: 100 }, (_, index) => ({
+            id: `event-${index}-${"x".repeat(index + 1)}`,
+          })),
+        },
+        { maxBytes: 1 },
+      ),
+      /exceeding the .* safety limit/,
+    );
+
+    assert.equal(await readFile(output, "utf8"), "previous-cache\n");
+    assert.deepEqual(
+      (await readdir(root)).filter((name) => name.endsWith(".tmp")),
+      [],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("expanded JSON limit preserves the previous compressed cache", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-json-limit-"));
+  try {
+    const output = resolve(root, "snapshot.json.gz");
+    await writeFile(output, "previous-cache\n");
+
+    await assert.rejects(
+      () => writePrivateSnapshot(
+        output,
+        {
+          schemaVersion: SNAPSHOT_SCHEMA_VERSION,
+          coverage: {},
+          label: "x".repeat(5_000),
+          events: [],
+        },
+        {
+          maxBytes: 64 * 1_024,
+          targetBytes: 64 * 1_024,
+          maxJsonBytes: 1_024,
+          targetJsonBytes: 512,
+        },
+      ),
+      /exceeding the .* in-memory safety limit/,
+    );
+
+    assert.equal(await readFile(output, "utf8"), "previous-cache\n");
+    assert.deepEqual(
+      (await readdir(root)).filter((name) => name.endsWith(".tmp")),
+      [],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("usage buckets preserve additive totals across age tiers", () => {
+  const latestTimestampMs = Date.parse("2026-08-22T12:00:00.000Z");
+  const rows = [
+    ["2026-08-22T11:59:58.000Z", "recent-a", 10],
+    ["2026-08-22T11:59:59.000Z", "recent-b", 20],
+    ["2026-08-19T10:00:01.000Z", "minute-a", 30],
+    ["2026-08-19T10:00:20.000Z", "minute-b", 40],
+    ["2026-07-10T10:01:00.000Z", "hour-a", 50],
+    ["2026-07-10T10:40:00.000Z", "hour-b", 60],
+    ["2025-06-01T10:00:00.000Z", "day-a", 70],
+    ["2025-06-01T18:00:00.000Z", "day-b", 80],
+  ].map(([timestamp, threadId, totalTokens]) => ({
+    timestamp,
+    threadId,
+    project: "bounded-history",
+    model: "gpt-5.6-luna",
+    effort: "medium",
+    source: "desktop",
+    useType: "interactive",
+    serviceTier: null,
+    inputTokens: totalTokens - 2,
+    cachedInputTokens: 2,
+    cacheWriteInputTokens: 1,
+    outputTokens: 2,
+    reasoningTokens: 1,
+    totalTokens,
+    toolCalls: 1,
+    rateCardCredits: totalTokens / 1_000,
+    breakdownAvailable: true,
+  }));
+
+  const buckets = buildUsageBuckets(rows, { latestTimestampMs });
+  const stats = usageBucketStats(buckets);
+  assert.equal(stats.bucketCount, 5);
+  assert.equal(stats.callCount, rows.length);
+  assert.equal(stats.maximumResolutionSeconds, 86_400);
+  assert.equal(
+    buckets.reduce((sum, bucket) => sum + bucket.totalTokens, 0),
+    rows.reduce((sum, row) => sum + row.totalTokens, 0),
+  );
+  assert.equal(
+    buckets.reduce((sum, bucket) => sum + bucket.cacheWriteInputTokens, 0),
+    rows.length,
+  );
+  assert.deepEqual(
+    buckets.flatMap((bucket) => bucket.threadIds).sort(),
+    rows.map((row) => row.threadId).sort(),
+  );
+});
+
+test("dense recent usage compacts during collection before memory grows unbounded", () => {
+  const latestTimestampMs = Date.parse("2026-08-22T12:00:00.000Z");
+  const rows = Array.from({ length: 50_100 }, (_, index) => ({
+    timestamp: new Date(latestTimestampMs - index).toISOString(),
+    threadId: `thread-${index % 10}`,
+    project: "dense-history",
+    model: "gpt-5.6-luna",
+    effort: "medium",
+    source: "desktop",
+    useType: "interactive",
+    serviceTier: null,
+    inputTokens: 9,
+    cachedInputTokens: 4,
+    cacheWriteInputTokens: 1,
+    outputTokens: 1,
+    reasoningTokens: 0,
+    totalTokens: 10,
+    toolCalls: 0,
+    rateCardCredits: 0.001,
+    breakdownAvailable: true,
+  }));
+
+  const buckets = buildUsageBuckets(rows, { latestTimestampMs });
+  const stats = usageBucketStats(buckets);
+  assert.ok(stats.bucketCount < 1_000);
+  assert.equal(stats.callCount, rows.length);
+  assert.ok(stats.maximumResolutionSeconds >= 300);
+  assert.equal(
+    buckets.reduce((sum, bucket) => sum + bucket.totalTokens, 0),
+    501_000,
+  );
+});
+
+test("snapshot writer coarsens toward its soft target without losing totals", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-adaptive-write-"));
+  try {
+    const output = resolve(root, "snapshot.json.gz");
+    const snapshot = {
+      schemaVersion: SNAPSHOT_SCHEMA_VERSION,
+      generatedAt: "2026-08-22T12:00:00.000Z",
+      coverage: {},
+      threads: [],
+      events: Array.from({ length: 2_000 }, (_, index) => ({
+        timestamp: new Date(
+          Date.parse("2026-08-22T10:00:00.000Z") + index * 1_000,
+        ).toISOString(),
+        threadId: `thread-${index % 10}`,
+        project: "adaptive-history",
+        model: "gpt-5.6-luna",
+        effort: "medium",
+        source: "desktop",
+        useType: "interactive",
+        serviceTier: null,
+        inputTokens: 9,
+        cachedInputTokens: 4,
+        cacheWriteInputTokens: 1,
+        outputTokens: 1,
+        reasoningTokens: 0,
+        totalTokens: 10,
+        toolCalls: index % 2,
+        rateCardCredits: 0.001,
+        breakdownAvailable: true,
+      })),
+    };
+
+    const result = await writePrivateSnapshot(output, snapshot, {
+      maxBytes: 64 * 1_024,
+      targetBytes: 4 * 1_024,
+    });
+    const stored = await readPrivateSnapshot(output);
+    const stats = usageBucketStats(stored.events);
+    assert.ok(result.adaptiveResolutionSeconds >= 300);
+    assert.ok(result.bytesWritten <= result.targetBytes);
+    assert.equal(stats.callCount, snapshot.events.length);
+    assert.equal(
+      stored.events.reduce((sum, bucket) => sum + bucket.totalTokens, 0),
+      20_000,
+    );
+    assert.equal(stored.storage.modelCalls, snapshot.events.length);
+    assert.equal(stored.coverage.usageBucketCount, stored.events.length);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

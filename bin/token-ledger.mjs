@@ -4,7 +4,6 @@ import { spawnSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import {
   mkdir,
-  readFile,
   stat,
 } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -23,11 +22,21 @@ import {
 import { renderCacheReportImage } from "./token-ledger-cache-image.mjs";
 import { renderTrendCombo } from "./token-ledger-trend-terminal.mjs";
 import { startInteractive } from "./token-ledger-tui.mjs";
+import {
+  readPrivateSnapshot,
+  writePrivateSnapshot,
+} from "../lib/token-ledger-snapshot.mjs";
+import {
+  SNAPSHOT_SCHEMA_VERSION,
+  usageBuckets,
+  usageCallCount,
+  usageThreadIds,
+} from "../lib/token-ledger-usage.mjs";
 
 export const DEFAULT_SNAPSHOT = resolve(
   homedir(),
   ".token-ledger",
-  "token-ledger-snapshot.json",
+  "token-ledger-snapshot-v2.json.gz",
 );
 const DEFAULT_TOP = 10;
 const DEFAULT_TIME_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -45,55 +54,78 @@ const MODEL_COLORS = {
   other: TERMINAL_MODEL_COLORS.other,
 };
 
-function usage() {
-  return `Token Ledger terminal usage
+export function usage() {
+  return `Token Ledger
 
 Usage:
-  tledger 1d                 Rolling 24-hour project breakdown (ends now)
-  tledger <N>d               Rolling N-day project breakdown (ends now)
-  tledger <N>w               Rolling N-week project breakdown (ends now)
-  tledger day <YYYY-MM-DD>
-  tledger week [end-day]
-  tledger trend [Nd|Nw]
-  tledger report [Nd|Nw]
-  npm run usage:day -- <YYYY-MM-DD>
-  npm run usage:week -- [end-day]
+  tledger 1d                         Last 24 hours in the terminal
+  tledger week                       Last 7 calendar days in the terminal
+  tledger 30d                        Rolling 30 days in the terminal
+  tledger report 7d                  Write the 7-day PNG report
+  tledger report 7d --cache-rate     Write the cache-only PNG report
 
-Options:
-  --date <day>         Date as YYYY-MM-DD, today, or yesterday
-  --period <window>    Trend window, for example 7d, 14d, or 2w
-  --input <file>       Snapshot to read (default: ~/.token-ledger/token-ledger-snapshot.json)
-  --refresh            Rebuild the default snapshot from CODEX_HOME or ~/.codex
-  --no-refresh         Use the cached snapshot without checking local JSONL files
-  --codex-home <dir>   Codex data root used when refreshing
-  --tz <name>          IANA timezone (default: machine timezone)
-  --top <number>       Number of projects to show (default: 10)
-  --width <number>     Terminal layout width in columns
-  --raw-projects       Keep singleton thread labels instead of grouping them
-  --no-archived        Skip archived_sessions when refreshing
-  --plain              Disable terminal colors
-  --ascii              Use ASCII bars instead of Unicode blocks
-  --static             Print once instead of opening the interactive dashboard
-  --drain               Trend columns show observed limit drain percent instead of token volume
-  --cache-rate          Write a separate cache-focused report visual (report only)
-  --image               Write trend view as a PNG image and open it on screen
-  --image-output <file> PNG output path for trend view
-  --image-width <px>   PNG image width from 900 to 2400 pixels
-  --no-open            Skip opening the finished PNG in the default viewer
-  --youplot            Use the legacy single-series YouPlot renderer
-  --help               Show this help
+Common options:
+  --static                  Print once instead of opening the dashboard
+  --refresh                 Rebuild the local usage cache
+  --image-output <file>     Choose where to save a PNG
+  --no-open                 Do not open a generated PNG
+  -h, --help                Show this quick guide
+  --help-all                Show every command and option
 
-The report command writes the dashboard PNG (same as trend --image) to
-token-ledger-report-<period>.png; use --image-output to choose the path.
-The dashboard combines usage and cache reporting: stat cards with pace and
-runway up top, the stacked usage chart with the weekly meter line, a
-compressed cache-rate-by-period strip, and top projects beside per-model
-cache rates. Use report --cache-rate for the separate cache-only visual,
-written to token-ledger-cache-report-<period>.png by default.
+Token Ledger reads local Codex data only. It does not upload your usage.`;
+}
 
-The command reads a privacy-reduced Token Ledger snapshot. It never uploads
-the snapshot or prints message bodies, tool payloads, credentials, or local
-input/source paths. Explicit PNG output paths are reported after writing.`;
+export function advancedUsage() {
+  return `Token Ledger command reference
+
+Terminal commands:
+  tledger 1d                         Rolling 24-hour project breakdown
+  tledger <N>d                       Rolling N-day project breakdown
+  tledger <N>w                       Rolling N-week project breakdown
+  tledger day <YYYY-MM-DD>           One local calendar day
+  tledger week [end-day]             Seven local calendar days
+  tledger trend [Nd|Nw]              Multi-day terminal trend
+
+Report commands:
+  tledger report [Nd|Nw]             Write the usage dashboard PNG
+  tledger report [Nd|Nw] --cache-rate
+                                      Write the cache-only PNG
+
+Dates and ranges:
+  --date <day>               YYYY-MM-DD, today, or yesterday
+  --period <window>          Trend window such as 7d, 14d, or 2w
+  --tz <name>                IANA timezone (default: machine timezone)
+
+Data and refresh:
+  --input <file>             Read an explicit snapshot
+  --refresh                  Rebuild the default snapshot from local Codex data
+  --no-refresh               Use the cached snapshot without checking source files
+  --codex-home <dir>         Codex data root used when refreshing
+  --no-archived              Skip archived sessions when refreshing
+
+Terminal output:
+  --top <number>             Projects to show, from 1 to 100 (default: 10)
+  --width <number>           Layout width, from 40 to 200 columns
+  --raw-projects             Keep singleton thread labels ungrouped
+  --plain                    Disable terminal colors
+  --ascii                    Use ASCII bars instead of Unicode blocks
+  --static                   Print once instead of opening the dashboard
+  --youplot                  Use the legacy single-series renderer
+
+Report output:
+  --drain                    Chart estimated meter drain instead of token volume
+  --cache-rate               Write the cache-only report (report command only)
+  --image                    Write the trend view as a PNG
+  --image-output <file>      Choose the PNG output path
+  --image-width <px>         Set PNG width from 900 to 2400 pixels
+  --no-open                  Do not open the finished PNG
+
+Help:
+  -h, --help                Show the quick guide
+  --help-all                Show this complete reference
+
+The default snapshot is ~/.token-ledger/token-ledger-snapshot-v2.json.gz.
+Token Ledger reads local Codex data only. It does not upload your usage.`;
 }
 
 function durationAlias(value) {
@@ -138,6 +170,7 @@ function readOption(argv, index, name) {
 }
 
 export function parseArgs(argv) {
+  const helpCommand = argv[0] === "help";
   const alias = durationAlias(argv[0]);
   const rolling24hCommand = argv[0] === "1d";
   const rollingDurationCommand = Boolean(alias) && !rolling24hCommand;
@@ -182,15 +215,19 @@ export function parseArgs(argv) {
     drain: false,
     cacheRate: false,
     legacyPlot: false,
-    help: false,
+    help: argv.length === 0 || helpCommand,
+    helpAll: false,
   };
 
   let trendPeriodSeen = false;
-  let index = alias || ["day", "week", "trend", "report"].includes(argv[0]) ? 1 : 0;
+  let index = alias || ["day", "week", "trend", "report", "help"].includes(argv[0]) ? 1 : 0;
   for (; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--help" || argument === "-h") {
       options.help = true;
+    } else if (argument === "--help-all") {
+      options.help = true;
+      options.helpAll = true;
     } else if (argument === "--date") {
       options.date = readOption(argv, index, "--date");
       index += 1;
@@ -576,7 +613,9 @@ export function oneOffProjects(snapshot) {
     ids.add(threadId);
     threadIdsByProject.set(normalizedProject, ids);
   };
-  for (const event of snapshot.events ?? []) add(event.project, event.threadId);
+  for (const bucket of usageBuckets(snapshot)) {
+    for (const threadId of usageThreadIds(bucket)) add(bucket.project, threadId);
+  }
   for (const thread of snapshot.threads ?? []) add(thread.project, thread.id);
   return new Set(
     [...threadIdsByProject.entries()]
@@ -599,7 +638,7 @@ function modelLabel(value) {
 export function filterDayEvents(snapshot, bounds) {
   const start = bounds.start.getTime();
   const end = bounds.end.getTime();
-  return (snapshot.events ?? []).filter((event) => {
+  return usageBuckets(snapshot).filter((event) => {
     try {
       const timestamp = new Date(event?.timestamp).getTime();
       return Number.isFinite(timestamp) && timestamp >= start && timestamp < end;
@@ -637,8 +676,8 @@ export function aggregateProjects(snapshot, events, options = {}) {
     row.outputTokens += Number(event.outputTokens) || 0;
     row.reasoningTokens += Number(event.reasoningTokens) || 0;
     row.toolCalls += Number(event.toolCalls) || 0;
-    row.events += 1;
-    if (event.threadId) row.threadIds.add(event.threadId);
+    row.events += usageCallCount(event);
+    for (const threadId of usageThreadIds(event)) row.threadIds.add(threadId);
     if (event.rateCardCredits !== null && Number.isFinite(Number(event.rateCardCredits))) {
       row.rateCardCredits += Number(event.rateCardCredits);
       row.knownCreditTokens += Number(event.totalTokens) || 0;
@@ -652,7 +691,7 @@ export function aggregateProjects(snapshot, events, options = {}) {
       rateCardCredits: 0,
     };
     modelRow.totalTokens += Number(event.totalTokens) || 0;
-    modelRow.events += 1;
+    modelRow.events += usageCallCount(event);
     if (event.rateCardCredits !== null && Number.isFinite(Number(event.rateCardCredits))) {
       modelRow.rateCardCredits += Number(event.rateCardCredits);
     }
@@ -682,7 +721,10 @@ function totalSummary(events) {
       summary.totalTokens += Number(event.totalTokens) || 0;
       summary.outputTokens += Number(event.outputTokens) || 0;
       summary.toolCalls += Number(event.toolCalls) || 0;
-      if (event.threadId) summary.threadIds.add(event.threadId);
+      summary.calls += usageCallCount(event);
+      for (const threadId of usageThreadIds(event)) {
+        summary.threadIds.add(threadId);
+      }
       if (event.rateCardCredits !== null && Number.isFinite(Number(event.rateCardCredits))) {
         summary.rateCardCredits += Number(event.rateCardCredits);
         summary.knownCreditTokens += Number(event.totalTokens) || 0;
@@ -693,6 +735,7 @@ function totalSummary(events) {
       totalTokens: 0,
       outputTokens: 0,
       toolCalls: 0,
+      calls: 0,
       rateCardCredits: 0,
       knownCreditTokens: 0,
       threadIds: new Set(),
@@ -823,7 +866,7 @@ async function readSnapshot(snapshotPath) {
   const snapshotLabel = safeDisplayLabel(snapshotPath, "snapshot");
   let parsed;
   try {
-    parsed = JSON.parse(await readFile(snapshotPath, "utf8"));
+    parsed = await readPrivateSnapshot(snapshotPath);
   } catch (error) {
     if (error?.code === "ENOENT") {
       throw new Error(`Snapshot not found: ${snapshotLabel}`);
@@ -832,8 +875,14 @@ async function readSnapshot(snapshotPath) {
       `Could not read snapshot ${snapshotLabel}: ${safeErrorMessage(error, [snapshotPath])}`,
     );
   }
-  if (!parsed || !Array.isArray(parsed.events)) {
-    throw new Error(`Snapshot is missing its events array: ${snapshotLabel}`);
+  if (
+    !parsed ||
+    parsed.schemaVersion !== SNAPSHOT_SCHEMA_VERSION ||
+    !Array.isArray(parsed.events)
+  ) {
+    throw new Error(
+      `Snapshot uses an unsupported schema: ${snapshotLabel}. Rebuild it with --refresh.`,
+    );
   }
   return parsed;
 }
@@ -846,7 +895,7 @@ async function refreshSnapshot(options) {
   }
   let progressStarted = false;
   try {
-    const { collectUsage, writePrivateSnapshot } = await import(
+    const { collectUsage } = await import(
       "../lib/token-ledger-importer.mjs"
     );
     process.stderr.write("Token Ledger: refreshing local snapshot…\n");
@@ -863,10 +912,25 @@ async function refreshSnapshot(options) {
       },
     );
     process.stderr.write("\n");
-    await writePrivateSnapshot(options.input, snapshot);
-    return snapshot;
+    const writeResult = await writePrivateSnapshot(options.input, snapshot);
+    const storedSnapshot = writeResult.snapshot;
+    process.stderr.write(
+      `Token Ledger: cached ${(writeResult.bytesWritten / 1_000_000).toFixed(1)} MB ${writeResult.encoding} snapshot (${(writeResult.jsonBytes / 1_000_000).toFixed(1)} MB JSON before encoding; ${storedSnapshot.events.length.toLocaleString()} buckets for ${storedSnapshot.coverage.observedModelCalls.toLocaleString()} calls; ${(writeResult.maxBytes / 1_000_000).toFixed(1)} MB limit).\n`,
+    );
+    if (writeResult.bytesWritten / writeResult.maxBytes >= 0.7) {
+      process.stderr.write(
+        "Token Ledger: snapshot is above 70% of its safety limit; older buckets will compact automatically as it grows.\n",
+      );
+    }
+    return storedSnapshot;
   } catch (error) {
     if (progressStarted) process.stderr.write("\n");
+    if (error?.code === "ERR_SNAPSHOT_SIZE_LIMIT" && existsSync(options.input)) {
+      process.stderr.write(
+        "Token Ledger: refresh exceeded the safety limit; continuing with the previous cache, which may be stale.\n",
+      );
+      return readSnapshot(options.input);
+    }
     throw new Error(
       `Could not refresh local snapshot: ${safeErrorMessage(error, [options.input, options.codexHome])}`,
     );
@@ -1033,7 +1097,7 @@ function render(options, snapshot, bounds, events, rows, allRows, freshness) {
 
   const header = [
     `Token Ledger · ${dateLabel} · ${bounds.timeZone}`,
-    `${compact(totalTokens)} tokens · ${summary.threadIds.size.toLocaleString()} threads · ${events.length.toLocaleString()} calls · ${compact(summary.outputTokens)} output`,
+    `${compact(totalTokens)} tokens · ${summary.threadIds.size.toLocaleString()} threads · ${summary.calls.toLocaleString()} calls · ${compact(summary.outputTokens)} output`,
     `Source: ${sourceLabel(options.input, snapshot)}`,
     "",
     chart,
@@ -1199,7 +1263,7 @@ async function main() {
   try {
     options = parseArgs(process.argv.slice(2));
     if (options.help) {
-      process.stdout.write(`${usage()}\n`);
+      process.stdout.write(`${options.helpAll ? advancedUsage() : usage()}\n`);
       return;
     }
     if (shouldUseInteractive(options)) {
@@ -1209,11 +1273,11 @@ async function main() {
     }
   } catch (error) {
     process.stderr.write(
-      `Token Ledger CLI failed: ${safeErrorMessage(error, [
+      `Token Ledger: ${safeErrorMessage(error, [
         options?.input,
         options?.codexHome,
         options?.imageOutput,
-      ])}\n\n${usage()}\n`,
+      ])}\nRun \`tledger --help\` for examples or \`tledger --help-all\` for every option.\n`,
     );
     process.exitCode = 1;
   }

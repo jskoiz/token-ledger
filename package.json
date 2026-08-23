@@ -38,7 +38,7 @@
     "test": "node --test tests/*.test.mjs",
     "cli:test": "node --test tests/token-ledger-cli.test.mjs",
     "lint": "eslint . && oxlint",
-    "usage:snapshot": "node lib/token-ledger-importer.mjs --output outputs/token-ledger-snapshot.json",
+    "usage:snapshot": "node lib/token-ledger-importer.mjs --output outputs/token-ledger-snapshot-v2.json.gz",
     "usage:day": "node bin/token-ledger.mjs day",
     "usage:week": "node bin/token-ledger.mjs week",
     "verify:release": "node tools/verify-release.mjs",

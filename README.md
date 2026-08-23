@@ -9,7 +9,7 @@ Token Ledger is a local-only Codex usage dashboard with two outputs:
 This README describes the local checkout. It does not assume a hosted report
 or a published npm package.
 
-## Install and use
+## Install
 
 Requires Node.js 22.13 or newer. From this checkout:
 
@@ -18,38 +18,33 @@ npm install
 npm install -g .
 ```
 
-The second command links the `tledger` executable on your PATH. Without a
-global link, run the examples below as `npx tledger ...` or
-`node bin/token-ledger.mjs ...` from this checkout.
+The second command installs `tledger` on your PATH. From the checkout, you can
+use `npx tledger` instead.
 
-Generate the report as a PNG. `report` is the image form of the trend view and
-combines usage, weekly-meter pace and runway, period and per-model cache rates,
-and top projects. The default file is `token-ledger-report-7d.png` in the
-current directory.
+## Basics
 
-```bash
-tledger report 7d --no-open
-tledger report 7d --cache-rate --no-open
-# choose a destination explicitly
-tledger report 7d --image-output artifacts/token-ledger-report-7d.png --no-open
-```
+| What you need | Command |
+| --- | --- |
+| Quick guide | `tledger` |
+| Last 24 hours | `tledger 1d` |
+| Last 7 calendar days | `tledger week` |
+| Rolling 30 days | `tledger 30d` |
+| 7-day PNG report | `tledger report 7d` |
+| Cache-only PNG report | `tledger report 7d --cache-rate` |
 
-Use the terminal dashboard for the compact view:
+The main options are:
 
-```bash
-tledger week
-tledger week 2026-08-20 --static
-tledger 1d --static
-```
+- `--static` prints once instead of opening the terminal dashboard.
+- `--refresh` rebuilds the local usage cache.
+- `--image-output <file>` chooses where to save a PNG.
+- `--no-open` writes a PNG without opening it.
+- `--help-all` shows the complete command and option reference.
 
-`week` covers seven local calendar days ending on the selected day; its upper
-boundary is the next local midnight and is end-exclusive. `1d` is a rolling
-24-hour view ending when the command starts. In a TTY, the project dashboard
-is interactive; `--static` prints once, and `--plain` or `NO_COLOR=1` disables
-color. In the interactive view, `j`/`k` select a project; `q`, `Q`, `Esc`, or `Ctrl-C` exits.
-Enter does not inspect a project, and `d` / `w` / `m` do not change the range;
-choose the range in the command. `trend [Nd|Nw] --image` is equivalent to
-`report [Nd|Nw]`.
+`week` covers seven local calendar days ending on the selected day. `1d` is a
+rolling 24-hour view ending when the command starts. In a TTY, the project
+dashboard is interactive. `j`/`k` select a project; `q`, `Q`, `Esc`, or
+`Ctrl-C` exits. Enter does not inspect a project, and `d` / `w` / `m` do not
+change the range; choose the range in the command.
 
 ## Cache and input controls
 
@@ -65,10 +60,24 @@ Use `--image-output`, `--image-width`, `--date`, `--tz`, and `--no-open` the
 same way as on the standard report.
 
 The default privacy-reduced snapshot is
-`~/.token-ledger/token-ledger-snapshot.json`. On a normal default-path run, a
-snapshot whose mtime is in the past and less than one hour old skips the source
-walk. An exact-hour or future mtime is not fresh; an older snapshot is checked
-against local source mtimes before it is reused or rebuilt.
+`~/.token-ledger/token-ledger-snapshot-v2.json.gz`. It is gzip-compressed,
+written atomically with mode `0600`, targets 12 MiB, and has a hard 16 MiB
+on-disk limit. Its expanded JSON representation also targets 48 MiB and has a
+64 MiB safety limit, so the old 93 MiB raw-cache behavior cannot recur on the
+default production path. The collector de-duplicates through a private temporary SQLite
+spool, then keeps exact recent calls while rolling older history into minute,
+hour, and day buckets. If a dense history approaches the target, it increases
+the bucket resolution automatically while preserving additive token, model,
+project, cache, tool-call, and thread totals. The temporary spool is removed
+when collection completes or exits with a handled error.
+
+If even the coarsest bounded representation exceeds the hard limit, Token
+Ledger preserves the previous cache and asks you to reduce the source with
+`--no-archived` or the collector's `--since` option. It never replaces the
+production cache with an oversized or partial file. On a normal default-path
+run, a snapshot whose mtime is in the past and less than one hour old skips the
+source walk. An exact-hour or future mtime is not fresh; an older snapshot is
+checked against local source mtimes before it is reused or rebuilt.
 
 ```bash
 # Force a rebuild from CODEX_HOME or ~/.codex
@@ -78,7 +87,7 @@ tledger week --refresh
 tledger week --no-refresh
 
 # Read an explicit snapshot without automatic freshness checks
-tledger week --input /path/to/token-ledger-snapshot.json
+tledger week --input /path/to/token-ledger-snapshot-v2.json.gz
 ```
 
 `--refresh` rebuilds the default snapshot and cannot be combined with
@@ -86,8 +95,13 @@ tledger week --input /path/to/token-ledger-snapshot.json
 refresh occurs. The collector can also be run directly:
 
 ```bash
-node lib/token-ledger-importer.mjs --output /path/to/token-ledger-snapshot.json
+node lib/token-ledger-importer.mjs --output /path/to/token-ledger-snapshot-v2.json.gz
 ```
+
+Explicit `.json` snapshots remain readable for fixtures and deliberate exports,
+but `.json.gz` is the bounded production cache format. After an upgrade, the
+new cache does not read or delete schema-v1 cache files; remove an old generated
+cache separately once the v2 cache is proven.
 
 ## Report versus CLI
 

@@ -13,6 +13,7 @@ import { homedir, tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { writePrivateSnapshot } from "../lib/token-ledger-snapshot.mjs";
 import {
   aggregateProjects,
   dayBounds,
@@ -45,6 +46,7 @@ import { creditsForUsage } from "../bin/token-ledger-rates.mjs";
 import {
   renderTrendImage,
   textWidth,
+  truncateText,
   writeTrendPng,
 } from "../bin/token-ledger-trend-image.mjs";
 import {
@@ -79,6 +81,48 @@ test(
     assert.match(result.stdout, /--help/);
   },
 );
+
+test("bare CLI shows the concise quick guide", () => {
+  const result = spawnSync(process.execPath, [CLI_ENTRYPOINT], {
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  assert.match(result.stdout, /tledger 1d\s+Last 24 hours/);
+  assert.match(result.stdout, /tledger report 7d\s+Write the 7-day PNG report/);
+  assert.match(result.stdout, /--help-all\s+Show every command and option/);
+  assert.doesNotMatch(result.stdout, /--codex-home|--youplot|npm run/);
+});
+
+test("--help-all shows the complete command reference", () => {
+  const result = spawnSync(process.execPath, [CLI_ENTRYPOINT, "--help-all"], {
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  assert.match(result.stdout, /Token Ledger command reference/);
+  assert.match(result.stdout, /--codex-home <dir>/);
+  assert.match(result.stdout, /--youplot/);
+  assert.match(result.stdout, /--image-width <px>/);
+});
+
+test("CLI errors stay short and point to both help levels", () => {
+  const result = spawnSync(
+    process.execPath,
+    [CLI_ENTRYPOINT, "week", "--not-a-real-option"],
+    { encoding: "utf8" },
+  );
+
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, "");
+  assert.match(result.stderr, /Token Ledger: Unknown option: --not-a-real-option/);
+  assert.match(result.stderr, /tledger --help/);
+  assert.match(result.stderr, /tledger --help-all/);
+  assert.doesNotMatch(result.stderr, /Common options:|Data and refresh:/);
+  assert.equal(result.stderr.trimEnd().split("\n").length, 2);
+});
 
 test("dayBounds uses local calendar midnights for an explicit timezone", () => {
   const bounds = dayBounds("2026-08-01", "Pacific/Honolulu");
@@ -177,6 +221,27 @@ test("aggregateProjects sorts by tokens and retains model mix", () => {
   assert.equal(rows[0].totalTokens, 1_000);
 });
 
+test("aggregateProjects preserves compacted call and thread counts", () => {
+  const rows = aggregateProjects(
+    { events: [], threads: [] },
+    [{
+      project: "alpha",
+      threadIds: ["alpha-1", "alpha-2"],
+      model: "gpt-5.6-luna",
+      totalTokens: 300,
+      outputTokens: 30,
+      toolCalls: 4,
+      callCount: 3,
+      rateCardCredits: 1,
+    }],
+    { rawProjects: true },
+  );
+
+  assert.equal(rows[0].events, 3);
+  assert.equal(rows[0].threads, 2);
+  assert.equal(rows[0].models[0].events, 3);
+});
+
 test("project labels remove terminal control sequences before rendering", () => {
   const project = "\u001b]8;;https://example.test\u0007\u001b[31msecret\u001b[0m\u0000";
   const rows = aggregateProjects(
@@ -204,6 +269,16 @@ test("parseArgs accepts the day subcommand and date option", () => {
   assert.equal(options.rawProjects, true);
 });
 
+test("parseArgs treats an empty command and help aliases as help", () => {
+  assert.equal(parseArgs([]).help, true);
+  assert.equal(parseArgs(["help"]).help, true);
+  assert.equal(parseArgs(["--help"]).help, true);
+
+  const complete = parseArgs(["--help-all"]);
+  assert.equal(complete.help, true);
+  assert.equal(complete.helpAll, true);
+});
+
 test("parseArgs defaults the week end day to today", () => {
   const options = parseArgs(["week", "--top", "5"]);
   assert.equal(options.range, "week");
@@ -217,7 +292,7 @@ test("parseArgs defaults the week end day to today", () => {
   );
   assert.equal(
     options.input,
-    resolve(homedir(), ".token-ledger", "token-ledger-snapshot.json"),
+    resolve(homedir(), ".token-ledger", "token-ledger-snapshot-v2.json.gz"),
   );
   assert.equal(options.input, DEFAULT_SNAPSHOT);
 });
@@ -278,7 +353,10 @@ test("rolling view describes an empty range as the last 24 hours", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-rolling-empty-"));
   const snapshotPath = resolve(root, "snapshot.json");
   try {
-    await writeFile(snapshotPath, JSON.stringify({ events: [], threads: [] }));
+    await writeFile(
+      snapshotPath,
+      JSON.stringify({ schemaVersion: 2, events: [], threads: [] }),
+    );
     const output = await run(parseArgs([
       "1d",
       "--input",
@@ -341,6 +419,7 @@ test("snapshot errors retain safe labels without absolute paths", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-privacy-"));
   const missingPath = resolve(root, "missing-snapshot.json");
   const malformedPath = resolve(root, "malformed-snapshot.json");
+  const malformedGzipPath = resolve(root, "malformed-snapshot.json.gz");
   const unreadablePath = resolve(root, "unreadable-snapshot.json");
   try {
     await assert.rejects(
@@ -372,7 +451,27 @@ test("snapshot errors retain safe labels without absolute paths", async () => {
       (error) => {
         assert.match(
           error.message,
-          /Snapshot is missing its events array: malformed-snapshot\.json/,
+          /Snapshot uses an unsupported schema: malformed-snapshot\.json/,
+        );
+        assert.ok(!error.message.includes(root));
+        return true;
+      },
+    );
+
+    await writeFile(malformedGzipPath, "not a gzip stream");
+    await assert.rejects(
+      () => run(parseArgs([
+        "day",
+        "2026-08-20",
+        "--input",
+        malformedGzipPath,
+        "--no-refresh",
+        "--static",
+      ])),
+      (error) => {
+        assert.match(
+          error.message,
+          /Could not read snapshot malformed-snapshot\.json\.gz/,
         );
         assert.ok(!error.message.includes(root));
         return true;
@@ -399,6 +498,50 @@ test("snapshot errors retain safe labels without absolute paths", async () => {
         return true;
       },
     );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("CLI reads an explicit gzip-compressed snapshot", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-gzip-input-"));
+  const snapshotPath = resolve(root, "snapshot.json.gz");
+  try {
+    await writePrivateSnapshot(snapshotPath, {
+      schemaVersion: 2,
+      generatedAt: "2026-08-20T12:00:00.000Z",
+      events: [{
+        id: "gzip-event",
+        timestamp: "2026-08-20T12:00:00.000Z",
+        project: "Compressed Project",
+        threadId: "gzip-thread",
+        model: "gpt-5.6-luna",
+        totalTokens: 1_200,
+        inputTokens: 1_000,
+        cachedInputTokens: 500,
+        outputTokens: 200,
+      }],
+      threads: [{ id: "gzip-thread", project: "Compressed Project" }],
+      quotaObservations: [],
+    });
+
+    const output = await run(parseArgs([
+      "day",
+      "2026-08-20",
+      "--input",
+      snapshotPath,
+      "--no-refresh",
+      "--static",
+      "--plain",
+      "--ascii",
+      "--raw-projects",
+      "--tz",
+      "UTC",
+    ]));
+
+    assert.match(output, /Compressed Project/);
+    assert.match(output, /1\.20K/);
+    assert.ok(!output.includes(root));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -485,6 +628,7 @@ test("static freshness uses the wall clock after snapshot loading", async () => 
   const afterLoadMs = beforeLoadMs + 1_000;
   try {
     await writeFile(snapshotPath, JSON.stringify({
+      schemaVersion: 2,
       generatedAt: new Date(afterLoadMs).toISOString(),
       events: [{
         project: "alpha",
@@ -694,9 +838,9 @@ test("interactive controls stay aligned with rendered and documented help", asyn
     fileURLToPath(new URL("../README.md", import.meta.url)),
     "utf8",
   );
-  assert.match(readme, /`q`, `Q`, `Esc`, or `Ctrl-C` exits\./);
+  assert.match(readme, /`q`, `Q`, `Esc`, or\s+`Ctrl-C` exits\./);
   assert.match(readme, /Enter does not inspect a project/);
-  assert.match(readme, /`d` \/ `w` \/ `m` do not change the\s+range/);
+  assert.match(readme, /`d` \/ `w` \/ `m` do not\s+change the range/);
 });
 
 test("terminal renderer produces the dashboard layout and scaled bars", () => {
@@ -1194,16 +1338,30 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
     options: { imageWidth: 1_000 },
   });
   assert.match(svg, /<title[^>]*>Token Ledger · 7-day trend<\/title>/);
+  assert.match(svg, /data-report-mode="actual-tokens"/);
   assert.match(svg, /fill="#3b82f6"/);
   assert.match(svg, /fill="#10a394"/);
-  assert.match(svg, /ACTUAL TOKEN VOLUME/);
-  assert.match(svg, /WEEKLY METER REMAINING/);
+  assert.match(svg, /TOKEN VOLUME · ACTUAL/);
+  assert.match(svg, /WEEKLY METER · REMAINING/);
+  assert.match(svg, /data-model="Luna" data-value="1000" data-unit="tokens"/);
+  assert.match(svg, /data-model="Sol" data-value="2000" data-unit="tokens"/);
   assert.match(svg, /stroke="#f6b73c"/);
   assert.match(svg, /Luna/);
   assert.match(svg, /Sol/);
   // The fixture's second window follows a genuine weekly expiry, so the
   // reset break appears.
-  assert.match(svg, /RESET 100%/);
+  assert.match(svg, /RESET · 100%/);
+  const resetX = Number(svg.match(
+    /<line x1="([\d.]+)"[^>]*stroke="rgba\(246,183,60,\.48\)"/,
+  )?.[1]);
+  const meterPaths = [...svg.matchAll(
+    /<path d="([^"]+)"[^>]*data-series="weekly-meter"[^>]*data-cycle="([^"]+)"/g,
+  )].map((match) => ({ path: match[1], cycle: match[2] }));
+  assert.equal(meterPaths.length, 2);
+  const firstPathEndX = Number(meterPaths[0].path.match(/ ([\d.]+) [\d.]+$/)?.[1]);
+  const secondPathStartX = Number(meterPaths[1].path.match(/^M ([\d.]+)/)?.[1]);
+  assert.ok(Math.abs(firstPathEndX - resetX) < 0.02);
+  assert.ok(Math.abs(secondPathStartX - resetX) < 0.02);
   // The all-fast Sol segment gets the darker fast-mode shade, and the fast
   // mode stat card explains it.
   assert.match(svg, /fill="#0a655c"/);
@@ -1230,8 +1388,12 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
     days: 7,
     options: { imageWidth: 1_000, drain: true },
   });
-  assert.match(drainSvg, /OBSERVED LIMIT DRAIN/);
-  assert.match(drainSvg, /Bars = observed meter drops/);
+  assert.match(drainSvg, /Token Ledger · 7-day meter drain/);
+  assert.match(drainSvg, /data-report-mode="meter-drain"/);
+  assert.match(drainSvg, /METER DRAIN · OBSERVED TOTAL, ESTIMATED MODEL SPLIT/);
+  assert.match(drainSvg, /columns = estimated model split/);
+  assert.match(drainSvg, /OBSERVED DRAIN/);
+  assert.match(drainSvg, /data-unit="meter-points"/);
   assert.match(drainSvg, /CACHE RATE BY PERIOD/);
 
   const minimumWidthSvg = renderTrendImage({
@@ -1255,6 +1417,80 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
     modelBarWidths.every((barWidth) => barWidth >= 90),
     `minimum-width model bars were ${modelBarWidths.join(", ")}px`,
   );
+});
+
+test("trend report truncates project names to the measured label column", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+  const longProjectName =
+    "bd8dca09-b808-4a31-acdfbdf79fdc-with-an-even-longer-project-suffix";
+  const clipped = truncateText(longProjectName, 190, 15, 700);
+  assert.notEqual(clipped, longProjectName);
+  assert.match(clipped, /…$/);
+  assert.ok(textWidth(clipped, 15, 700) <= 190);
+
+  const snapshot = {
+    generatedAt: "2026-08-15T12:00:00.000Z",
+    events: [{
+      timestamp: "2026-08-15T12:00:00.000Z",
+      model: "gpt-5.6-luna",
+      totalTokens: 1_000,
+      inputTokens: 800,
+      cachedInputTokens: 600,
+      outputTokens: 200,
+    }],
+    quotaObservations: [],
+  };
+  const svg = renderTrendImage({
+    snapshot,
+    bounds,
+    trend: buildUsageTrend(snapshot, bounds),
+    days: 7,
+    options: { imageWidth: 1_280 },
+    projectRows: [{
+      project: longProjectName,
+      displayProject: longProjectName,
+      totalTokens: 1_000,
+    }],
+  });
+
+  assert.doesNotMatch(svg, new RegExp(`>${longProjectName}<\\/text>`));
+  assert.match(svg, new RegExp(`>${clipped}<\\/text>`));
+});
+
+test("trend report limits reset labels in dense windows", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 30);
+  const cycleStarts = [
+    "2026-07-20T00:00:00.000Z",
+    "2026-07-23T00:00:00.000Z",
+    "2026-07-26T00:00:00.000Z",
+    "2026-07-29T00:00:00.000Z",
+    "2026-08-01T00:00:00.000Z",
+    "2026-08-04T00:00:00.000Z",
+    "2026-08-07T00:00:00.000Z",
+  ];
+  const snapshot = {
+    generatedAt: "2026-08-15T12:00:00.000Z",
+    events: [],
+    quotaObservations: cycleStarts.map((timestamp, index) => ({
+      timestamp,
+      usedPercent: 10 + index,
+      windowMinutes: 10_080,
+      resetsAt: Date.parse(timestamp) / 1_000 + 10_080 * 60,
+    })),
+  };
+  const svg = renderTrendImage({
+    snapshot,
+    bounds,
+    trend: buildUsageTrend(snapshot, bounds),
+    days: 30,
+    options: { imageWidth: 1_280 },
+  });
+  const resetLines = svg.match(
+    /stroke="rgba\(246,183,60,\.48\)"/g,
+  ) ?? [];
+  const resetLabels = svg.match(/>RESTART · 100%<\/text>/g) ?? [];
+  assert.equal(resetLines.length, cycleStarts.length - 1);
+  assert.equal(resetLabels.length, 4);
 });
 
 test("cache report aggregation reuses one local date formatter", () => {
@@ -2074,6 +2310,7 @@ test("report emits progress while generating the PNG", async () => {
     await writeFile(
       snapshotPath,
       `${JSON.stringify({
+        schemaVersion: 2,
         generatedAt: "2026-08-15T12:00:00.000Z",
         events: [
           {
@@ -2133,6 +2370,7 @@ test("cache-rate report uses its separate renderer and progress label", async ()
     await writeFile(
       snapshotPath,
       `${JSON.stringify({
+        schemaVersion: 2,
         generatedAt: "2026-08-15T12:00:00.000Z",
         events: [
           {
@@ -2189,6 +2427,7 @@ test("cache-rate report ignores unused project metadata for an empty range", asy
     await writeFile(
       snapshotPath,
       `${JSON.stringify({
+        schemaVersion: 2,
         generatedAt: "2026-08-15T12:00:00.000Z",
         events: [
           null,
@@ -2238,6 +2477,7 @@ test("standard image views retain the empty-range diagnostic", async () => {
     await writeFile(
       snapshotPath,
       `${JSON.stringify({
+        schemaVersion: 2,
         generatedAt: "2026-08-15T12:00:00.000Z",
         events: [
           null,
@@ -2286,6 +2526,7 @@ test("cache-rate report uses a distinct default filename", async () => {
     await writeFile(
       snapshotPath,
       `${JSON.stringify({
+        schemaVersion: 2,
         generatedAt: "2026-08-15T12:00:00.000Z",
         events: [
           {
@@ -2374,7 +2615,7 @@ test("long trend windows fit terminal and image column widths", () => {
   });
   assert.ok(terminalOutput.split("\n").every((line) => line.length <= 96));
 
-  const imagePlotWidth = 1_280 - 124 - 126;
+  const imagePlotWidth = 1_280 - 96 - 96;
   const image = buildActualTokenBins(snapshot, bounds, days, imagePlotWidth, {
     minBinWidth: 26,
     preferDaily: true,

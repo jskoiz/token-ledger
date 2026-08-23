@@ -213,6 +213,7 @@ async function writeSmokeFixture(path) {
   const now = Date.now();
   const hour = 60 * 60 * 1000;
   const fixture = {
+    schemaVersion: 2,
     generatedAt: new Date(now - 5 * 60 * 1000).toISOString(),
     events: [
       {
@@ -438,16 +439,28 @@ async function main() {
       USERPROFILE: cleanHome,
     };
 
-    const helpOutput = run(installedBinary, ["--help"], {
+    const quickHelpOutput = run(installedBinary, ["--help"], {
       cwd: installDirectory,
       env: cleanEnvironment,
     });
     assert(
-      helpOutput.includes("Rolling 24-hour project breakdown") &&
-        helpOutput.includes("--input") &&
-        helpOutput.includes("--no-refresh") &&
-        helpOutput.includes("--cache-rate"),
-      "Installed tledger --help did not expose the expected release CLI options.",
+      quickHelpOutput.includes("Last 24 hours in the terminal") &&
+        quickHelpOutput.includes("Write the 7-day PNG report") &&
+        quickHelpOutput.includes("--help-all") &&
+        !quickHelpOutput.includes("--codex-home"),
+      "Installed tledger --help did not expose the expected quick guide.",
+    );
+
+    const completeHelpOutput = run(installedBinary, ["--help-all"], {
+      cwd: installDirectory,
+      env: cleanEnvironment,
+    });
+    assert(
+      completeHelpOutput.includes("Rolling 24-hour project breakdown") &&
+        completeHelpOutput.includes("--input") &&
+        completeHelpOutput.includes("--no-refresh") &&
+        completeHelpOutput.includes("--cache-rate"),
+      "Installed tledger --help-all did not expose the complete CLI reference.",
     );
 
     const fixturePath = join(installDirectory, "release-smoke-fixture.json");
@@ -542,7 +555,8 @@ async function main() {
     console.log(`Packed ${packMetadata.id ?? `${packageJson.name}@${packageJson.version}`}.`);
     console.log(`Package contents verified (${packedFiles.length} files).`);
     console.log("Installed tarball in a clean temporary directory.");
-    console.log("tledger --help: passed.");
+    console.log("tledger --help quick guide: passed.");
+    console.log("tledger --help-all command reference: passed.");
     console.log("tledger 1d --static project smoke: passed (Alpha 1.20K, Beta 800, 2.00K total).");
     console.log("tledger report PNG smoke: passed.");
     console.log("tledger report --cache-rate PNG smoke: passed.");
