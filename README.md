@@ -65,14 +65,24 @@ Use `--image-output`, `--image-width`, `--date`, `--tz`, and `--no-open` the
 same way as on the standard report.
 
 The default privacy-reduced snapshot is
-`~/.token-ledger/token-ledger-snapshot.json.gz`. It is gzip-compressed, written
-atomically with mode `0600`, and capped at 16 MiB after compression. If a
-refresh would exceed that limit, Token Ledger preserves the previous cache and
-asks you to reduce the source with `--no-archived` or the collector's `--since`
-option instead of writing an oversized file. On a normal default-path run, a
-snapshot whose mtime is in the past and less than one hour old skips the source
-walk. An exact-hour or future mtime is not fresh; an older snapshot is checked
-against local source mtimes before it is reused or rebuilt.
+`~/.token-ledger/token-ledger-snapshot-v2.json.gz`. It is gzip-compressed,
+written atomically with mode `0600`, targets 12 MiB, and has a hard 16 MiB
+on-disk limit. Its expanded JSON representation also targets 48 MiB and has a
+64 MiB safety limit, so the old 93 MiB raw-cache behavior cannot recur on the
+default production path. The collector de-duplicates through a private temporary SQLite
+spool, then keeps exact recent calls while rolling older history into minute,
+hour, and day buckets. If a dense history approaches the target, it increases
+the bucket resolution automatically while preserving additive token, model,
+project, cache, tool-call, and thread totals. The temporary spool is removed
+when collection completes or exits with a handled error.
+
+If even the coarsest bounded representation exceeds the hard limit, Token
+Ledger preserves the previous cache and asks you to reduce the source with
+`--no-archived` or the collector's `--since` option. It never replaces the
+production cache with an oversized or partial file. On a normal default-path
+run, a snapshot whose mtime is in the past and less than one hour old skips the
+source walk. An exact-hour or future mtime is not fresh; an older snapshot is
+checked against local source mtimes before it is reused or rebuilt.
 
 ```bash
 # Force a rebuild from CODEX_HOME or ~/.codex
@@ -82,7 +92,7 @@ tledger week --refresh
 tledger week --no-refresh
 
 # Read an explicit snapshot without automatic freshness checks
-tledger week --input /path/to/token-ledger-snapshot.json.gz
+tledger week --input /path/to/token-ledger-snapshot-v2.json.gz
 ```
 
 `--refresh` rebuilds the default snapshot and cannot be combined with
@@ -90,13 +100,13 @@ tledger week --input /path/to/token-ledger-snapshot.json.gz
 refresh occurs. The collector can also be run directly:
 
 ```bash
-node lib/token-ledger-importer.mjs --output /path/to/token-ledger-snapshot.json.gz
+node lib/token-ledger-importer.mjs --output /path/to/token-ledger-snapshot-v2.json.gz
 ```
 
 Explicit `.json` snapshots remain readable for fixtures and deliberate exports,
 but `.json.gz` is the bounded production cache format. After an upgrade, the
-new cache does not read or delete the legacy `token-ledger-snapshot.json` file;
-remove that old generated cache separately once the compressed cache is proven.
+new cache does not read or delete schema-v1 cache files; remove an old generated
+cache separately once the v2 cache is proven.
 
 ## Report versus CLI
 

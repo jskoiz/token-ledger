@@ -179,6 +179,27 @@ test("aggregateProjects sorts by tokens and retains model mix", () => {
   assert.equal(rows[0].totalTokens, 1_000);
 });
 
+test("aggregateProjects preserves compacted call and thread counts", () => {
+  const rows = aggregateProjects(
+    { events: [], threads: [] },
+    [{
+      project: "alpha",
+      threadIds: ["alpha-1", "alpha-2"],
+      model: "gpt-5.6-luna",
+      totalTokens: 300,
+      outputTokens: 30,
+      toolCalls: 4,
+      callCount: 3,
+      rateCardCredits: 1,
+    }],
+    { rawProjects: true },
+  );
+
+  assert.equal(rows[0].events, 3);
+  assert.equal(rows[0].threads, 2);
+  assert.equal(rows[0].models[0].events, 3);
+});
+
 test("project labels remove terminal control sequences before rendering", () => {
   const project = "\u001b]8;;https://example.test\u0007\u001b[31msecret\u001b[0m\u0000";
   const rows = aggregateProjects(
@@ -219,7 +240,7 @@ test("parseArgs defaults the week end day to today", () => {
   );
   assert.equal(
     options.input,
-    resolve(homedir(), ".token-ledger", "token-ledger-snapshot.json.gz"),
+    resolve(homedir(), ".token-ledger", "token-ledger-snapshot-v2.json.gz"),
   );
   assert.equal(options.input, DEFAULT_SNAPSHOT);
 });
@@ -280,7 +301,10 @@ test("rolling view describes an empty range as the last 24 hours", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-rolling-empty-"));
   const snapshotPath = resolve(root, "snapshot.json");
   try {
-    await writeFile(snapshotPath, JSON.stringify({ events: [], threads: [] }));
+    await writeFile(
+      snapshotPath,
+      JSON.stringify({ schemaVersion: 2, events: [], threads: [] }),
+    );
     const output = await run(parseArgs([
       "1d",
       "--input",
@@ -375,7 +399,7 @@ test("snapshot errors retain safe labels without absolute paths", async () => {
       (error) => {
         assert.match(
           error.message,
-          /Snapshot is missing its events array: malformed-snapshot\.json/,
+          /Snapshot uses an unsupported schema: malformed-snapshot\.json/,
         );
         assert.ok(!error.message.includes(root));
         return true;
@@ -432,6 +456,7 @@ test("CLI reads an explicit gzip-compressed snapshot", async () => {
   const snapshotPath = resolve(root, "snapshot.json.gz");
   try {
     await writePrivateSnapshot(snapshotPath, {
+      schemaVersion: 2,
       generatedAt: "2026-08-20T12:00:00.000Z",
       events: [{
         id: "gzip-event",
@@ -551,6 +576,7 @@ test("static freshness uses the wall clock after snapshot loading", async () => 
   const afterLoadMs = beforeLoadMs + 1_000;
   try {
     await writeFile(snapshotPath, JSON.stringify({
+      schemaVersion: 2,
       generatedAt: new Date(afterLoadMs).toISOString(),
       events: [{
         project: "alpha",
@@ -2232,6 +2258,7 @@ test("report emits progress while generating the PNG", async () => {
     await writeFile(
       snapshotPath,
       `${JSON.stringify({
+        schemaVersion: 2,
         generatedAt: "2026-08-15T12:00:00.000Z",
         events: [
           {
@@ -2291,6 +2318,7 @@ test("cache-rate report uses its separate renderer and progress label", async ()
     await writeFile(
       snapshotPath,
       `${JSON.stringify({
+        schemaVersion: 2,
         generatedAt: "2026-08-15T12:00:00.000Z",
         events: [
           {
@@ -2347,6 +2375,7 @@ test("cache-rate report ignores unused project metadata for an empty range", asy
     await writeFile(
       snapshotPath,
       `${JSON.stringify({
+        schemaVersion: 2,
         generatedAt: "2026-08-15T12:00:00.000Z",
         events: [
           null,
@@ -2396,6 +2425,7 @@ test("standard image views retain the empty-range diagnostic", async () => {
     await writeFile(
       snapshotPath,
       `${JSON.stringify({
+        schemaVersion: 2,
         generatedAt: "2026-08-15T12:00:00.000Z",
         events: [
           null,
@@ -2444,6 +2474,7 @@ test("cache-rate report uses a distinct default filename", async () => {
     await writeFile(
       snapshotPath,
       `${JSON.stringify({
+        schemaVersion: 2,
         generatedAt: "2026-08-15T12:00:00.000Z",
         events: [
           {

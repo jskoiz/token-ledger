@@ -12,6 +12,12 @@ import {
   TREND_IMAGE_MODEL_COLORS,
 } from "./token-ledger-trend-image.mjs";
 import { chooseBinSize } from "./token-ledger-trend-terminal.mjs";
+import {
+  usageBuckets,
+  usageCallCount,
+  usageDetailedCallCount,
+  usageInputCallCount,
+} from "../lib/token-ledger-usage.mjs";
 
 const COLORS = {
   background: "#0e1420",
@@ -307,7 +313,7 @@ function emptyAggregate() {
   };
 }
 
-function addInput(target, breakdown) {
+function addInput(target, breakdown, inputCallCount) {
   const factor = scaleToFiniteSum([
     target.inputTokens,
     breakdown.inputTokens,
@@ -326,7 +332,7 @@ function addInput(target, breakdown) {
     0,
     target.inputTokens - target.cachedInputTokens,
   );
-  target.inputEventCount += 1;
+  target.inputEventCount += inputCallCount;
 }
 
 function finalizeAggregate(aggregate) {
@@ -358,7 +364,7 @@ function accumulateRange(snapshot, bounds, bins = null, dateIndexByString = null
     ? null
     : localDateFormatter(bounds.timeZone);
 
-  const events = Array.isArray(snapshot?.events) ? snapshot.events : [];
+  const events = usageBuckets(snapshot);
   for (const event of events) {
     const parsed = parseCacheEvent(event);
     if (
@@ -409,24 +415,27 @@ function accumulateRange(snapshot, bounds, bins = null, dateIndexByString = null
     }
     breakdown = scaleBreakdown(breakdown, tokenScale.value);
 
-    totals.eventCount += 1;
+    const callCount = usageCallCount(event);
+    const detailedCallCount = usageDetailedCallCount(event);
+    const inputCallCount = usageInputCallCount(event);
+    totals.eventCount += callCount;
     totals.totalTokens += breakdown.totalTokens;
     if (bin) {
-      bin.eventCount += 1;
+      bin.eventCount += callCount;
       bin.totalTokens += breakdown.totalTokens;
     }
     if (!breakdown.detailed) continue;
 
-    totals.detailedEventCount += 1;
+    totals.detailedEventCount += detailedCallCount;
     totals.detailedTokens += breakdown.totalTokens;
     if (bin) {
-      bin.detailedEventCount += 1;
+      bin.detailedEventCount += detailedCallCount;
       bin.detailedTokens += breakdown.totalTokens;
     }
     if (!(breakdown.inputTokens > 0)) continue;
 
-    addInput(totals, breakdown);
-    if (bin) addInput(bin, breakdown);
+    addInput(totals, breakdown, inputCallCount);
+    if (bin) addInput(bin, breakdown, inputCallCount);
     const model = parsed.model;
     const modelAggregate = modelTotals.get(model) ?? {
       model,
@@ -435,7 +444,7 @@ function accumulateRange(snapshot, bounds, bins = null, dateIndexByString = null
       uncachedInputTokens: 0,
       inputEventCount: 0,
     };
-    addInput(modelAggregate, breakdown);
+    addInput(modelAggregate, breakdown, inputCallCount);
     modelTotals.set(model, modelAggregate);
   }
 

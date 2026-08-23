@@ -26,11 +26,17 @@ import {
   readPrivateSnapshot,
   writePrivateSnapshot,
 } from "../lib/token-ledger-snapshot.mjs";
+import {
+  SNAPSHOT_SCHEMA_VERSION,
+  usageBuckets,
+  usageCallCount,
+  usageThreadIds,
+} from "../lib/token-ledger-usage.mjs";
 
 export const DEFAULT_SNAPSHOT = resolve(
   homedir(),
   ".token-ledger",
-  "token-ledger-snapshot.json.gz",
+  "token-ledger-snapshot-v2.json.gz",
 );
 const DEFAULT_TOP = 10;
 const DEFAULT_TIME_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -65,7 +71,7 @@ Usage:
 Options:
   --date <day>         Date as YYYY-MM-DD, today, or yesterday
   --period <window>    Trend window, for example 7d, 14d, or 2w
-  --input <file>       Snapshot to read (default: ~/.token-ledger/token-ledger-snapshot.json.gz)
+  --input <file>       Snapshot to read (default: ~/.token-ledger/token-ledger-snapshot-v2.json.gz)
   --refresh            Rebuild the default snapshot from CODEX_HOME or ~/.codex
   --no-refresh         Use the cached snapshot without checking local JSONL files
   --codex-home <dir>   Codex data root used when refreshing
@@ -579,7 +585,9 @@ export function oneOffProjects(snapshot) {
     ids.add(threadId);
     threadIdsByProject.set(normalizedProject, ids);
   };
-  for (const event of snapshot.events ?? []) add(event.project, event.threadId);
+  for (const bucket of usageBuckets(snapshot)) {
+    for (const threadId of usageThreadIds(bucket)) add(bucket.project, threadId);
+  }
   for (const thread of snapshot.threads ?? []) add(thread.project, thread.id);
   return new Set(
     [...threadIdsByProject.entries()]
@@ -602,7 +610,7 @@ function modelLabel(value) {
 export function filterDayEvents(snapshot, bounds) {
   const start = bounds.start.getTime();
   const end = bounds.end.getTime();
-  return (snapshot.events ?? []).filter((event) => {
+  return usageBuckets(snapshot).filter((event) => {
     try {
       const timestamp = new Date(event?.timestamp).getTime();
       return Number.isFinite(timestamp) && timestamp >= start && timestamp < end;
@@ -640,8 +648,8 @@ export function aggregateProjects(snapshot, events, options = {}) {
     row.outputTokens += Number(event.outputTokens) || 0;
     row.reasoningTokens += Number(event.reasoningTokens) || 0;
     row.toolCalls += Number(event.toolCalls) || 0;
-    row.events += 1;
-    if (event.threadId) row.threadIds.add(event.threadId);
+    row.events += usageCallCount(event);
+    for (const threadId of usageThreadIds(event)) row.threadIds.add(threadId);
     if (event.rateCardCredits !== null && Number.isFinite(Number(event.rateCardCredits))) {
       row.rateCardCredits += Number(event.rateCardCredits);
       row.knownCreditTokens += Number(event.totalTokens) || 0;
@@ -655,7 +663,7 @@ export function aggregateProjects(snapshot, events, options = {}) {
       rateCardCredits: 0,
     };
     modelRow.totalTokens += Number(event.totalTokens) || 0;
-    modelRow.events += 1;
+    modelRow.events += usageCallCount(event);
     if (event.rateCardCredits !== null && Number.isFinite(Number(event.rateCardCredits))) {
       modelRow.rateCardCredits += Number(event.rateCardCredits);
     }
@@ -685,7 +693,10 @@ function totalSummary(events) {
       summary.totalTokens += Number(event.totalTokens) || 0;
       summary.outputTokens += Number(event.outputTokens) || 0;
       summary.toolCalls += Number(event.toolCalls) || 0;
-      if (event.threadId) summary.threadIds.add(event.threadId);
+      summary.calls += usageCallCount(event);
+      for (const threadId of usageThreadIds(event)) {
+        summary.threadIds.add(threadId);
+      }
       if (event.rateCardCredits !== null && Number.isFinite(Number(event.rateCardCredits))) {
         summary.rateCardCredits += Number(event.rateCardCredits);
         summary.knownCreditTokens += Number(event.totalTokens) || 0;
@@ -696,6 +707,7 @@ function totalSummary(events) {
       totalTokens: 0,
       outputTokens: 0,
       toolCalls: 0,
+      calls: 0,
       rateCardCredits: 0,
       knownCreditTokens: 0,
       threadIds: new Set(),
@@ -835,8 +847,14 @@ async function readSnapshot(snapshotPath) {
       `Could not read snapshot ${snapshotLabel}: ${safeErrorMessage(error, [snapshotPath])}`,
     );
   }
-  if (!parsed || !Array.isArray(parsed.events)) {
-    throw new Error(`Snapshot is missing its events array: ${snapshotLabel}`);
+  if (
+    !parsed ||
+    parsed.schemaVersion !== SNAPSHOT_SCHEMA_VERSION ||
+    !Array.isArray(parsed.events)
+  ) {
+    throw new Error(
+      `Snapshot uses an unsupported schema: ${snapshotLabel}. Rebuild it with --refresh.`,
+    );
   }
   return parsed;
 }
@@ -867,12 +885,24 @@ async function refreshSnapshot(options) {
     );
     process.stderr.write("\n");
     const writeResult = await writePrivateSnapshot(options.input, snapshot);
+    const storedSnapshot = writeResult.snapshot;
     process.stderr.write(
-      `Token Ledger: cached ${(writeResult.bytesWritten / 1_000_000).toFixed(1)} MB ${writeResult.encoding} snapshot (${(writeResult.jsonBytes / 1_000_000).toFixed(1)} MB JSON before encoding; ${(writeResult.maxBytes / 1_000_000).toFixed(1)} MB limit).\n`,
+      `Token Ledger: cached ${(writeResult.bytesWritten / 1_000_000).toFixed(1)} MB ${writeResult.encoding} snapshot (${(writeResult.jsonBytes / 1_000_000).toFixed(1)} MB JSON before encoding; ${storedSnapshot.events.length.toLocaleString()} buckets for ${storedSnapshot.coverage.observedModelCalls.toLocaleString()} calls; ${(writeResult.maxBytes / 1_000_000).toFixed(1)} MB limit).\n`,
     );
-    return snapshot;
+    if (writeResult.bytesWritten / writeResult.maxBytes >= 0.7) {
+      process.stderr.write(
+        "Token Ledger: snapshot is above 70% of its safety limit; older buckets will compact automatically as it grows.\n",
+      );
+    }
+    return storedSnapshot;
   } catch (error) {
     if (progressStarted) process.stderr.write("\n");
+    if (error?.code === "ERR_SNAPSHOT_SIZE_LIMIT" && existsSync(options.input)) {
+      process.stderr.write(
+        "Token Ledger: refresh exceeded the safety limit; continuing with the previous cache, which may be stale.\n",
+      );
+      return readSnapshot(options.input);
+    }
     throw new Error(
       `Could not refresh local snapshot: ${safeErrorMessage(error, [options.input, options.codexHome])}`,
     );
@@ -1039,7 +1069,7 @@ function render(options, snapshot, bounds, events, rows, allRows, freshness) {
 
   const header = [
     `Token Ledger · ${dateLabel} · ${bounds.timeZone}`,
-    `${compact(totalTokens)} tokens · ${summary.threadIds.size.toLocaleString()} threads · ${events.length.toLocaleString()} calls · ${compact(summary.outputTokens)} output`,
+    `${compact(totalTokens)} tokens · ${summary.threadIds.size.toLocaleString()} threads · ${summary.calls.toLocaleString()} calls · ${compact(summary.outputTokens)} output`,
     `Source: ${sourceLabel(options.input, snapshot)}`,
     "",
     chart,

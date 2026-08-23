@@ -5,8 +5,9 @@ import { resolve } from "node:path";
 import { readPrivateSnapshot } from "../lib/token-ledger-snapshot.mjs";
 import { buildUsageTrend, multiDayBounds } from "../bin/token-ledger-trend.mjs";
 import { buildActualTokenBins } from "../bin/token-ledger-trend-terminal.mjs";
+import { usageBuckets } from "../lib/token-ledger-usage.mjs";
 
-const input = process.argv[2] || "/Users/jk/.token-ledger/token-ledger-snapshot.json.gz";
+const input = process.argv[2] || "/Users/jk/.token-ledger/token-ledger-snapshot-v2.json.gz";
 const output = process.argv[3] || resolve("artifacts", "token-ledger-trend-youplot-7d.svg");
 const rawOutput = output.replace(/\.svg$/i, ".txt");
 const width = Number(process.argv[4]) || 82;
@@ -28,7 +29,7 @@ function localDateString(timestampMs) {
   return `${values.year}-${values.month}-${values.day}`;
 }
 
-const latestTimestamp = (snapshot.events ?? [])
+const latestTimestamp = usageBuckets(snapshot)
   .map((event) => new Date(event.timestamp).getTime())
   .filter(Number.isFinite)
   .reduce((latest, timestampMs) => Math.max(latest, timestampMs), 0);

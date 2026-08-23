@@ -10,6 +10,7 @@ import {
 import { FAST_MODE_MULTIPLIER } from "./token-ledger-rates.mjs";
 import { buildActualTokenBins } from "./token-ledger-trend-terminal.mjs";
 import { buildCacheReportData } from "./token-ledger-cache-image.mjs";
+import { usageBuckets } from "../lib/token-ledger-usage.mjs";
 
 const MODEL_ORDER = [
   "Luna",
@@ -358,7 +359,7 @@ function fallbackProjectRows(snapshot, bounds) {
   const startMs = bounds.start.getTime();
   const endMs = bounds.end.getTime();
   const totals = new Map();
-  for (const event of snapshot.events ?? []) {
+  for (const event of usageBuckets(snapshot)) {
     const timestampMs = new Date(event.timestamp).getTime();
     if (!Number.isFinite(timestampMs) || timestampMs < startMs || timestampMs >= endMs) {
       continue;

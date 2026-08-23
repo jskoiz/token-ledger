@@ -1,4 +1,8 @@
 import { buildBurnDayBins, buildUsageTrend, trendModelLabel } from "./token-ledger-trend.mjs";
+import {
+  usageBuckets,
+  usageCallCount,
+} from "../lib/token-ledger-usage.mjs";
 
 const RESET = "\u001b[0m";
 const PRIMARY_STYLE = [38, 2, 255, 255, 255];
@@ -231,7 +235,7 @@ export function buildActualTokenBins(
     ]),
   );
 
-  for (const event of snapshot.events ?? []) {
+  for (const event of usageBuckets(snapshot)) {
     const timestamp = new Date(event.timestamp).getTime();
     if (!Number.isFinite(timestamp)) continue;
     const dateString = localDateString(timestamp, bounds.timeZone);
@@ -241,7 +245,7 @@ export function buildActualTokenBins(
     const tokens = Math.max(0, Number(event.totalTokens) || 0);
     const model = trendModelLabel(event.model);
     bin.totalTokens += tokens;
-    bin.calls += 1;
+    bin.calls += usageCallCount(event);
     bin.values.set(model, (bin.values.get(model) ?? 0) + tokens);
     if (event.serviceTier === "priority") {
       bin.fastValues.set(model, (bin.fastValues.get(model) ?? 0) + tokens);

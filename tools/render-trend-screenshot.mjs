@@ -8,7 +8,7 @@ import {
 } from "../bin/token-ledger-trend.mjs";
 import { renderTrendCombo } from "../bin/token-ledger-trend-terminal.mjs";
 
-const input = process.argv[2] || "/Users/jk/.token-ledger/token-ledger-snapshot.json.gz";
+const input = process.argv[2] || "/Users/jk/.token-ledger/token-ledger-snapshot-v2.json.gz";
 const output = process.argv[3] || resolve("artifacts", "token-ledger-trend-7d.svg");
 const width = Number(process.argv[4]) || 100;
 const snapshot = await readPrivateSnapshot(input);

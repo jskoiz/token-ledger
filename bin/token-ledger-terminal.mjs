@@ -7,6 +7,11 @@ import {
   INTERACTIVE_FOOTER,
   INTERACTIVE_HELP,
 } from "./token-ledger-controls.mjs";
+import {
+  usageBuckets,
+  usageCallCount,
+  usageThreadIds,
+} from "../lib/token-ledger-usage.mjs";
 
 const RESET = "\u001b[0m";
 const PRIMARY_STYLE = [38, 2, 255, 255, 255];
@@ -266,7 +271,7 @@ export function quotaCycleSummary(snapshot = {}, displayedEvents = []) {
       },
       { tokens: 0, credits: 0, ratedTokens: 0 },
     );
-  const cycle = sumUsage((snapshot.events ?? []).filter(inObservedCycle));
+  const cycle = sumUsage(usageBuckets(snapshot).filter(inObservedCycle));
   const displayed = sumUsage(displayedEvents.filter(inObservedCycle));
   const usedPercent = Math.min(100, Math.max(0, Number(observation.usedPercent) || 0));
   // The weekly meter weights usage by model, token type, and fast mode;
@@ -301,8 +306,13 @@ function summary(events) {
     (sum, event) => sum + (Number(event.totalTokens) || 0),
     0,
   );
-  const calls = events.length;
-  const threadIds = new Set(events.map((event) => event.threadId).filter(Boolean));
+  const calls = events.reduce(
+    (sum, event) => sum + usageCallCount(event),
+    0,
+  );
+  const threadIds = new Set(
+    events.flatMap((event) => usageThreadIds(event)),
+  );
   const outputTokens = events.reduce(
     (sum, event) => sum + (Number(event.outputTokens) || 0),
     0,
