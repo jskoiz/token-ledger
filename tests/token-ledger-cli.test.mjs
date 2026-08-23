@@ -1345,6 +1345,58 @@ test("cache report contains non-finite snapshot token values", () => {
   assert.doesNotMatch(svg, /NaN|Infinity|undefined/);
 });
 
+test("cache report contains hostile object-shaped snapshot fields", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+  const hostileValue = () => ({ toString: null, valueOf: null });
+  const snapshot = {
+    generatedAt: hostileValue(),
+    events: [
+      {
+        timestamp: hostileValue(),
+        model: "gpt-5.6-sol",
+        totalTokens: 1_000,
+        inputTokens: 900,
+        cachedInputTokens: 450,
+        outputTokens: 100,
+      },
+      {
+        timestamp: "2026-08-15T12:00:00.000Z",
+        model: hostileValue(),
+        totalTokens: 1_000,
+        inputTokens: 900,
+        cachedInputTokens: 450,
+        outputTokens: 100,
+      },
+      {
+        timestamp: "2026-08-15T13:00:00.000Z",
+        model: "gpt-5.6-luna",
+        totalTokens: hostileValue(),
+        inputTokens: hostileValue(),
+        cachedInputTokens: hostileValue(),
+        outputTokens: hostileValue(),
+        breakdownAvailable: true,
+      },
+    ],
+  };
+
+  let data;
+  let svg;
+  assert.doesNotThrow(() => {
+    data = buildCacheReportData(snapshot, bounds, 7, 1_100);
+    svg = renderCacheReportImage({ snapshot, bounds, days: 7 });
+  });
+  assert.equal(data.eventCount, 2);
+  assert.equal(data.totalTokens, 1_000);
+  assert.equal(data.inputTokens, 900);
+  assert.deepEqual(
+    data.models.map((model) => [model.model, model.inputTokens]),
+    [["Unknown", 900]],
+  );
+  assert.match(svg, />unknown<\/text>/);
+  assert.match(svg, /Unknown/);
+  assert.doesNotMatch(svg, /NaN|Infinity|undefined/);
+});
+
 test("cache report coalesces overflow models and renders zero-measurement state", () => {
   const bounds = multiDayBounds("2026-08-15", "UTC", 7);
   const modelNames = [

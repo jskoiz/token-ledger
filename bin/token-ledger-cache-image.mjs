@@ -89,9 +89,20 @@ function binDateLabel(bin) {
   return `${shortDateLabel(bin.startDateString)}–${shortDateLabel(finalDate)}`;
 }
 
+function primitiveString(value) {
+  return typeof value === "string" ? value : null;
+}
+
+function finiteTimestamp(value) {
+  const text = primitiveString(value);
+  if (text === null) return null;
+  const timestampMs = Date.parse(text);
+  return Number.isFinite(timestampMs) ? timestampMs : null;
+}
+
 function generatedAtLabel(value, timeZone) {
-  const timestampMs = new Date(value).getTime();
-  if (!Number.isFinite(timestampMs)) return "unknown";
+  const timestampMs = finiteTimestamp(value);
+  if (timestampMs === null) return "unknown";
   return new Intl.DateTimeFormat("en-US", {
     timeZone,
     month: "short",
@@ -103,8 +114,14 @@ function generatedAtLabel(value, timeZone) {
 }
 
 function nonNegativeFiniteNumber(value) {
+  if (typeof value !== "number" && typeof value !== "string") return 0;
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? number : 0;
+}
+
+function safeModelLabel(value) {
+  const model = primitiveString(value);
+  return model === null ? "Unknown" : trendModelLabel(model);
 }
 
 function cacheBreakdown(event) {
@@ -170,9 +187,11 @@ function accumulateRange(snapshot, bounds, bins = null, dateIndexByString = null
   const totals = emptyAggregate();
   const modelTotals = new Map();
 
-  for (const event of snapshot.events ?? []) {
-    const timestampMs = new Date(event.timestamp).getTime();
-    if (!Number.isFinite(timestampMs) || timestampMs < startMs || timestampMs >= endMs) {
+  const events = Array.isArray(snapshot?.events) ? snapshot.events : [];
+  for (const event of events) {
+    if (event === null || typeof event !== "object") continue;
+    const timestampMs = finiteTimestamp(event.timestamp);
+    if (timestampMs === null || timestampMs < startMs || timestampMs >= endMs) {
       continue;
     }
     const breakdown = cacheBreakdown(event);
@@ -200,7 +219,7 @@ function accumulateRange(snapshot, bounds, bins = null, dateIndexByString = null
 
     addInput(totals, breakdown);
     if (bin) addInput(bin, breakdown);
-    const model = trendModelLabel(event.model);
+    const model = safeModelLabel(event.model);
     const modelAggregate = modelTotals.get(model) ?? {
       model,
       inputTokens: 0,
