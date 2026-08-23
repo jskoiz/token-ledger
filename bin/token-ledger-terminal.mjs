@@ -8,7 +8,7 @@ import {
   INTERACTIVE_HELP,
 } from "./token-ledger-controls.mjs";
 import {
-  usageBuckets,
+  usageBucketsInRange,
   usageCallCount,
   usageThreadIds,
 } from "../lib/token-ledger-usage.mjs";
@@ -249,14 +249,6 @@ export function quotaCycleSummary(snapshot = {}, displayedEvents = []) {
     };
   }
 
-  const inObservedCycle = (event) => {
-    const eventMs = new Date(event.timestamp).getTime();
-    return (
-      Number.isFinite(eventMs) &&
-      eventMs >= windowStartMs &&
-      eventMs <= observedThroughMs
-    );
-  };
   const sumUsage = (events) =>
     events.reduce(
       (acc, event) => {
@@ -271,8 +263,17 @@ export function quotaCycleSummary(snapshot = {}, displayedEvents = []) {
       },
       { tokens: 0, credits: 0, ratedTokens: 0 },
     );
-  const cycle = sumUsage(usageBuckets(snapshot).filter(inObservedCycle));
-  const displayed = sumUsage(displayedEvents.filter(inObservedCycle));
+  const cycleEndMs = observedThroughMs + 1;
+  const cycle = sumUsage(
+    usageBucketsInRange(snapshot, windowStartMs, cycleEndMs),
+  );
+  const displayed = sumUsage(
+    usageBucketsInRange(
+      { events: displayedEvents },
+      windowStartMs,
+      cycleEndMs,
+    ),
+  );
   const usedPercent = Math.min(100, Math.max(0, Number(observation.usedPercent) || 0));
   // The weekly meter weights usage by model, token type, and fast mode;
   // rate-card credits carry those weights. Allocate burn by credit share
@@ -653,6 +654,14 @@ export function renderTerminal({
   if (!sideBySide) {
     lines.push("");
     lines.push(...sidebarLines(stats, frameWidth, enabled, options, quota));
+  }
+  if (events.some((event) => event.rangeAllocationEstimated === true)) {
+    lines.push("");
+    lines.push(colorize(
+      "≈ Boundary-spanning compact history is allocated proportionally.",
+      SECONDARY_STYLE,
+      enabled,
+    ));
   }
   lines.push("");
   lines.push(

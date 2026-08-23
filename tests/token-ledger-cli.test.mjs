@@ -173,6 +173,45 @@ test("filterDayEvents keeps the start and excludes the end boundary", () => {
   assert.deepEqual(events.map((event) => event.id), ["start", "inside"]);
 });
 
+test("filterDayEvents allocates a compacted bucket across local-day boundaries", () => {
+  const snapshot = {
+    events: [{
+      timestamp: "2025-06-01T12:00:00.000Z",
+      startAt: "2025-06-01T06:00:00.000Z",
+      endAt: "2025-06-01T18:00:00.000Z",
+      resolutionSeconds: 86_400,
+      project: "boundary-history",
+      model: "gpt-5.6-luna",
+      totalTokens: 150,
+      callCount: 2,
+      breakdownAvailable: false,
+    }],
+  };
+  const previous = filterDayEvents(
+    snapshot,
+    dayBounds("2025-05-31", "America/Los_Angeles"),
+  );
+  const current = filterDayEvents(
+    snapshot,
+    dayBounds("2025-06-01", "America/Los_Angeles"),
+  );
+  const previousTokens = previous.reduce(
+    (sum, event) => sum + event.totalTokens,
+    0,
+  );
+  const currentTokens = current.reduce(
+    (sum, event) => sum + event.totalTokens,
+    0,
+  );
+
+  assert.ok(previousTokens > 0 && previousTokens < 150);
+  assert.ok(currentTokens > 0 && currentTokens < 150);
+  assert.ok(Math.abs(previousTokens + currentTokens - 150) < 1e-9);
+  assert.ok([...previous, ...current].every(
+    (event) => event.rangeAllocationEstimated === true,
+  ));
+});
+
 test("aggregateProjects sorts by tokens and retains model mix", () => {
   const snapshot = {
     events: [],

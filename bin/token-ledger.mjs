@@ -29,6 +29,7 @@ import {
 import {
   SNAPSHOT_SCHEMA_VERSION,
   usageBuckets,
+  usageBucketsInRange,
   usageCallCount,
   usageThreadIds,
 } from "../lib/token-ledger-usage.mjs";
@@ -638,14 +639,7 @@ function modelLabel(value) {
 export function filterDayEvents(snapshot, bounds) {
   const start = bounds.start.getTime();
   const end = bounds.end.getTime();
-  return usageBuckets(snapshot).filter((event) => {
-    try {
-      const timestamp = new Date(event?.timestamp).getTime();
-      return Number.isFinite(timestamp) && timestamp >= start && timestamp < end;
-    } catch {
-      return false;
-    }
-  });
+  return usageBucketsInRange(snapshot, start, end);
 }
 
 export function aggregateProjects(snapshot, events, options = {}) {

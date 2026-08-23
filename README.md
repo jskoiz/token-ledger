@@ -64,12 +64,17 @@ The default privacy-reduced snapshot is
 written atomically with mode `0600`, targets 12 MiB, and has a hard 16 MiB
 on-disk limit. Its expanded JSON representation also targets 48 MiB and has a
 64 MiB safety limit, so the old 93 MiB raw-cache behavior cannot recur on the
-default production path. The collector de-duplicates through a private temporary SQLite
-spool, then keeps exact recent calls while rolling older history into minute,
-hour, and day buckets. If a dense history approaches the target, it increases
-the bucket resolution automatically while preserving additive token, model,
-project, cache, tool-call, and thread totals. The temporary spool is removed
-when collection completes or exits with a handled error.
+default production path. Reads check the compressed size before loading and
+bound gzip expansion to the same 64 MiB JSON limit. The collector de-duplicates
+through a private temporary SQLite spool, then keeps exact recent calls while
+rolling older history into minute, hour, and day buckets. If a dense history
+approaches the target, it increases the bucket resolution automatically while
+preserving additive token, model, project, cache, tool-call, and thread totals.
+When a compacted bucket crosses a requested range or chart boundary, Token
+Ledger allocates its additive values proportionally across the overlap and
+marks the terminal result as estimated; exact recent calls remain exact. The
+temporary spool is removed when collection completes or exits with a handled
+error.
 
 If even the coarsest bounded representation exceeds the hard limit, Token
 Ledger preserves the previous cache and asks you to reduce the source with
