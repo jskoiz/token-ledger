@@ -353,7 +353,7 @@ function isBroadKeyofOperand(
 		return unwrapped.members.some((member) => member.type === "TSIndexSignature");
 	}
 	if (unwrapped.type === "TSMappedType") {
-		return isBroadMappedKey(unwrapped.constraint, environment, substitutions);
+		return isBroadMappedType(unwrapped, environment, substitutions);
 	}
 	if (unwrapped.type === "TSUnionType") {
 		return unwrapped.types.every((member) =>
@@ -626,9 +626,10 @@ function finitePropertyKeysForType(
 		return names;
 	}
 	if (unwrapped.type === "TSMappedType") {
-		return unwrapped.constraint === null || unwrapped.constraint === undefined
-			? null
-			: finiteKeyNames(unwrapped.constraint, environment, substitutions, resolvingAliases);
+		const key = unwrapped.nameType ?? unwrapped.constraint;
+		if (key === null || key === undefined) return null;
+		const mappedSubstitutions = mappedTypeSubstitutions(unwrapped, substitutions);
+		return finiteKeyNames(key, environment, mappedSubstitutions, resolvingAliases);
 	}
 	if (unwrapped.type !== "TSTypeReference") return null;
 	const name = typeReferenceName(unwrapped);
@@ -753,7 +754,7 @@ function dictionaryValueTypes(
 		return unwrapped.typeAnnotation === null ||
 			unwrapped.constraint === null ||
 			unwrapped.constraint === undefined ||
-			!isBroadMappedKey(unwrapped.constraint, environment, substitutions)
+			!isBroadMappedType(unwrapped, environment, substitutions)
 			? []
 			: [{ type: unwrapped.typeAnnotation, substitutions }];
 	}
@@ -875,7 +876,7 @@ export function classifyWideningTarget(
 	if (unwrapped.type === "TSMappedType") {
 		return unwrapped.constraint !== null &&
 			unwrapped.constraint !== undefined &&
-			isBroadMappedKey(unwrapped.constraint, environment, new Map())
+			isBroadMappedType(unwrapped, environment, new Map())
 			? { kind: "open dictionary" }
 			: null;
 	}
@@ -941,6 +942,63 @@ function isBroadMappedKey(
 	substitutions                      ,
 )          {
 	const domains = keyDomainsForKey(type, environment, substitutions);
+	return domains !== null && domains.size > 0;
+}
+
+function mappedTypeSubstitutions(mapped, substitutions) {
+	if (mapped.nameType === null || mapped.nameType === undefined) return substitutions;
+	const nextSubstitutions = new Map(substitutions);
+	nextSubstitutions.set(mapped.key.name, mapped.constraint);
+	return nextSubstitutions;
+}
+
+function mappedTypeKeyDomains(
+	mapped,
+	environment,
+	substitutions,
+	resolvingAliases = new Set(),
+) {
+	if (mapped.constraint === null || mapped.constraint === undefined) return null;
+	if (mapped.nameType === null || mapped.nameType === undefined) {
+		return keyDomainsForKey(
+			mapped.constraint,
+			environment,
+			substitutions,
+			resolvingAliases,
+		);
+	}
+	const mappedSubstitutions = mappedTypeSubstitutions(mapped, substitutions);
+	if (finiteKeyNames(mapped.nameType, environment, mappedSubstitutions, resolvingAliases) !== null) {
+		return new Set();
+	}
+	const outputDomains = keyDomainsForKey(
+		mapped.nameType,
+		environment,
+		mappedSubstitutions,
+		resolvingAliases,
+	);
+	return outputDomains === null || outputDomains.size === 0
+		? keyDomainsForKey(
+			mapped.constraint,
+			environment,
+			substitutions,
+			resolvingAliases,
+		)
+		: outputDomains;
+}
+
+function isBroadMappedType(
+	mapped,
+	environment,
+	substitutions,
+	resolvingAliases = new Set(),
+) {
+	const domains = mappedTypeKeyDomains(
+		mapped,
+		environment,
+		substitutions,
+		resolvingAliases,
+	);
 	return domains !== null && domains.size > 0;
 }
 
@@ -1057,7 +1115,7 @@ function keyDomainsForContainer(
 	if (unwrapped.type === "TSMappedType") {
 		return unwrapped.constraint === null || unwrapped.constraint === undefined
 			? null
-			: keyDomainsForKey(unwrapped.constraint, environment, substitutions, resolvingAliases);
+			: mappedTypeKeyDomains(unwrapped, environment, substitutions, resolvingAliases);
 	}
 	if (unwrapped.type !== "TSTypeReference") return new Set();
 	const name = typeReferenceName(unwrapped);
@@ -1149,7 +1207,7 @@ function classifyAliasBroadTarget(
 	if (unwrapped.type === "TSMappedType") {
 		return unwrapped.constraint !== null &&
 			unwrapped.constraint !== undefined &&
-			isBroadMappedKey(unwrapped.constraint, environment, substitutions)
+			isBroadMappedType(unwrapped, environment, substitutions)
 			? { kind: "open dictionary" }
 			: null;
 	}

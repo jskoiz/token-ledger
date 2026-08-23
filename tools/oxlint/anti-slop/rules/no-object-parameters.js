@@ -3,6 +3,7 @@ import { defineRule } from "@oxlint/plugins";
 import {
   typeAliasReference,
   visibleTypeAlias,
+  visibleTypeInterfaceBinding,
 } from "../shared/type-aliases.js";
 
 function parameterAnnotation(parameter) {
@@ -38,6 +39,31 @@ export const noObjectParametersRule = defineRule({
     },
   },
   createOnce(context) {
+    const resolvesToEmptyInterface = (interfaces, visited = new Set()) => {
+      for (const declaration of interfaces) {
+        if (visited.has(declaration) || declaration.body.body.length > 0) return false;
+        const nextVisited = new Set(visited);
+        nextVisited.add(declaration);
+        for (const extended of declaration.extends ?? []) {
+          const reference = typeAliasReference(extended);
+          if (reference === null) return false;
+          const binding = visibleTypeInterfaceBinding(
+            reference,
+            extended,
+            context.sourceCode,
+          );
+          if (
+            binding?.interfaces === undefined ||
+            binding.interfaces === null ||
+            !resolvesToEmptyInterface(binding.interfaces, nextVisited)
+          ) {
+            return false;
+          }
+        }
+      }
+      return true;
+    };
+
     const resolvesToBroadType = (
       type,
       target,
@@ -101,6 +127,17 @@ export const noObjectParametersRule = defineRule({
 
       const reference = typeAliasReference(type);
       if (reference === null) return false;
+
+      if (target === "empty-object") {
+        const interfaceBinding = visibleTypeInterfaceBinding(
+          reference,
+          type,
+          context.sourceCode,
+        );
+        if (interfaceBinding?.interfaces?.length > 0) {
+          return resolvesToEmptyInterface(interfaceBinding.interfaces);
+        }
+      }
 
       const binding = reference.namespace.length === 0
         ? bindings.get(reference.name)
