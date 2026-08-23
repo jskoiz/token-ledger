@@ -2,7 +2,14 @@ import {
   multiDayBounds,
   trendModelLabel,
 } from "./token-ledger-trend.mjs";
-import { TREND_IMAGE_MODEL_COLORS } from "./token-ledger-trend-image.mjs";
+import {
+  compact,
+  escapeXml,
+  shiftCalendarDate,
+  svgRect,
+  svgText,
+  TREND_IMAGE_MODEL_COLORS,
+} from "./token-ledger-trend-image.mjs";
 import { chooseBinSize } from "./token-ledger-trend-terminal.mjs";
 
 const COLORS = {
@@ -20,41 +27,8 @@ const COLORS = {
   rule: "rgba(255,255,255,.1)",
 };
 
-const FONT_FAMILY = "system-ui, -apple-system, 'Segoe UI', sans-serif";
-const MONO_FAMILY = "ui-monospace, Menlo, monospace";
 const MIN_BIN_WIDTH = 34;
 const MAX_MODEL_ROWS = 6;
-
-function escapeXml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&apos;");
-}
-
-function compact(value, digits = 2) {
-  if (!Number.isFinite(value)) return "—";
-  const absolute = Math.abs(value);
-  const units = [
-    [1_000_000_000, "B"],
-    [1_000_000, "M"],
-    [1_000, "K"],
-  ];
-  for (let index = 0; index < units.length; index += 1) {
-    const [divisor, suffix] = units[index];
-    if (absolute < divisor) continue;
-    const scaled = value / divisor;
-    const magnitude = Math.abs(scaled);
-    const precision = magnitude >= 100 ? 0 : magnitude >= 10 ? 1 : digits;
-    if (index > 0 && Number(magnitude.toFixed(precision)) >= 1_000) {
-      return compact(Math.sign(value) * divisor * 1_000, digits);
-    }
-    return `${scaled.toFixed(precision)}${suffix}`;
-  }
-  return Math.round(value).toLocaleString("en-US");
-}
 
 function percent(value) {
   if (!Number.isFinite(value)) return "—";
@@ -63,46 +37,6 @@ function percent(value) {
 
 function rateFor(inputTokens, cachedInputTokens) {
   return inputTokens > 0 ? (cachedInputTokens / inputTokens) * 100 : null;
-}
-
-function svgText({
-  x,
-  y,
-  value,
-  fill = COLORS.ink,
-  size = 12,
-  weight = 400,
-  anchor = "start",
-  spacing = null,
-  mono = false,
-}) {
-  const spacingAttribute = spacing ? ` letter-spacing="${spacing}"` : "";
-  const family = mono ? MONO_FAMILY : FONT_FAMILY;
-  return `<text x="${x}" y="${y}" fill="${fill}" font-family="${family}" font-size="${size}px" font-weight="${weight}" text-anchor="${anchor}"${spacingAttribute}>${escapeXml(value)}</text>`;
-}
-
-function svgRect(x, y, width, height, attributes = {}) {
-  const pieces = [
-    `x="${Number(x).toFixed(2)}"`,
-    `y="${Number(y).toFixed(2)}"`,
-    `width="${Math.max(0, Number(width)).toFixed(2)}"`,
-    `height="${Math.max(0, Number(height)).toFixed(2)}"`,
-  ];
-  for (const [key, value] of Object.entries(attributes)) {
-    if (value === null || value === undefined) continue;
-    pieces.push(`${key}="${value}"`);
-  }
-  return `<rect ${pieces.join(" ")}/>`;
-}
-
-function shiftCalendarDate(dateString, amount) {
-  const [year, month, day] = dateString.split("-").map(Number);
-  const date = new Date(Date.UTC(year, month - 1, day + amount));
-  return [date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate()]
-    .map((value, index) =>
-      index === 0 ? String(value) : String(value).padStart(2, "0"),
-    )
-    .join("-");
 }
 
 function localDateString(timestampMs, timeZone) {
@@ -168,13 +102,18 @@ function generatedAtLabel(value, timeZone) {
   }).format(new Date(timestampMs));
 }
 
+function nonNegativeFiniteNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : 0;
+}
+
 function cacheBreakdown(event) {
-  const totalTokens = Math.max(0, Number(event.totalTokens) || 0);
-  const inputTokens = Math.max(0, Number(event.inputTokens) || 0);
-  const outputTokens = Math.max(0, Number(event.outputTokens) || 0);
+  const totalTokens = nonNegativeFiniteNumber(event.totalTokens);
+  const inputTokens = nonNegativeFiniteNumber(event.inputTokens);
+  const outputTokens = nonNegativeFiniteNumber(event.outputTokens);
   const cachedInputTokens = Math.min(
     inputTokens,
-    Math.max(0, Number(event.cachedInputTokens) || 0),
+    nonNegativeFiniteNumber(event.cachedInputTokens),
   );
   const hasComponents = inputTokens > 0 || outputTokens > 0;
   const inferredDetailed = hasComponents && (
@@ -526,7 +465,7 @@ export function renderCacheReportImage({
   elements.push(svgText({
     x: contentRight,
     y: 230,
-    value: `${data.inputEventCount.toLocaleString("en-US")} input-bearing ${data.inputEventCount === 1 ? "call" : "calls"}`,
+    value: `${data.inputEventCount.toLocaleString("en-US")} measured input-bearing ${data.inputEventCount === 1 ? "call" : "calls"}`,
     fill: COLORS.muted,
     size: 13,
     anchor: "end",
@@ -626,7 +565,11 @@ export function renderCacheReportImage({
         { rx: 2, fill: COLORS.volume },
       ));
     }
-    if (index % dateStep === 0 || index === data.binCount - 1) {
+    const finalBinIndex = data.binCount - 1;
+    const showDateLabel = index === finalBinIndex || (
+      index % dateStep === 0 && finalBinIndex - index >= dateStep
+    );
+    if (showDateLabel) {
       const daily = data.binSize === 1;
       if (daily) {
         elements.push(svgText({
@@ -849,7 +792,7 @@ export function renderCacheReportImage({
   const footerItems = [
     {
       label: "RATE DEFINITION",
-      value: "cached input ÷ all input",
+      value: "cached input ÷ measured input",
       qualifier: "weighted by input tokens, not daily averages",
     },
     {

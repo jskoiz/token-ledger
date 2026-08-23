@@ -1295,7 +1295,121 @@ test("cache report weights cached input, clamps event values, and keeps models s
   assert.match(svg, /Luna/);
   assert.match(svg, /Sol/);
   assert.match(svg, /MEASUREMENT COVERAGE/);
+  assert.match(svg, /cached input ÷ measured input/);
+  assert.match(svg, /3 measured input-bearing calls/);
   assert.doesNotMatch(svg, /WHERE IT WENT|WEEKLY METER|NaN/);
+});
+
+test("cache report contains non-finite snapshot token values", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+  const snapshot = {
+    generatedAt: "2026-08-15T12:00:00.000Z",
+    events: [
+      {
+        timestamp: "2026-08-15T12:00:00.000Z",
+        model: "gpt-5.6-luna",
+        totalTokens: 1_100,
+        inputTokens: 1_000,
+        cachedInputTokens: 600,
+        outputTokens: 100,
+        breakdownAvailable: true,
+      },
+      {
+        timestamp: "2026-08-14T12:00:00.000Z",
+        model: "gpt-5.6-sol",
+        totalTokens: "1e999",
+        inputTokens: "Infinity",
+        cachedInputTokens: "Infinity",
+        outputTokens: "Infinity",
+        breakdownAvailable: true,
+      },
+    ],
+  };
+
+  const data = buildCacheReportData(snapshot, bounds, 7, 1_100);
+  assert.equal(data.totalTokens, 1_100);
+  assert.equal(data.inputTokens, 1_000);
+  assert.equal(data.cachedInputTokens, 600);
+  assert.equal(data.rate, 60);
+  const svg = renderCacheReportImage({ snapshot, bounds, days: 7 });
+  assert.match(svg, /60\.0% cached/);
+  assert.doesNotMatch(svg, /NaN|Infinity|undefined/);
+});
+
+test("cache report coalesces overflow models and renders zero-measurement state", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+  const modelNames = [
+    "gpt-5.6-luna",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.5-daybreak-blue-latest",
+    "gpt-5.5-auto-review",
+  ];
+  const overflowSnapshot = {
+    generatedAt: "2026-08-15T12:00:00.000Z",
+    events: modelNames.map((model, index) => {
+      const inputTokens = (index + 1) * 100;
+      return {
+        timestamp: "2026-08-15T12:00:00.000Z",
+        model,
+        totalTokens: inputTokens + 10,
+        inputTokens,
+        cachedInputTokens: inputTokens / 2,
+        outputTokens: 10,
+        breakdownAvailable: true,
+      };
+    }),
+  };
+  const overflowSvg = renderCacheReportImage({
+    snapshot: overflowSnapshot,
+    bounds,
+    days: 7,
+  });
+  assert.match(
+    overflowSvg,
+    /Other models<\/text>[\s\S]{0,800}>50\.0%<\/text>/,
+  );
+
+  const unmeasuredSnapshot = {
+    generatedAt: "2026-08-15T12:00:00.000Z",
+    events: [{
+      timestamp: "2026-08-15T12:00:00.000Z",
+      model: "gpt-5.6-luna",
+      totalTokens: 1_000,
+      inputTokens: 900,
+      cachedInputTokens: 450,
+      outputTokens: 100,
+      breakdownAvailable: false,
+    }],
+  };
+  const unmeasured = buildCacheReportData(unmeasuredSnapshot, bounds, 7, 1_100);
+  assert.equal(unmeasured.rate, null);
+  assert.equal(unmeasured.measurementCoveragePercent, 0);
+  const unmeasuredSvg = renderCacheReportImage({
+    snapshot: unmeasuredSnapshot,
+    bounds,
+    days: 7,
+  });
+  assert.match(unmeasuredSvg, /No measured input/);
+  assert.match(unmeasuredSvg, /0\.00% of token volume/);
+  assert.match(unmeasuredSvg, /0 measured input-bearing calls/);
+  assert.doesNotMatch(unmeasuredSvg, /NaN|Infinity|undefined/);
+});
+
+test("cache report separates the final multi-day axis label", () => {
+  const bounds = multiDayBounds("2026-08-20", "UTC", 90);
+  const snapshot = {
+    generatedAt: "2026-08-20T12:00:00.000Z",
+    events: [],
+  };
+  const data = buildCacheReportData(snapshot, bounds, 90, 1_104);
+  assert.equal(data.binSize, 3);
+  assert.equal(data.binCount, 30);
+  const svg = renderCacheReportImage({ snapshot, bounds, days: 90 });
+  assert.match(svg, /Aug 18–Aug 20/);
+  assert.doesNotMatch(svg, /Aug 12–Aug 14/);
 });
 
 test("cache report keeps 30 daily bins at default width and coalesces at minimum width", () => {
@@ -1376,6 +1490,8 @@ test("report emits progress while generating the PNG", async () => {
       "7d",
       "--date",
       "2026-08-15",
+      "--tz",
+      "UTC",
       "--input",
       snapshotPath,
       "--image-output",
@@ -1431,6 +1547,8 @@ test("cache-rate report uses its separate renderer and progress label", async ()
       "--cache-rate",
       "--date",
       "2026-08-15",
+      "--tz",
+      "UTC",
       "--input",
       snapshotPath,
       "--image-output",
@@ -1445,6 +1563,52 @@ test("cache-rate report uses its separate renderer and progress label", async ()
     assert.match(progress, /generating cache report PNG/);
     assert.match(progress, /encoding cache report PNG/);
     assert.match(progress, /finished cache report PNG/);
+  } finally {
+    process.stderr.write = originalWrite;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("cache-rate report writes an empty-state image for an empty range", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-cache-empty-"));
+  const snapshotPath = resolve(root, "snapshot.json");
+  const outputPath = resolve(root, "cache-report.png");
+  const originalWrite = process.stderr.write;
+  try {
+    await writeFile(
+      snapshotPath,
+      `${JSON.stringify({
+        generatedAt: "2026-08-15T12:00:00.000Z",
+        events: [{
+          timestamp: "2026-07-01T12:00:00.000Z",
+          model: "gpt-5.6-luna",
+          totalTokens: 1_000,
+          inputTokens: 900,
+          cachedInputTokens: 450,
+          outputTokens: 100,
+        }],
+      })}\n`,
+    );
+    process.stderr.write = () => true;
+    const result = await run(parseArgs([
+      "report",
+      "7d",
+      "--cache-rate",
+      "--date",
+      "2026-08-15",
+      "--tz",
+      "UTC",
+      "--input",
+      snapshotPath,
+      "--image-output",
+      outputPath,
+      "--no-open",
+    ]));
+    assert.match(result, /Wrote cache report:/);
+    assert.deepEqual(
+      [...(await readFile(outputPath)).subarray(0, 8)],
+      [137, 80, 78, 71, 13, 10, 26, 10],
+    );
   } finally {
     process.stderr.write = originalWrite;
     await rm(root, { recursive: true, force: true });
@@ -1481,6 +1645,8 @@ test("cache-rate report uses a distinct default filename", async () => {
         "--cache-rate",
         "--date",
         "2026-08-15",
+        "--tz",
+        "UTC",
         "--input",
         snapshotPath,
         "--no-open",

@@ -1069,7 +1069,8 @@ export async function run(options, { nowMs } = {}) {
   const bounds = boundsForOptions(options, now);
   const snapshot = await loadSnapshot(options);
   const events = filterDayEvents(snapshot, bounds);
-  if (events.length === 0) {
+  const writingImage = options.view === "trend" && options.image;
+  if (events.length === 0 && !writingImage) {
     return [
       `No model-call events found for ${rangeDescription(options, bounds)} (${bounds.timeZone}).`,
       `Source: ${sourceLabel(options.input, snapshot)}`,
@@ -1077,7 +1078,6 @@ export async function run(options, { nowMs } = {}) {
   }
   const allRows = aggregateProjects(snapshot, events, options);
   const rows = allRows.slice(0, options.top);
-  const writingImage = options.view === "trend" && options.image;
   const outputPath = writingImage
     ? options.imageOutput ??
       resolve(
