@@ -746,3 +746,51 @@ test("malformed usage and rate-limit payloads are ignored safely", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("unchanged quota readings retain their full observed span", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
+  const threadId = "89898989-8989-4989-8989-898989898989";
+  const firstSeenAt = "2026-08-23T17:59:20.000Z";
+  const lastSeenAt = "2026-08-23T18:08:57.000Z";
+  const resetsAt = Date.parse("2026-08-26T10:00:00.000Z") / 1_000;
+  const quotaRecord = (timestamp) => ({
+    timestamp,
+    type: "event_msg",
+    payload: {
+      type: "token_count",
+      rate_limits: {
+        primary: {
+          window_minutes: 10_080,
+          used_percent: 80,
+          resets_at: resetsAt,
+        },
+        plan_type: "plus",
+      },
+    },
+  });
+
+  try {
+    const rolloutDirectory = resolve(root, "sessions", "2026", "08", "23");
+    await mkdir(rolloutDirectory, { recursive: true });
+    await writeFile(
+      resolve(rolloutDirectory, `rollout-${threadId}.jsonl`),
+      serialize([
+        ...turnStart(firstSeenAt, "turn-1"),
+        quotaRecord(firstSeenAt),
+        quotaRecord(lastSeenAt),
+      ]),
+    );
+
+    const snapshot = await collectUsage({
+      output: resolve(root, "snapshot.json"),
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+    assert.equal(snapshot.quotaObservations.length, 1);
+    assert.equal(snapshot.quotaObservations[0].timestamp, firstSeenAt);
+    assert.equal(snapshot.quotaObservations[0].lastSeenAt, lastSeenAt);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

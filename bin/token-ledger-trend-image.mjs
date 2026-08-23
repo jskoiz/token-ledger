@@ -74,6 +74,7 @@ const FONT_FAMILY = "system-ui, -apple-system, 'Segoe UI', sans-serif";
 const MONO_FAMILY = "ui-monospace, Menlo, monospace";
 const FAST_MODE_LABEL_COLOR = "#a78bfa";
 const MIN_BAR_WIDTH = 26;
+const METER_PANEL_HEADING = "WEEKLY LIMIT · PACE & RUNWAY";
 
 export function escapeXml(value) {
   return String(value)
@@ -198,7 +199,7 @@ function zonedMidnight(dateString, timeZone) {
   const [year, month, day] = dateParts(dateString);
   const utcGuess = Date.UTC(year, month - 1, day);
   const first = new Date(utcGuess - timeZoneOffsetMs(new Date(utcGuess), timeZone));
-  return new Date(first.getTime() - timeZoneOffsetMs(first, timeZone));
+  return new Date(utcGuess - timeZoneOffsetMs(first, timeZone));
 }
 
 function localDateLabel(dateString, timeZone) {
@@ -222,6 +223,26 @@ function timestampDateLabel(timestampMs, timeZone) {
     timeZone,
     month: "short",
     day: "numeric",
+  }).format(new Date(timestampMs));
+}
+
+function timestampReadLabel(timestampMs, timeZone) {
+  if (!Number.isFinite(timestampMs)) return "unknown";
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(timestampMs));
+}
+
+function timestampTimeLabel(timestampMs, timeZone) {
+  if (!Number.isFinite(timestampMs)) return "unknown";
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hour: "numeric",
+    minute: "2-digit",
   }).format(new Date(timestampMs));
 }
 
@@ -409,7 +430,7 @@ export function renderTrendImage({
   const maxBar = niceCeiling(
     bars.reduce((maximum, bin) => Math.max(maximum, binTotalOf(bin)), 0),
   );
-  const hasLine = Boolean(trend.available && (trend.points ?? []).length > 1);
+  const hasLine = Boolean(trend.available && (trend.points ?? []).length > 0);
 
   const totalTokens = [...actual.totals.values()].reduce((sum, value) => sum + value, 0);
   const fastTokens = [...(actual.fastTotals?.values() ?? [])].reduce(
@@ -441,7 +462,9 @@ export function renderTrendImage({
   }).totals;
 
   const latestQuotaPoint = [...(trend.points ?? [])]
-    .filter((point) => point.timestampMs <= bounds.end.getTime())
+    .filter(
+      (point) => point.observed && point.timestampMs <= bounds.end.getTime(),
+    )
     .at(-1);
   const latestQuotaReadMs = Number.isFinite(trend.observedThroughMs)
     ? trend.observedThroughMs
@@ -610,6 +633,57 @@ export function renderTrendImage({
     120,
   );
   const height = bottomTop + bottomBlockHeight + 34;
+  const rangeStartMs = bounds.start.getTime();
+  const rangeEndMs = bounds.end.getTime();
+  const requestedReportTimeMs = Number.isFinite(options.reportTimeMs)
+    ? options.reportTimeMs
+    : generatedAtMs;
+  const reportTimeMs = Number.isFinite(requestedReportTimeMs) &&
+      requestedReportTimeMs > rangeStartMs && requestedReportTimeMs < rangeEndMs
+    ? requestedReportTimeMs
+    : null;
+  const slotWidth = plotWidth / binCount;
+  const binTimeRanges = actual.bins.map((bin) => ({
+    startMs: zonedMidnight(bin.startDateString, bounds.timeZone).getTime(),
+    endMs: zonedMidnight(bin.endDateString, bounds.timeZone).getTime(),
+  }));
+  const finalBinTimeRange = binTimeRanges.at(-1);
+  const partialFinalBin = Boolean(
+    reportTimeMs !== null &&
+      finalBinTimeRange &&
+      reportTimeMs > finalBinTimeRange.startMs &&
+      reportTimeMs < finalBinTimeRange.endMs,
+  );
+  // The x axis is made of equal calendar-period slots. On an incomplete final
+  // day, stretch only the elapsed part of that slot so report time lands on
+  // the right edge instead of reserving space for hours that have not happened.
+  const xForTimestamp = (timestampMs) => {
+    if (!(timestampMs > rangeStartMs)) return plotLeft;
+    if (timestampMs >= (partialFinalBin ? reportTimeMs : rangeEndMs)) {
+      return plotRight;
+    }
+    let binIndex = binTimeRanges.findIndex(
+      (range) => timestampMs >= range.startMs && timestampMs < range.endMs,
+    );
+    if (binIndex < 0) {
+      binIndex = timestampMs < rangeStartMs ? 0 : binCount - 1;
+    }
+    const range = binTimeRanges[binIndex];
+    const effectiveEndMs = partialFinalBin && binIndex === binCount - 1
+      ? reportTimeMs
+      : range.endMs;
+    const span = Math.max(1, effectiveEndMs - range.startMs);
+    const ratio = Math.max(
+      0,
+      Math.min(1, (timestampMs - range.startMs) / span),
+    );
+    return plotLeft + (binIndex + ratio) * slotWidth;
+  };
+  const yForRemaining = (value) =>
+    plotTop + (1 - Math.max(0, Math.min(100, value)) / 100) * plotHeight;
+  const reportTimeX = reportTimeMs === null
+    ? null
+    : xForTimestamp(reportTimeMs);
 
   const yearLabel = bounds.endDateString.slice(0, 4);
   const title = percentMode
@@ -617,11 +691,11 @@ export function renderTrendImage({
     : `TOKEN LEDGER · ${days}-DAY TREND`;
   const subtitle = `${localDateLabel(bounds.startDateString, bounds.timeZone)} – ${localDateLabel(bounds.endDateString, bounds.timeZone)}, ${yearLabel} · ${bounds.timeZone}`;
   const description = percentMode
-    ? "Dark report card: compact actual-token stat cards beside pace and runway, stacked columns of observed weekly-meter drain with an explicitly estimated per-model split, the observed weekly meter remaining as an amber line with continuous reset boundaries, a compressed cache-rate-by-period strip, and top projects beside per-model cache rates."
-    : "Dark report card: compact model stat cards with week-over-week delta chips beside pace and runway, stacked columns of local token volume by model with fast-mode usage in a darker shade, the observed weekly meter remaining as a smoothed amber line with reset breaks and callout pills, a compressed cache-rate-by-period strip, and top projects beside per-model cache rates.";
+    ? "Dark report card: compact actual-token stat cards beside pace and runway, stacked columns of observed weekly-meter drain with an explicitly estimated per-model split, the OpenAI-reported weekly limit remaining as an amber line, a partial final day ending at report time, a compressed cache-rate-by-period strip, and top projects beside per-model cache rates."
+    : "Dark report card: compact model stat cards with week-over-week delta chips beside pace and runway, stacked columns of local token volume by model with fast-mode usage in a darker shade, the OpenAI-reported weekly limit remaining as a smoothed amber line, a partial final day ending at report time, a compressed cache-rate-by-period strip, and top projects beside per-model cache rates.";
 
   const elements = [
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="trend-title trend-description" data-report-mode="${percentMode ? "meter-drain" : "actual-tokens"}">`,
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="trend-title trend-description" data-report-mode="${percentMode ? "meter-drain" : "actual-tokens"}" data-time-domain="${partialFinalBin ? "through-report" : "full-range"}">`,
     `<title id="trend-title">${escapeXml(percentMode ? `Token Ledger · ${days}-day meter drain` : `Token Ledger · ${days}-day trend`)}</title>`,
     `<desc id="trend-description">${escapeXml(description)}</desc>`,
     `<defs><clipPath id="trend-plot-clip"><rect x="${plotLeft}" y="${plotTop}" width="${plotWidth}" height="${plotHeight}"/></clipPath></defs>`,
@@ -719,13 +793,27 @@ export function renderTrendImage({
   if (hasLine && latestQuotaPoint) {
     const lastReset = resetsInRange.at(-1);
     const resetCaption = lastReset
-      ? `reset ${timestampDateLabel(lastReset.timestampMs, bounds.timeZone)}`
+      ? `last reset ${timestampDateLabel(lastReset.timestampMs, bounds.timeZone)}`
       : latestResetsAtSec
-        ? `resets ${timestampDateLabel(latestResetsAtSec * 1_000, bounds.timeZone)}`
+        ? `next reset ${timestampDateLabel(latestResetsAtSec * 1_000, bounds.timeZone)}`
         : "no reset in range";
+    const meterCaption = (() => {
+      if (latestQuotaReadMs === null) return resetCaption;
+      const candidates = [
+        `${resetCaption} · OpenAI reading ${timestampReadLabel(latestQuotaReadMs, bounds.timeZone)}`,
+        `OpenAI reading · ${timestampReadLabel(latestQuotaReadMs, bounds.timeZone)}`,
+        `OpenAI reading · ${timestampTimeLabel(latestQuotaReadMs, bounds.timeZone)}`,
+      ];
+      const available = Math.max(
+        80,
+        paceInnerWidth - 15 - textWidth(METER_PANEL_HEADING, 10.5) - 18,
+      );
+      return candidates.find((candidate) => textWidth(candidate, 10.5) <= available) ??
+        `reported ${timestampTimeLabel(latestQuotaReadMs, bounds.timeZone)}`;
+    })();
     meterCard = ({
       swatch: COLORS.line,
-      label: "Weekly meter",
+      label: "Weekly limit",
       labelColor: COLORS.meterAxis,
       value: meterLabel(latestQuotaPoint.remainingPercent),
       valueColor: COLORS.line,
@@ -734,9 +822,7 @@ export function renderTrendImage({
       track: "rgba(246,183,60,.2)",
       fill: COLORS.line,
       barPercent: latestQuotaPoint.remainingPercent,
-      caption: latestQuotaReadMs === null
-        ? resetCaption
-        : `${resetCaption} · read ${timestampDateLabel(latestQuotaReadMs, bounds.timeZone)}`,
+      caption: meterCaption,
       captionShort: resetCaption,
       panel: COLORS.meterPanel,
       border: COLORS.meterPanelBorder,
@@ -870,7 +956,7 @@ export function renderTrendImage({
   elements.push(svgText({
     x: paceTextX + (meterCard ? 15 : 0),
     y: cardTop + 23,
-    value: meterCard ? "WEEKLY METER · PACE & RUNWAY" : "PACE & RUNWAY",
+    value: meterCard ? METER_PANEL_HEADING : "PACE & RUNWAY",
     fill: meterCard ? meterCard.labelColor : COLORS.muted,
     size: 10.5,
     spacing: "1.2",
@@ -1060,7 +1146,7 @@ export function renderTrendImage({
     elements.push(svgText({
       x: plotRight,
       y: chartBlockTop + 18,
-      value: "WEEKLY METER · REMAINING",
+      value: "WEEKLY LIMIT · OPENAI REPORTED",
       fill: COLORS.meterAxis,
       size: 11.5,
       anchor: "end",
@@ -1069,7 +1155,6 @@ export function renderTrendImage({
   }
 
   // ---- Bars ----
-  const slotWidth = plotWidth / binCount;
   const barWidth = Math.min(74, Math.max(MIN_BAR_WIDTH, slotWidth * 0.6));
   const barGeometry = bars.map((bin, binIndex) => {
     const centerX = plotLeft + (binIndex + 0.5) * slotWidth;
@@ -1137,17 +1222,10 @@ export function renderTrendImage({
   }
 
   // ---- Meter line: per-cycle smoothed segments with reset breaks ----
-  const yForRemaining = (value) =>
-    plotTop + (1 - Math.max(0, Math.min(100, value)) / 100) * plotHeight;
-  const xForTimestamp = (timestampMs) => {
-    const span = bounds.end.getTime() - bounds.start.getTime();
-    const ratio = span > 0 ? (timestampMs - bounds.start.getTime()) / span : 0;
-    return plotLeft + Math.max(0, Math.min(1, ratio)) * plotWidth;
-  };
-
   let resetMarks = [];
   let binDots = [];
   let pills = [];
+  let hasHeldSegment = false;
   const lineSegments = [];
   if (hasLine) {
     const cycles = new Map();
@@ -1223,24 +1301,22 @@ export function renderTrendImage({
         });
       }
 
-      // Carry the previous reading to the exact reset boundary. The former
-      // renderer stopped at the last observation and restarted at a nudged
-      // marker, leaving a visible gap that looked like a broken series.
+      // Keep a visual connection to a known reset boundary, but render the
+      // unsampled hold as dashed instead of making it look observed.
       const nextCycleId = orderedCycles[cycleIndex + 1]?.[0];
       const nextReset = resetByCycle.get(nextCycleId);
       const lastPoint = points.at(-1);
-      if (
+      const resetCarry =
         nextReset &&
         lastPoint &&
         lastPoint.timestampMs < nextReset.timestampMs
-      ) {
-        points.push({
-          ...lastPoint,
-          x: nextReset.x,
-          timestampMs: nextReset.timestampMs,
-          carriedToReset: true,
-        });
-      }
+          ? [lastPoint, {
+              ...lastPoint,
+              x: nextReset.x,
+              timestampMs: nextReset.timestampMs,
+              carriedToReset: true,
+            }]
+          : null;
 
       // Thin to at most one point per 2px so the path stays light while the
       // spline still follows every meaningful movement.
@@ -1263,6 +1339,37 @@ export function renderTrendImage({
         elements.push(`<path d="${path}" fill="none" stroke="${COLORS.background}" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round" opacity=".88" clip-path="url(#trend-plot-clip)"/>`);
         elements.push(`<path d="${path}" fill="none" stroke="${COLORS.line}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" clip-path="url(#trend-plot-clip)" data-series="weekly-meter" data-cycle="${escapeXml(cycleId)}"/>`);
         lineSegments.push(thinned);
+      }
+      if (resetCarry) {
+        const [from, to] = resetCarry;
+        const heldPath = `M ${from.x.toFixed(2)} ${from.y.toFixed(2)} L ${to.x.toFixed(2)} ${to.y.toFixed(2)}`;
+        elements.push(`<path d="${heldPath}" fill="none" stroke="${COLORS.background}" stroke-width="5.5" stroke-linecap="round" opacity=".72" clip-path="url(#trend-plot-clip)"/>`);
+        elements.push(`<path d="${heldPath}" fill="none" stroke="${COLORS.line}" stroke-width="2.25" stroke-linecap="round" stroke-dasharray="5 6" opacity=".7" clip-path="url(#trend-plot-clip)" data-series="weekly-meter-held" data-reason="reset" data-cycle="${escapeXml(cycleId)}"/>`);
+        lineSegments.push(resetCarry);
+        hasHeldSegment = true;
+      }
+    }
+
+    const latestObservedPoint = [...(trend.points ?? [])]
+      .filter(
+        (point) =>
+          point.observed &&
+          reportTimeMs !== null &&
+          point.timestampMs <= reportTimeMs,
+      )
+      .at(-1);
+    if (latestObservedPoint && reportTimeMs !== null) {
+      const from = {
+        x: xForTimestamp(latestObservedPoint.timestampMs),
+        y: yForRemaining(latestObservedPoint.remainingPercent),
+      };
+      const to = { x: xForTimestamp(reportTimeMs), y: from.y };
+      if (to.x - from.x >= 2) {
+        const heldPath = `M ${from.x.toFixed(2)} ${from.y.toFixed(2)} L ${to.x.toFixed(2)} ${to.y.toFixed(2)}`;
+        elements.push(`<path d="${heldPath}" fill="none" stroke="${COLORS.background}" stroke-width="5.5" stroke-linecap="round" opacity=".72" clip-path="url(#trend-plot-clip)"/>`);
+        elements.push(`<path d="${heldPath}" fill="none" stroke="${COLORS.line}" stroke-width="2.25" stroke-linecap="round" stroke-dasharray="5 6" opacity=".7" clip-path="url(#trend-plot-clip)" data-series="weekly-meter-held" data-reason="report-time"/>`);
+        lineSegments.push([from, to]);
+        hasHeldSegment = true;
       }
     }
 
@@ -1391,6 +1498,20 @@ export function renderTrendImage({
     });
   }
 
+  if (reportTimeX !== null) {
+    elements.push(`<line x1="${reportTimeX.toFixed(2)}" y1="${plotTop}" x2="${reportTimeX.toFixed(2)}" y2="${plotBottom}" stroke="${COLORS.muted}" stroke-width="1.25" stroke-dasharray="4 5" opacity=".72" data-marker="report-time"/>`);
+    elements.push(svgText({
+      x: reportTimeX - 7,
+      y: plotTop - 8,
+      value: `AS OF ${timestampTimeLabel(reportTimeMs, bounds.timeZone).toUpperCase()}`,
+      fill: COLORS.muted,
+      size: 10.5,
+      weight: 700,
+      anchor: "end",
+      spacing: ".55",
+    }));
+  }
+
   // ---- Bar totals and day labels (drawn over the line like the labels) ----
   elements.push(...segmentLabels);
   // Where the line passes through a horizontal span at band height, from the
@@ -1466,6 +1587,18 @@ export function renderTrendImage({
         size: 15,
         anchor: "middle",
       }));
+      if (partialFinalBin && binIndex === binCount - 1) {
+        elements.push(svgText({
+          x: centerX,
+          y: plotBottom + 70,
+          value: `PARTIAL · THROUGH ${timestampTimeLabel(reportTimeMs, bounds.timeZone).toUpperCase()}`,
+          fill: COLORS.muted,
+          size: 10.5,
+          weight: 700,
+          anchor: "middle",
+          spacing: ".45",
+        }));
+      }
     }
   }
   for (const pill of pills) {
@@ -1523,13 +1656,19 @@ export function renderTrendImage({
     );
   }
   if (hasLine) {
-    legendItem(
-      svgRect(legendX, legendBaseline - 6, 20, 3, { fill: COLORS.line }),
-      20,
-      percentMode
-        ? "Amber = observed meter remaining · columns = estimated model split"
-        : "Weekly meter remaining · observed",
-    );
+    if (hasHeldSegment) {
+      legendItem(
+        `<line x1="${legendX}" y1="${legendBaseline - 5}" x2="${legendX + 17}" y2="${legendBaseline - 5}" stroke="${COLORS.line}" stroke-width="3"/><line x1="${legendX + 25}" y1="${legendBaseline - 5}" x2="${legendX + 42}" y2="${legendBaseline - 5}" stroke="${COLORS.line}" stroke-width="2.25" stroke-dasharray="5 5" opacity=".7"/>`,
+        42,
+        "Limit: reported / awaiting update",
+      );
+    } else {
+      legendItem(
+        svgRect(legendX, legendBaseline - 6, 20, 3, { fill: COLORS.line }),
+        20,
+        "OpenAI weekly-limit reading",
+      );
+    }
   }
 
   // ---- Cache rate by period (compressed strip) ----

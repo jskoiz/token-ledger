@@ -28,6 +28,7 @@ import {
   snapshotCacheIsFresh,
   snapshotFreshness,
   snapshotNeedsRefresh,
+  shouldCheckSourceFreshness,
   weekBounds,
 } from "../bin/token-ledger.mjs";
 import {
@@ -791,13 +792,29 @@ test("snapshot freshness follows the newest local source mtime", () => {
   assert.equal(snapshotNeedsRefresh(100, 99), false);
 });
 
-test("recent snapshots skip the automatic source freshness walk", () => {
+test("recent terminal snapshots reuse the cache while reports check sources", () => {
   const now = 1_000_000;
   assert.equal(snapshotCacheIsFresh(now, now), true);
   assert.equal(snapshotCacheIsFresh(now - 60 * 60 * 1000 + 1, now), true);
   assert.equal(snapshotCacheIsFresh(now - 60 * 60 * 1000, now), false);
   assert.equal(snapshotCacheIsFresh(now - 60 * 60 * 1000 - 1, now), false);
   assert.equal(snapshotCacheIsFresh(now + 1, now), false);
+  assert.equal(
+    shouldCheckSourceFreshness({ view: "terminal" }, now, now),
+    false,
+  );
+  assert.equal(
+    shouldCheckSourceFreshness({ view: "trend", image: true }, now, now),
+    true,
+  );
+  assert.equal(
+    shouldCheckSourceFreshness(
+      { view: "terminal" },
+      now - 60 * 60 * 1000,
+      now,
+    ),
+    true,
+  );
 });
 
 test("snapshot freshness labels the one-hour cache age without exposing paths", () => {
@@ -1381,7 +1398,7 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
   assert.match(svg, /fill="#3b82f6"/);
   assert.match(svg, /fill="#10a394"/);
   assert.match(svg, /TOKEN VOLUME · ACTUAL/);
-  assert.match(svg, /WEEKLY METER · REMAINING/);
+  assert.match(svg, /WEEKLY LIMIT · OPENAI REPORTED/);
   assert.match(svg, /data-model="Luna" data-value="1000" data-unit="tokens"/);
   assert.match(svg, /data-model="Sol" data-value="2000" data-unit="tokens"/);
   assert.match(svg, /stroke="#f6b73c"/);
@@ -1399,8 +1416,18 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
   assert.equal(meterPaths.length, 2);
   const firstPathEndX = Number(meterPaths[0].path.match(/ ([\d.]+) [\d.]+$/)?.[1]);
   const secondPathStartX = Number(meterPaths[1].path.match(/^M ([\d.]+)/)?.[1]);
-  assert.ok(Math.abs(firstPathEndX - resetX) < 0.02);
+  const resetHold = svg.match(
+    /<path d="M ([\d.]+) [\d.]+ L ([\d.]+) [\d.]+"[^>]*data-series="weekly-meter-held"[^>]*data-reason="reset"/,
+  );
+  assert.ok(firstPathEndX < resetX);
+  assert.ok(Math.abs(Number(resetHold?.[1]) - firstPathEndX) < 0.02);
+  assert.ok(Math.abs(Number(resetHold?.[2]) - resetX) < 0.02);
   assert.ok(Math.abs(secondPathStartX - resetX) < 0.02);
+  assert.match(svg, /WEEKLY LIMIT · OPENAI REPORTED/);
+  assert.match(svg, /Limit: reported \/ awaiting update/);
+  assert.match(svg, /data-marker="report-time"/);
+  assert.match(svg, /data-time-domain="through-report"/);
+  assert.doesNotMatch(svg, /data-region="after-report"/);
   // The all-fast Sol segment gets the darker fast-mode shade, and the fast
   // mode stat card explains it.
   assert.match(svg, /fill="#0a655c"/);
@@ -1430,7 +1457,6 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
   assert.match(drainSvg, /Token Ledger · 7-day meter drain/);
   assert.match(drainSvg, /data-report-mode="meter-drain"/);
   assert.match(drainSvg, /METER DRAIN · OBSERVED TOTAL, ESTIMATED MODEL SPLIT/);
-  assert.match(drainSvg, /columns = estimated model split/);
   assert.match(drainSvg, /OBSERVED DRAIN/);
   assert.match(drainSvg, /data-unit="meter-points"/);
   assert.match(drainSvg, /CACHE RATE BY PERIOD/);
@@ -1456,6 +1482,76 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
     modelBarWidths.every((barWidth) => barWidth >= 90),
     `minimum-width model bars were ${modelBarWidths.join(", ")}px`,
   );
+});
+
+test("trend meter stops at its last sample and marks report time", () => {
+  const bounds = multiDayBounds("2026-08-23", "UTC", 7);
+  const observedThrough = "2026-08-23T08:08:57.000Z";
+  const generatedAt = "2026-08-23T08:30:00.000Z";
+  const reportTimeMs = Date.parse("2026-08-23T10:08:57.000Z");
+  const resetsAt = Date.parse("2026-08-26T10:00:00.000Z") / 1_000;
+  const snapshot = {
+    generatedAt,
+    events: [{
+      timestamp: "2026-08-23T08:08:30.000Z",
+      model: "gpt-5.6-luna",
+      totalTokens: 1_000,
+      inputTokens: 800,
+      cachedInputTokens: 600,
+      outputTokens: 200,
+    }],
+    quotaObservations: [
+      {
+        timestamp: "2026-08-22T12:00:00.000Z",
+        lastSeenAt: "2026-08-22T12:00:00.000Z",
+        usedPercent: 70,
+        windowMinutes: 10_080,
+        resetsAt,
+      },
+      {
+        timestamp: "2026-08-23T07:59:20.000Z",
+        lastSeenAt: observedThrough,
+        usedPercent: 80,
+        windowMinutes: 10_080,
+        resetsAt,
+      },
+    ],
+  };
+  const trend = buildUsageTrend(snapshot, bounds);
+  const endMs = bounds.end.getTime();
+  const observedThroughMs = Date.parse(observedThrough);
+  assert.equal(trend.observedThroughMs, observedThroughMs);
+  assert.equal(trend.points.at(-1).timestampMs, observedThroughMs);
+  assert.equal(trend.points.at(-1).confirmation, true);
+  assert.ok(trend.points.every((point) => point.timestampMs < endMs));
+
+  const svg = renderTrendImage({
+    snapshot,
+    bounds,
+    trend,
+    days: 7,
+    options: { imageWidth: 1_280, reportTimeMs },
+  });
+  const solidPath = svg.match(
+    /<path d="([^"]+)"[^>]*data-series="weekly-meter"[^>]*data-cycle="0"/,
+  )?.[1];
+  const solidEndX = Number(solidPath?.match(/ ([\d.]+) [\d.]+$/)?.[1]);
+  const reportX = Number(svg.match(
+    /<line x1="([\d.]+)"[^>]*data-marker="report-time"/,
+  )?.[1]);
+  const heldToReport = svg.match(
+    /<path d="M ([\d.]+) [\d.]+ L ([\d.]+) [\d.]+"[^>]*data-series="weekly-meter-held"[^>]*data-reason="report-time"/,
+  );
+  assert.ok(Number.isFinite(solidEndX));
+  assert.ok(solidEndX < reportX);
+  assert.ok(Math.abs(reportX - 1_184) < 0.02);
+  assert.ok(Math.abs(Number(heldToReport?.[1]) - solidEndX) < 0.02);
+  assert.ok(Math.abs(Number(heldToReport?.[2]) - reportX) < 0.02);
+  assert.match(svg, /OpenAI reading/);
+  assert.match(svg, /8:08 AM/);
+  assert.match(svg, />AS OF 10:08 AM<\/text>/);
+  assert.match(svg, />PARTIAL · THROUGH 10:08 AM<\/text>/);
+  assert.doesNotMatch(svg, /data-region="after-report"/);
 });
 
 test("trend report truncates project names to the measured label column", () => {
