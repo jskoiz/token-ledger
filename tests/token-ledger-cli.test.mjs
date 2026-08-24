@@ -71,6 +71,36 @@ const ROLLING_24H_FIXTURE = fileURLToPath(
 const CLI_ENTRYPOINT = fileURLToPath(
   new URL("../bin/token-ledger.mjs", import.meta.url),
 );
+const IMAGE_MODULE_TRACE_LOADER = fileURLToPath(
+  new URL("./trace-image-imports-loader.mjs", import.meta.url),
+);
+
+test("non-image CLI paths do not load image renderers or Sharp", () => {
+  const commands = [
+    ["--help"],
+    [
+      "1d",
+      "--input",
+      ROLLING_24H_FIXTURE,
+      "--no-refresh",
+      "--static",
+      "--plain",
+      "--tz",
+      "UTC",
+    ],
+  ];
+
+  for (const args of commands) {
+    const result = spawnSync(
+      process.execPath,
+      ["--loader", IMAGE_MODULE_TRACE_LOADER, CLI_ENTRYPOINT, ...args],
+      { encoding: "utf8" },
+    );
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.stderr, /TOKEN_LEDGER_IMAGE_GRAPH/);
+  }
+});
 
 test(
   "CLI entrypoint supports direct shebang execution",
