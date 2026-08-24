@@ -45,10 +45,17 @@ function modelLabel(model) {
 }
 
 function creditReason(event) {
-  const model = normalizeCodexCreditModel(event?.model);
+  const model = normalizeCodexCreditModel(
+    event?.rateCardModel ?? event?.model,
+  );
   if (!CODEX_CREDIT_RATE_CARD[model]) return "unknown-model";
   if (!hasDetailedTokenBreakdown(event)) return "incomplete-token-breakdown";
-  if (codexCreditMultiplier(event?.model, event?.serviceTier) === null) {
+  if (
+    codexCreditMultiplier(
+      event?.rateCardModel ?? event?.model,
+      event?.serviceTier,
+    ) === null
+  ) {
     return "unsupported-credit-fast-tier";
   }
   return "unrated-credit-usage";
@@ -57,7 +64,7 @@ function creditReason(event) {
 function eventEstimate(event, basis) {
   if (basis === "api-usd") return apiUsdForUsage(event);
   const amount = calculateCodexPurchasedCredits({
-    model: event?.model,
+    model: event?.rateCardModel ?? event?.model,
     serviceTier: event?.serviceTier,
     usage: event,
   });

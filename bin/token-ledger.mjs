@@ -698,7 +698,7 @@ function modelLabel(value) {
 
 function currentRateCardCredits(event) {
   return calculateCodexPurchasedCredits({
-    model: event?.model,
+    model: event?.rateCardModel ?? event?.model,
     serviceTier: event?.serviceTier,
     usage: event,
   });

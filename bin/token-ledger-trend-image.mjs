@@ -416,14 +416,15 @@ function fastRateSummary(snapshot, bounds) {
   )) {
     if (!isFastServiceTier(event.serviceTier)) continue;
     const tokens = Math.max(0, Number(event.totalTokens) || 0);
-    const multiplier = codexCreditMultiplier(event.model, event.serviceTier);
+    const rateCardModel = event.rateCardModel ?? event.model;
+    const multiplier = codexCreditMultiplier(rateCardModel, event.serviceTier);
     const standardCredits = calculateCodexPurchasedCredits({
-      model: event.model,
+      model: rateCardModel,
       serviceTier: null,
       usage: event,
     });
     const fastCredits = calculateCodexPurchasedCredits({
-      model: event.model,
+      model: rateCardModel,
       serviceTier: event.serviceTier,
       usage: event,
     });

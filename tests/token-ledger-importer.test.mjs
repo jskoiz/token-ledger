@@ -312,6 +312,10 @@ test("collector leaves unsupported Daybreak latest aliases unrated", async () =>
       ["daybreak-red", "daybreak-blue"],
     );
     assert.deepEqual(
+      snapshot.events.map((event) => event.rateCardModel),
+      ["gpt-daybreak-red-latest", "gpt-5.5-daybreak-blue-latest"],
+    );
+    assert.deepEqual(
       snapshot.events.map((event) => event.serviceTier),
       ["priority", "fast"],
     );

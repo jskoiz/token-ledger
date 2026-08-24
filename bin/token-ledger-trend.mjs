@@ -307,7 +307,7 @@ export function eventCredits(event) {
   // Always recompute with the current purchased-credit card. Snapshot values
   // may have been stored under an older card and must not fill a current gap.
   return calculateCodexPurchasedCredits({
-    model: event.model,
+    model: event.rateCardModel ?? event.model,
     serviceTier: event.serviceTier,
     usage: event,
   });

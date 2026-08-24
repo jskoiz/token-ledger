@@ -65,6 +65,7 @@ import {
   buildCacheReportData,
   renderCacheReportImage,
 } from "../bin/token-ledger-cache-image.mjs";
+import { splitUsageBucketsAtBoundaries } from "../lib/token-ledger-usage.mjs";
 import {
   INTERACTIVE_FOOTER,
   INTERACTIVE_HELP,
@@ -3235,6 +3236,26 @@ test("rate card prices Luna at the current published credit rates", () => {
   assert.equal(credits, 35);
 });
 
+test("unsupported fast aliases remain unrated after snapshot recomputation", () => {
+  const event = {
+    model: "daybreak-red",
+    rateCardModel: "gpt-daybreak-red-latest",
+    serviceTier: "priority",
+    totalTokens: 100_000,
+    inputTokens: 100_000,
+    cachedInputTokens: 0,
+    outputTokens: 0,
+  };
+
+  assert.equal(eventCredits(event), null);
+  const rows = aggregateProjects(
+    { events: [], threads: [] },
+    [event],
+    { rawProjects: true },
+  );
+  assert.equal(rows[0].rateCardCredits, 0);
+});
+
 test("purchased-credit calculator applies current rows and fast tiers", () => {
   const usage = {
     totalTokens: 3_000_000,
@@ -3457,6 +3478,33 @@ test("API USD calculator is conservative for compacted and unsupported usage", (
   assert.equal(partialCacheWrite.unratedTokens, 200);
   assert.equal(partialCacheWrite.complete, false);
   assert.deepEqual(partialCacheWrite.reasons, ["unsupported-cache-write-price"]);
+});
+
+test("sliced compacted long-context buckets remain ambiguous", () => {
+  const startMs = Date.parse("2026-08-15T00:00:00.000Z");
+  const [first, second] = splitUsageBucketsAtBoundaries(
+    [{
+      timestamp: new Date(startMs + 3_600_000).toISOString(),
+      startAt: new Date(startMs).toISOString(),
+      endAt: new Date(startMs + 7_200_000).toISOString(),
+      model: "gpt-5.6-sol",
+      totalTokens: 400_000,
+      inputTokens: 400_000,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      callCount: 2,
+    }],
+    [startMs + 3_600_000],
+  );
+
+  for (const fragment of [first, second]) {
+    assert.ok(Math.abs(fragment.inputTokens - 200_000) < 1);
+    assert.ok(Math.abs(fragment.callCount - 1) < 1e-6);
+    assert.equal(fragment.rangeAllocationEstimated, true);
+    const estimate = apiUsdForUsage(fragment);
+    assert.equal(estimate.amount, null);
+    assert.deepEqual(estimate.reasons, ["compacted-long-context-ambiguous"]);
+  }
 });
 
 test("cost renderer labels units, coverage, and unrated usage explicitly", () => {
