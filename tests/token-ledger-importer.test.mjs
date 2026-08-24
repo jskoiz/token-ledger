@@ -130,6 +130,25 @@ test("source appends are included before a validated cache is published", async 
   }
 });
 
+test("SQLite WAL changes invalidate the source watermark", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-wal-watermark-"));
+  const database = resolve(root, "state_5.sqlite");
+  const wal = `${database}-wal`;
+  try {
+    await writeFile(database, "main-v1");
+    await writeFile(wal, "wal-v1");
+    const before = await sourceInventory(root, true);
+
+    await appendFile(wal, "-wal-v2");
+    const after = await sourceInventory(root, true);
+
+    assert.notEqual(before.watermark.fingerprint, after.watermark.fingerprint);
+    assert.equal(sourceWatermarksEqual(before.watermark, after.watermark), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("new rollout files during collection trigger a complete retry", async () => {
   const { root, directory } = await createRolloutFixture([100]);
   const newFile = resolve(
