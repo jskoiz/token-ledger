@@ -6,6 +6,8 @@ import {
   usageCallCount,
 } from "../lib/token-ledger-usage.mjs";
 
+export { chooseBinSize } from "./token-ledger-image-layout.mjs";
+
 const RESET = "\u001b[0m";
 const PRIMARY_STYLE = [38, 2, 255, 255, 255];
 const SECONDARY_STYLE = [38, 2, 155, 155, 155];

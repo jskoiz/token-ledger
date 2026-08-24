@@ -3,6 +3,22 @@ import test from "node:test";
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  aggregateCacheRange,
+  buildCacheReportData,
+} from "../bin/token-ledger-cache-data.mjs";
+import {
+  compact,
+  escapeXml,
+  fastShade,
+  shiftCalendarDate,
+  svgRect,
+  svgText,
+  textWidth,
+  truncateText,
+  TREND_IMAGE_MODEL_COLORS,
+} from "../bin/token-ledger-image-primitives.mjs";
+import { chooseBinSize } from "../bin/token-ledger-image-layout.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const RENDERER_FILES = [
@@ -72,4 +88,25 @@ test("image renderer imports remain acyclic", async () => {
     cacheSource,
     /from ["']\.\/token-ledger-trend-image\.mjs["']/,
   );
+});
+
+test("renderer entry points retain their public helper exports", async () => {
+  const [cache, trend, terminal] = await Promise.all([
+    import("../bin/token-ledger-cache-image.mjs"),
+    import("../bin/token-ledger-trend-image.mjs"),
+    import("../bin/token-ledger-trend-terminal.mjs"),
+  ]);
+
+  assert.equal(cache.aggregateCacheRange, aggregateCacheRange);
+  assert.equal(cache.buildCacheReportData, buildCacheReportData);
+  assert.equal(trend.escapeXml, escapeXml);
+  assert.equal(trend.compact, compact);
+  assert.equal(trend.fastShade, fastShade);
+  assert.equal(trend.shiftCalendarDate, shiftCalendarDate);
+  assert.equal(trend.svgRect, svgRect);
+  assert.equal(trend.svgText, svgText);
+  assert.equal(trend.textWidth, textWidth);
+  assert.equal(trend.truncateText, truncateText);
+  assert.equal(trend.TREND_IMAGE_MODEL_COLORS, TREND_IMAGE_MODEL_COLORS);
+  assert.equal(terminal.chooseBinSize, chooseBinSize);
 });

@@ -25,6 +25,18 @@ import {
 } from "./token-ledger-image-primitives.mjs";
 import { usageBucketsInRange } from "../lib/token-ledger-usage.mjs";
 
+export {
+  TREND_IMAGE_MODEL_COLORS,
+  escapeXml,
+  compact,
+  fastShade,
+  shiftCalendarDate,
+  svgRect,
+  svgText,
+  textWidth,
+  truncateText,
+} from "./token-ledger-image-primitives.mjs";
+
 const MODEL_ORDER = [
   "Luna",
   "Sol",
