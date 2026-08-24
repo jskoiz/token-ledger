@@ -201,7 +201,7 @@ test("empty thread settings reset the service tier for the next turn", async () 
   }
 });
 
-test("collector applies current Sol and Daybreak Red purchased-credit rates", async () => {
+test("collector applies current Sol and priority Daybreak Red purchased-credit rates", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
   const threadId = "22222222-2222-4222-8222-222222222222";
   try {
@@ -217,6 +217,18 @@ test("collector applies current Sol and Daybreak Red purchased-credit rates", as
           "turn-red",
           "gpt-5.5-cyber",
         ),
+        {
+          timestamp: "2026-08-18T11:01:00.000Z",
+          type: "event_msg",
+          payload: {
+            type: "thread_settings_applied",
+            thread_settings: {
+              model: "gpt-5.5-cyber",
+              reasoning_effort: "medium",
+              service_tier: "priority",
+            },
+          },
+        },
         tokenCount("2026-08-18T11:01:01.000Z", 200, 100),
       ]),
     );
@@ -232,7 +244,7 @@ test("collector applies current Sol and Daybreak Red purchased-credit rates", as
     assert.ok(Math.abs(snapshot.events[0].rateCardCredits - 0.0131) < 1e-12);
     assert.equal(snapshot.events[1].model, "daybreak-red");
     assert.ok(
-      Math.abs(snapshot.events[1].rateCardCredits - 0.0440625) < 1e-12,
+      Math.abs(snapshot.events[1].rateCardCredits - 0.11015625) < 1e-12,
     );
   } finally {
     await rm(root, { recursive: true, force: true });

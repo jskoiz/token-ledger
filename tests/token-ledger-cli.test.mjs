@@ -1304,6 +1304,10 @@ test("purchased-credit rates normalize exact current model identifiers", () => {
     assert.equal(normalizeCodexCreditModel(model), "daybreak-red");
   }
   assert.equal(normalizeCodexCreditModel("gpt-daybreak-blue"), "daybreak-blue");
+  assert.equal(codexCreditMultiplier("daybreak-red", "fast"), 2.5);
+  assert.equal(codexCreditMultiplier("daybreak-red", "priority"), 2.5);
+  assert.equal(codexCreditMultiplier("daybreak-blue", "fast"), 2.5);
+  assert.equal(codexCreditMultiplier("daybreak-blue", "priority"), 2.5);
   assert.equal(codexCreditMultiplier("gpt-daybreak-red", "fast"), 2.5);
   assert.equal(codexCreditMultiplier("gpt-daybreak-blue", "fast"), 2.5);
   assert.equal(codexCreditMultiplier("gpt-daybreak-red-latest", "fast"), null);
@@ -3180,6 +3184,8 @@ test("purchased-credit calculator applies current rows and fast tiers", () => {
 
   assert.equal(credits("gpt-5.6-sol"), 610);
   assert.equal(credits("gpt-5.5-cyber"), 2_218.75);
+  assert.equal(credits("daybreak-red", "priority"), 5_546.875);
+  assert.equal(credits("daybreak-blue", "fast"), 1_525);
   assert.equal(credits("gpt-5.6-sol", " Priority "), 1_525);
   assert.equal(credits("gpt-5.5", "FAST"), 2_218.75);
   assert.equal(credits("gpt-5.4", "fast"), 887.5);
@@ -3547,6 +3553,71 @@ test("fast-mode turns use model-specific credit weights in burn allocation", () 
   // 250 fast Sol credits vs 125 standard GPT-5.5 credits: 25% splits 2:1.
   assert.ok(Math.abs(day.values.get("Sol") - 16.6667) < 0.01);
   assert.ok(Math.abs(day.values.get("GPT-5.5") - 8.3333) < 0.01);
+});
+
+test("canonical Daybreak fast tiers retain rate-card burn weights", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+  const resetsAt = Date.parse("2026-08-16T00:00:00.000Z") / 1_000;
+  const event = (model, serviceTier) => ({
+    timestamp: "2026-08-12T12:00:00.000Z",
+    model,
+    serviceTier,
+    totalTokens: 1_000_000,
+    inputTokens: 1_000_000,
+    cachedInputTokens: 0,
+    outputTokens: 0,
+  });
+  const snapshot = {
+    events: [
+      event("daybreak-red", "priority"),
+      event("daybreak-blue", "fast"),
+      event("gpt-5.5", null),
+    ],
+    quotaObservations: [
+      {
+        timestamp: "2026-08-12T06:00:00.000Z",
+        usedPercent: 0,
+        windowMinutes: 10_080,
+        resetsAt,
+      },
+      {
+        timestamp: "2026-08-12T18:00:00.000Z",
+        usedPercent: 25,
+        windowMinutes: 10_080,
+        resetsAt,
+      },
+    ],
+  };
+
+  const trend = buildUsageTrend(snapshot, bounds);
+  const burn = buildBurnDayBins(trend, bounds, { days: 7, binSize: 1 });
+  const day = burn.bins.find((bin) => bin.startDateString === "2026-08-12");
+
+  assert.equal(trend.allocationMethod, "rate-card weights");
+  // Daybreak credits are 25 + 8 + 4 standard credit units here, so the
+  // combined Daybreak share is 33/37 of the observed 25-point drain.
+  assert.ok(Math.abs(day.values.get("Daybreak") - 22.2973) < 0.01);
+  assert.ok(Math.abs(day.values.get("GPT-5.5") - 2.7027) < 0.01);
+});
+
+test("purchased-credit reports rate canonical Daybreak fast tiers", () => {
+  const output = renderCostTerminal({
+    events: [{
+      model: "daybreak-red",
+      serviceTier: "priority",
+      totalTokens: 1_000_000,
+      inputTokens: 1_000_000,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+    }],
+    bounds: weekBounds("2026-08-23", "UTC"),
+    basis: "codex-credits",
+  });
+
+  assert.match(output, /Daybreak Red/);
+  assert.match(output, /Total rated amount: 781\.250 credits/);
+  assert.match(output, /Rated token coverage: 100\.0%/);
+  assert.match(output, /Unrated tokens: 0/);
 });
 
 test("the report command writes the dashboard image by default", () => {
