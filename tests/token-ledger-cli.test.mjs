@@ -24,6 +24,7 @@ import {
   run,
   sanitizeTerminalText,
   DEFAULT_SNAPSHOT,
+  loadSnapshot,
   snapshotCacheIsFresh,
   snapshotFreshness,
   snapshotNeedsRefresh,
@@ -439,6 +440,42 @@ test("refresh and source failures retain context without absolute paths", async 
         return true;
       },
     );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("automatic refresh falls back to a readable cached snapshot", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-stale-fallback-"));
+  const snapshotPath = resolve(root, "stale-snapshot.json");
+  const codexHome = resolve(root, "codex-home");
+  const snapshot = {
+    events: [{
+      timestamp: "2026-08-20T18:00:00.000Z",
+      model: "gpt-5.6-luna",
+      project: "cached-project",
+      totalTokens: 1_000,
+    }],
+  };
+  try {
+    await mkdir(resolve(codexHome, "sessions"), { recursive: true });
+    // A source file newer than the cache triggers the automatic refresh.
+    await writeFile(resolve(codexHome, "sessions", "new.jsonl"), "");
+    // Refreshing fails while opening the malformed state database, leaving the
+    // readable cached snapshot available for the stale-fallback path.
+    await writeFile(resolve(codexHome, "state_5.sqlite"), "not a sqlite database");
+    await writeFile(snapshotPath, JSON.stringify(snapshot));
+    const staleTime = new Date(Date.now() - 2 * 60 * 60 * 1_000);
+    await utimes(snapshotPath, staleTime, staleTime);
+
+    const options = parseArgs(["week"]);
+    options.input = snapshotPath;
+    options.inputExplicit = false;
+    options.codexHome = codexHome;
+
+    const result = await loadSnapshot(options);
+    assert.equal(result.sourceStatus, "stale-fallback");
+    assert.deepEqual(result.snapshot, snapshot);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

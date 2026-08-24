@@ -461,6 +461,8 @@ test("the report SVG contains every required section", () => {
   // Partial-day treatment for the noon cutoff.
   assert.match(svg, /PARTIAL/);
   assert.match(svg, /THROUGH 12:09 PM/);
+  // Exact uncached input remains unmarked even when multiple models contribute.
+  assert.doesNotMatch(svg, /≈[^<]*uncached/);
   // Dynamic labels are XML escaped and no numeric garbage leaks through.
   assert.ok(!svg.includes("<script>"));
   assert.match(svg, /&lt;script&gt;/);

@@ -1566,7 +1566,7 @@ export function renderTrendImage({
       stroke: "rgba(34,197,143,.35)",
       "stroke-width": 1,
     }));
-    const approxUncached = vm.models.filter((row) => row.uncachedInputTokens > 0).length > 1;
+    const approxUncached = vm.coverage.estimated;
     elements.push(svgText({
       x: left + 10,
       y: stripY + 15,

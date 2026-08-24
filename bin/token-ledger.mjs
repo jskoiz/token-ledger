@@ -902,7 +902,7 @@ export function snapshotFreshness(snapshot = {}, nowMs = Date.now()) {
 // Resolves the snapshot together with how its freshness was established, so
 // report output can distinguish source-verified data from explicit or
 // unchecked snapshots instead of claiming everything is current.
-async function loadSnapshot(options) {
+export async function loadSnapshot(options) {
   if (options.refresh) {
     return {
       snapshot: await refreshSnapshot(options),
@@ -963,10 +963,17 @@ async function loadSnapshot(options) {
     );
   }
   if (snapshotNeedsRefresh(snapshotStat.mtimeMs, latestSourceMtimeMs)) {
-    return {
-      snapshot: await refreshSnapshot(options),
-      sourceStatus: "verified-current",
-    };
+    try {
+      return {
+        snapshot: await refreshSnapshot(options),
+        sourceStatus: "verified-current",
+      };
+    } catch {
+      return {
+        snapshot: await readSnapshot(options.input),
+        sourceStatus: "stale-fallback",
+      };
+    }
   }
   return {
     snapshot: await readSnapshot(options.input),
