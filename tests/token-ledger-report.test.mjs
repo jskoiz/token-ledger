@@ -362,6 +362,28 @@ test("future events past the cutoff never reach the daily rows", () => {
   assert.equal(vm.coverage.modelCalls, 1);
 });
 
+test("partial cutoff marks its day and distinguishes later unobserved days", () => {
+  const snapshot = snapshotOf(
+    [
+      event(20, 8, { totalTokens: 100 }),
+      event(20, 12, { totalTokens: 900 }),
+    ],
+    [],
+    { generatedAt: iso(20, 9) },
+  );
+  const vm = build(snapshot, {
+    sourceStatus: "stale-fallback",
+    reportTimeMs: ms(23, 12),
+  });
+
+  assert.equal(vm.meta.observedThroughDateString, "2026-08-20");
+  assert.equal(vm.daily[3].dateString, "2026-08-20");
+  assert.equal(vm.daily[3].observed, true);
+  assert.equal(vm.daily[3].partial, true);
+  assert.ok(vm.daily.slice(4).every((row) => row.observed === false));
+  assert.ok(vm.daily.slice(4).every((row) => row.totalTokens === 0));
+});
+
 // ----------------------------------------------------------------- rendering
 
 function richSnapshot() {

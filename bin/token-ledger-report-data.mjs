@@ -373,6 +373,23 @@ export function buildTrendReportViewModel({
   const dayIndexByString = new Map(
     dayStrings.map((dateString, index) => [dateString, index]),
   );
+  const lastObservedMs = Math.max(startMs, effectiveEndMs - 1);
+  const lastObservedDateString = localDateString(lastObservedMs, timeZone);
+  const lastObservedDayIndex = dayIndexByString.get(lastObservedDateString);
+  const lastObservedDayEndMs =
+    lastObservedDayIndex === undefined
+      ? null
+      : zonedMidnight(
+          shiftCalendarDate(lastObservedDateString, 1),
+          timeZone,
+        ).getTime();
+  const partialDayIndex =
+    partialFinalDay &&
+    effectiveEndMs > startMs &&
+    lastObservedDayIndex !== undefined &&
+    effectiveEndMs !== lastObservedDayEndMs
+      ? lastObservedDayIndex
+      : null;
   const daily = dayStrings.map((dateString, index) => ({
     dateString,
     totalTokens: 0,
@@ -383,7 +400,9 @@ export function buildTrendReportViewModel({
     cacheRatePercent: null,
     modelCalls: 0,
     estimated: false,
-    partial: partialFinalDay && index === rangeDays - 1,
+    observed: !partialFinalDay ||
+      (lastObservedDayIndex !== undefined && index <= lastObservedDayIndex),
+    partial: partialDayIndex === index,
     models: new Map(),
   }));
 
@@ -574,6 +593,8 @@ export function buildTrendReportViewModel({
       startDateString: bounds.startDateString,
       endDateString: bounds.endDateString,
       partialFinalDay,
+      observedThroughDateString:
+        lastObservedDayIndex === undefined ? null : lastObservedDateString,
       reportThroughMs: effectiveEndMs,
       meterObservedThroughMs: meter.observedThroughMs,
       sourceStatus,

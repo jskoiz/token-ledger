@@ -351,6 +351,7 @@ function binDailyRows(daily, binSize) {
       modelCalls: rows.reduce((sum, row) => sum + row.modelCalls, 0),
       estimated: rows.some((row) => row.estimated),
       partial: rows.some((row) => row.partial),
+      unobserved: rows.every((row) => row.observed === false),
       models: [...models.values()].sort(
         (left, right) => modelSort(left.model, right.model),
       ),
@@ -496,7 +497,9 @@ export function renderTrendImage({
       caption: summary.totalDeltaPercent !== null
         ? "vs prior equivalent period"
         : null,
-      sparkline: vm.daily.map((row) => row.totalTokens),
+      sparkline: vm.daily
+        .filter((row) => row.observed !== false)
+        .map((row) => row.totalTokens),
     });
     const cacheKnown = summary.inputTokens > 0;
     cards.push({
@@ -953,6 +956,7 @@ export function renderTrendImage({
           approximate: bin.approximate,
           values: bin.values,
           partial: tokenBins[index]?.partial ?? false,
+          unobserved: tokenBins[index]?.unobserved ?? true,
           estimated: false,
         }))
       : tokenBins;
@@ -1144,6 +1148,29 @@ export function renderTrendImage({
     bins.forEach((bin, binIndex) => {
       const centerX = plotLeft + (binIndex + 0.5) * slotWidth;
       const x = centerX - barWidth / 2;
+      if (bin.unobserved) {
+        elements.push(svgRect(centerX - slotWidth / 2 + 2, plotTop, slotWidth - 4, plotHeight, {
+          fill: "rgba(255,255,255,.025)",
+        }));
+        if (isLabeledColumn(binIndex)) {
+          elements.push(chip(centerX, plotBottom + 21, "UNOBSERVED", {
+            fill: "rgba(255,255,255,.04)",
+            stroke: COLORS.baseline,
+            color: COLORS.muted,
+            size: 9.5,
+            anchor: "middle",
+          }).markup);
+          elements.push(svgText({
+            x: centerX,
+            y: plotBottom + 45,
+            value: binDateLabel(bin, timeZone),
+            fill: COLORS.secondary,
+            size: 14,
+            anchor: "middle",
+          }));
+        }
+        return;
+      }
       if (bin.partial) {
         elements.push(svgRect(centerX - slotWidth / 2 + 2, plotTop, slotWidth - 4, plotHeight, {
           fill: "rgba(255,255,255,.03)",
@@ -1482,6 +1509,15 @@ export function renderTrendImage({
     cacheBins.forEach((bin, index) => {
       const centerX = chartLeft + (index + 0.5) * slot;
       const columnWidth = Math.min(30, Math.max(8, slot * 0.5));
+      if (bin.unobserved) {
+        elements.push(svgRect(
+          centerX - columnWidth / 2,
+          lineTop,
+          columnWidth,
+          columnsBottom - lineTop,
+          { fill: "rgba(255,255,255,.025)" },
+        ));
+      }
       const columnHeight = (bin.inputTokens / maxInput) * columnsHeight;
       if (columnHeight > 0.4) {
         elements.push(svgRect(centerX - columnWidth / 2, columnsBottom - columnHeight, columnWidth, columnHeight, {
@@ -1501,14 +1537,24 @@ export function renderTrendImage({
             anchor: "middle",
           }));
         }
-        elements.push(svgText({
-          x: centerX,
-          y: columnsBottom + 15,
-          value: binDateLabel(bin, timeZone),
-          fill: COLORS.muted,
-          size: 10,
-          anchor: "middle",
-        }));
+        if (bin.unobserved) {
+          elements.push(chip(centerX, columnsBottom + 13, "UNOBSERVED", {
+            fill: "rgba(255,255,255,.04)",
+            stroke: COLORS.baseline,
+            color: COLORS.muted,
+            size: 8.5,
+            anchor: "middle",
+          }).markup);
+        } else {
+          elements.push(svgText({
+            x: centerX,
+            y: columnsBottom + 15,
+            value: binDateLabel(bin, timeZone),
+            fill: COLORS.muted,
+            size: 10,
+            anchor: "middle",
+          }));
+        }
       }
     });
 
