@@ -959,6 +959,7 @@ test("coverage preserves unknown totals after safe-counter saturation", async ()
   const threadId = "13131313-1313-4131-8131-131313131313";
   const firstTimestamp = "2026-08-18T21:00:00.000Z";
   const secondTimestamp = "2026-08-18T21:01:00.000Z";
+  const thirdTimestamp = "2026-08-18T21:02:00.000Z";
   const huge = Number.MAX_SAFE_INTEGER;
   const totalOnlyRecord = (timestamp) => ({
     timestamp,
@@ -981,8 +982,10 @@ test("coverage preserves unknown totals after safe-counter saturation", async ()
       serialize([
         ...turnStart(firstTimestamp, "saturation-detailed"),
         tokenCount(firstTimestamp, huge, huge),
-        ...turnStart(secondTimestamp, "saturation-unknown"),
-        totalOnlyRecord(secondTimestamp),
+        ...turnStart(secondTimestamp, "saturation-detailed-second"),
+        tokenCount(secondTimestamp, huge, huge),
+        ...turnStart(thirdTimestamp, "saturation-unknown"),
+        totalOnlyRecord(thirdTimestamp),
       ]),
     );
 
@@ -994,9 +997,11 @@ test("coverage preserves unknown totals after safe-counter saturation", async ()
     });
     const [thread] = snapshot.threads;
     assert.equal(snapshot.coverage.observedTokens, huge);
-    assert.equal(snapshot.coverage.detailedTokens, huge);
-    assert.equal(snapshot.coverage.unknownBreakdownTokens, huge);
-    assert.equal(snapshot.coverage.detailedPercent, 50);
+    assert.ok(snapshot.coverage.detailedTokens < huge);
+    assert.ok(snapshot.coverage.unknownBreakdownTokens < huge);
+    assert.ok(
+      Math.abs(snapshot.coverage.detailedPercent - (2 / 3) * 100) < 1e-12,
+    );
     assert.equal(thread.unknownBreakdownTokens, huge);
     assert.equal(thread.coverage, "partial");
   } finally {

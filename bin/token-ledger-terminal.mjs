@@ -285,10 +285,12 @@ export function quotaCycleSummary(snapshot = {}, displayedEvents = []) {
             tokens,
             { allowFractional },
           );
+        } else if (tokens > 0) {
+          acc.hasUnrated = true;
         }
         return acc;
       },
-      { tokens: 0, credits: 0, ratedTokens: 0 },
+      { tokens: 0, credits: 0, ratedTokens: 0, hasUnrated: false },
     );
   const cycleEndMs = observedThroughMs + 1;
   const cycle = sumUsage(
@@ -307,7 +309,10 @@ export function quotaCycleSummary(snapshot = {}, displayedEvents = []) {
   // when every event in the cycle is rated, and fall back to raw token
   // share otherwise.
   const creditsUsable =
-    cycle.tokens > 0 && cycle.ratedTokens === cycle.tokens && cycle.credits > 0;
+    !cycle.hasUnrated &&
+    cycle.tokens > 0 &&
+    cycle.ratedTokens === cycle.tokens &&
+    cycle.credits > 0;
   const displayedSharePercent = creditsUsable
     ? (displayed.credits / cycle.credits) * 100
     : cycle.tokens

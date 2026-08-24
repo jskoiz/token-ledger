@@ -13,6 +13,7 @@ import {
 } from "./token-ledger-trend-image.mjs";
 import { chooseBinSize } from "./token-ledger-trend-terminal.mjs";
 import {
+  checkedTokenPartitionAdd,
   checkedTokenAdd,
   tokenValue,
   splitUsageBucketsAtBoundaries,
@@ -362,19 +363,15 @@ function accumulateRange(snapshot, bounds, bins = null, dateIndexByString = null
         { allowFractional: true },
       );
     }
+    checkedTokenPartitionAdd(totals, breakdown.totalTokens, {
+      detailed: breakdown.detailed,
+    });
+    if (bin) {
+      checkedTokenPartitionAdd(bin, breakdown.totalTokens, {
+        detailed: breakdown.detailed,
+      });
+    }
     if (!breakdown.detailed) {
-      totals.unknownBreakdownTokens = checkedTokenAdd(
-        totals.unknownBreakdownTokens,
-        breakdown.totalTokens,
-        { allowFractional: true },
-      );
-      if (bin) {
-        bin.unknownBreakdownTokens = checkedTokenAdd(
-          bin.unknownBreakdownTokens,
-          breakdown.totalTokens,
-          { allowFractional: true },
-        );
-      }
       continue;
     }
 
@@ -383,20 +380,10 @@ function accumulateRange(snapshot, bounds, bins = null, dateIndexByString = null
       detailedCallCount,
       { allowFractional: true },
     );
-    totals.detailedTokens = checkedTokenAdd(
-      totals.detailedTokens,
-      breakdown.totalTokens,
-      { allowFractional: true },
-    );
     if (bin) {
       bin.detailedEventCount = checkedTokenAdd(
         bin.detailedEventCount,
         detailedCallCount,
-        { allowFractional: true },
-      );
-      bin.detailedTokens = checkedTokenAdd(
-        bin.detailedTokens,
-        breakdown.totalTokens,
         { allowFractional: true },
       );
     }
