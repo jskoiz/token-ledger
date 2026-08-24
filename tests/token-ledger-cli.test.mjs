@@ -1336,6 +1336,72 @@ test("combo trend bins actual tokens and overlays an explicit reset marker", () 
   assert.match(drainOutput, /Columns sum to observed meter drops/);
 });
 
+test("trend reports display Terra usage and meter attribution", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 1);
+  const resetsAt = Date.parse("2026-08-16T00:00:00.000Z") / 1_000;
+  const snapshot = {
+    generatedAt: "2026-08-15T18:00:00.000Z",
+    events: [
+      {
+        timestamp: "2026-08-15T12:00:00.000Z",
+        model: "gpt-5.6-terra",
+        totalTokens: 1_000,
+        inputTokens: 900,
+        cachedInputTokens: 450,
+        outputTokens: 100,
+      },
+    ],
+    quotaObservations: [
+      {
+        timestamp: "2026-08-15T06:00:00.000Z",
+        usedPercent: 0,
+        windowMinutes: 10_080,
+        resetsAt,
+      },
+      {
+        timestamp: "2026-08-15T18:00:00.000Z",
+        usedPercent: 10,
+        windowMinutes: 10_080,
+        resetsAt,
+      },
+    ],
+  };
+  const trend = buildUsageTrend(snapshot, bounds);
+
+  const output = renderTrendPlain({
+    snapshot,
+    bounds,
+    trend,
+    days: 1,
+    options: { width: 82 },
+  });
+  assert.match(output, /■ Terra 1\.00K/);
+  assert.match(output, /Terra 100 T\/p · 10\.0 pts/);
+  assert.ok(output.split("\n").every((line) => line.length <= 82));
+
+  const drainOutput = renderTrendPlain({
+    snapshot,
+    bounds,
+    trend,
+    days: 1,
+    options: { width: 82, drain: true },
+  });
+  assert.match(drainOutput, /■ Terra 10\.0% of limit · 1\.00K tok/);
+  assert.match(drainOutput, /Terra 100 tok\/1%/);
+  assert.ok(drainOutput.split("\n").every((line) => line.length <= 82));
+
+  const svg = renderTrendImage({
+    snapshot,
+    bounds,
+    trend,
+    days: 1,
+    options: { imageWidth: 1_000 },
+  });
+  assert.match(svg, /data-model="Terra" data-value="1000" data-unit="tokens"/);
+  assert.match(svg, /CACHE RATE BY MODEL/);
+  assert.match(svg, /Terra/);
+});
+
 test("image trend renderer emits stacked model bars and a quota line", () => {
   const bounds = multiDayBounds("2026-08-15", "Pacific/Honolulu", 7);
   const resetOne = Date.parse("2026-08-11T10:00:00.000Z") / 1_000;

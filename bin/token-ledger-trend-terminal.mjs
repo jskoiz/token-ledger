@@ -39,6 +39,8 @@ const MODEL_ORDER = [
   "Unknown",
 ];
 
+const ATTRIBUTION_MODEL_ORDER = ["Luna", "Sol", "Terra"];
+
 function colorsEnabled(options = {}) {
   return options.forceColor ??
     (!options.plain && !process.env.NO_COLOR && Boolean(process.stdout.isTTY));
@@ -406,9 +408,26 @@ function frameLine(content, width) {
   return `│${fit(content, width - 2)}│`;
 }
 
+function wrapAttributionEntries(prefix, entries, width) {
+  const lines = [];
+  let line = prefix;
+  for (const entry of entries) {
+    const separator = line === prefix ? " · " : "   ";
+    const candidate = `${line}${separator}${entry}`;
+    if (visibleLength(candidate) <= width) {
+      line = candidate;
+      continue;
+    }
+    lines.push(line);
+    line = entry;
+  }
+  lines.push(line);
+  return lines;
+}
+
 function formatAttribution(trend, enabled, width, percentMode) {
   const rows = new Map((trend.models ?? []).map((row) => [row.model, row]));
-  const entries = ["Luna", "Sol"]
+  const entries = ATTRIBUTION_MODEL_ORDER
     .map((model) => {
       const row = rows.get(model);
       if (!row || !(row.tokensPerBurnPoint > 0)) return null;
@@ -418,30 +437,20 @@ function formatAttribution(trend, enabled, width, percentMode) {
     })
     .filter(Boolean);
   if (!entries.length) return [];
-  if (percentMode) {
-    const valueLine = colorize(
-      `Observed burn rate · ${entries.join("   ")}`,
-      SECONDARY_STYLE,
-      enabled,
-    );
-    const method = colorize(
-      `Columns sum to observed meter drops; model split via rate-card credit weights (card ${trend.rateCardAsOf}).`,
-      SECONDARY_STYLE,
-      enabled,
-    );
-    return [fit(valueLine, width - 2), fit(method, width - 2)];
-  }
-  const valueLine = colorize(
-    `ESTIMATE ONLY · quota attribution lens · ${entries.join("   ")}`,
-    SECONDARY_STYLE,
-    enabled,
+  const prefix = percentMode
+    ? "Observed burn rate"
+    : "ESTIMATE ONLY · quota attribution lens";
+  const valueLines = wrapAttributionEntries(prefix, entries, width - 2).map(
+    (line) => fit(colorize(line, SECONDARY_STYLE, enabled), width - 2),
   );
   const method = colorize(
-    `Rate-card/token weights, ${trend.rateCardAsOf}; separate from actual-token bars and not official quota math.`,
+    percentMode
+      ? `Columns sum to observed meter drops; model split via rate-card credit weights (card ${trend.rateCardAsOf}).`
+      : `Rate-card/token weights, ${trend.rateCardAsOf}; separate from actual-token bars and not official quota math.`,
     SECONDARY_STYLE,
     enabled,
   );
-  return [fit(valueLine, width - 2), fit(method, width - 2)];
+  return [...valueLines, fit(method, width - 2)];
 }
 
 function drainLabelLine(burnBins, plotWidth, leftWidth, rightWidth, enabled) {
