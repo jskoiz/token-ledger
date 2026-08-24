@@ -15,11 +15,6 @@ import {
   renderTerminal,
 } from "./token-ledger-terminal.mjs";
 import { buildUsageTrend, multiDayBounds } from "./token-ledger-trend.mjs";
-import {
-  renderTrendImage,
-  writeTrendPng,
-} from "./token-ledger-trend-image.mjs";
-import { renderCacheReportImage } from "./token-ledger-cache-image.mjs";
 import { renderTrendCombo } from "./token-ledger-trend-terminal.mjs";
 import { startInteractive } from "./token-ledger-tui.mjs";
 import {
@@ -1039,7 +1034,7 @@ async function loadSnapshot(options) {
   return readSnapshot(options.input);
 }
 
-function render(
+async function render(
   options,
   snapshot,
   bounds,
@@ -1051,6 +1046,9 @@ function render(
 ) {
   if (options.view === "trend") {
     if (options.image && options.cacheRate) {
+      const { renderCacheReportImage } = await import(
+        "./token-ledger-cache-image.mjs"
+      );
       return renderCacheReportImage({
         snapshot,
         bounds,
@@ -1060,6 +1058,9 @@ function render(
     }
     const trend = buildUsageTrend(snapshot, bounds);
     if (options.image) {
+      const { renderTrendImage } = await import(
+        "./token-ledger-trend-image.mjs"
+      );
       return renderTrendImage({
         snapshot,
         bounds,
@@ -1194,7 +1195,7 @@ export async function run(options, { nowMs } = {}) {
   const verifiedSourceTimeMs = options.autoRefresh && !options.inputExplicit
     ? reportTimeMs
     : undefined;
-  const output = render(
+  const output = await render(
     options,
     snapshot,
     bounds,
@@ -1210,6 +1211,7 @@ export async function run(options, { nowMs } = {}) {
   if (writingImage) {
     await mkdir(dirname(outputPath), { recursive: true });
     process.stderr.write(`Token Ledger: encoding ${imageLabel} PNG…\n`);
+    const { writeTrendPng } = await import("./token-ledger-trend-image.mjs");
     await writeTrendPng(output, outputPath);
     process.stderr.write(`Token Ledger: finished ${imageLabel} PNG.\n`);
     const lines = [

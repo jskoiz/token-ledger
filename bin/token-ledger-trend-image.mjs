@@ -1,7 +1,5 @@
 import { Buffer } from "node:buffer";
 
-import sharp from "sharp";
-
 import {
   buildBurnDayBins,
   buildUsageTrend,
@@ -2023,5 +2021,6 @@ export function renderTrendImage({
 }
 
 export async function writeTrendPng(svg, outputPath) {
+  const { default: sharp } = await import("sharp");
   await sharp(Buffer.from(svg, "utf8")).png().toFile(outputPath);
 }
