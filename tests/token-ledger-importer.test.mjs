@@ -880,6 +880,68 @@ test("source labels resolve structured, encoded, and plain thread sources", asyn
   }
 });
 
+test("collection retries when an inventoried rollout disappears mid-scan", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-source-mutation-"));
+  const firstId = "12121212-1212-4121-8121-121212121212";
+  const secondId = "34343434-3434-4343-8434-343434343434";
+  try {
+    const rolloutDirectory = resolve(root, "sessions", "2026", "08", "23");
+    await mkdir(rolloutDirectory, { recursive: true });
+    const rows = [
+      [firstId, "2026-08-23T10:00:00.000Z"],
+      [secondId, "2026-08-23T10:01:00.000Z"],
+    ];
+    await writeFile(
+      resolve(root, "session_index.jsonl"),
+      serialize(rows.map(([id, timestamp]) => ({
+        id,
+        thread_name: `thread-${id.slice(0, 4)}`,
+        updated_at: timestamp,
+      }))),
+    );
+    for (const [id, timestamp] of rows) {
+      await writeFile(
+        resolve(rolloutDirectory, `rollout-${id}.jsonl`),
+        serialize([
+          {
+            timestamp,
+            type: "session_meta",
+            payload: { id, source: "desktop", cwd: "project" },
+          },
+          ...turnStart(timestamp, `turn-${id.slice(0, 4)}`),
+          tokenCount(
+            new Date(Date.parse(timestamp) + 1_000).toISOString(),
+            100,
+            100,
+          ),
+        ]),
+      );
+    }
+
+    let removed = false;
+    const snapshot = await collectUsage(
+      {
+        output: resolve(root, "snapshot.json"),
+        codexHome: root,
+        includeArchived: true,
+        since: null,
+      },
+      async ({ current }) => {
+        if (current === 1 && !removed) {
+          removed = true;
+          await rm(resolve(rolloutDirectory, `rollout-${secondId}.jsonl`));
+        }
+      },
+    );
+
+    assert.equal(removed, true);
+    assert.equal(snapshot.coverage.filesScanned, 1);
+    assert.equal(snapshot.coverage.observedModelCalls, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("malformed usage and rate-limit payloads are ignored safely", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
   const threadId = "88888888-8888-4888-8888-888888888888";
