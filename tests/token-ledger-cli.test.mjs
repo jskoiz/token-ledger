@@ -46,14 +46,14 @@ import {
 import { creditsForUsage } from "../bin/token-ledger-rates.mjs";
 import {
   renderTrendImage,
-  textWidth,
-  truncateText,
   writeTrendPng,
 } from "../bin/token-ledger-trend-image.mjs";
+import { buildCacheReportData } from "../bin/token-ledger-cache-data.mjs";
+import { renderCacheReportImage } from "../bin/token-ledger-cache-image.mjs";
 import {
-  buildCacheReportData,
-  renderCacheReportImage,
-} from "../bin/token-ledger-cache-image.mjs";
+  textWidth,
+  truncateText,
+} from "../bin/token-ledger-image-primitives.mjs";
 import {
   INTERACTIVE_FOOTER,
   INTERACTIVE_HELP,
