@@ -565,7 +565,9 @@ export function renderTrendImage({
       color: COLORS.ink,
       detail: `${days}-day average`,
     });
-    paceNote = "No usable weekly meter drain in this range, so runway cannot be estimated.";
+    paceNote = hasLine
+      ? "No usable weekly meter drain in this range, so runway cannot be estimated."
+      : "No account-wide weekly meter is available, so runway cannot be estimated.";
   }
 
   // ---- Layout ----
@@ -692,7 +694,9 @@ export function renderTrendImage({
   const subtitle = `${localDateLabel(bounds.startDateString, bounds.timeZone)} – ${localDateLabel(bounds.endDateString, bounds.timeZone)}, ${yearLabel} · ${bounds.timeZone}`;
   const description = percentMode
     ? "Dark report card: compact actual-token stat cards beside pace and runway, stacked columns of observed weekly-meter drain with an explicitly estimated per-model split, the OpenAI-reported weekly limit remaining as an amber line, a partial final day ending at report time, a compressed cache-rate-by-period strip, and top projects beside per-model cache rates."
-    : "Dark report card: compact model stat cards with week-over-week delta chips beside pace and runway, stacked columns of local token volume by model with fast-mode usage in a darker shade, the OpenAI-reported weekly limit remaining as a smoothed amber line, a partial final day ending at report time, a compressed cache-rate-by-period strip, and top projects beside per-model cache rates.";
+    : hasLine
+      ? "Dark report card: compact model stat cards with week-over-week delta chips beside pace and runway, stacked columns of local token volume by model with fast-mode usage in a darker shade, the OpenAI-reported weekly limit remaining as a smoothed amber line, a partial final day ending at report time, a compressed cache-rate-by-period strip, and top projects beside per-model cache rates."
+      : "Dark report card: compact model stat cards with week-over-week delta chips beside pace and runway, stacked columns of local token volume by model with fast-mode usage in a darker shade, no account-wide weekly meter observation in this range, a partial final day ending at report time, a compressed cache-rate-by-period strip, and top projects beside per-model cache rates.";
 
   const elements = [
     `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="trend-title trend-description" data-report-mode="${percentMode ? "meter-drain" : "actual-tokens"}" data-time-domain="${partialFinalBin ? "through-report" : "full-range"}">`,

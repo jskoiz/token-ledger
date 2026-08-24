@@ -188,6 +188,13 @@ export function weeklyQuotaObservations(snapshot = {}) {
   );
   if (accountScoped.length) {
     observations = accountScoped;
+  } else if (
+    observations.some(
+      (observation) => observation.scope === "named",
+    )
+  ) {
+    // Explicitly named-only input has no account-wide meter to report.
+    observations = [];
   } else if (observations.some((observation) => observation.limitKey)) {
     const groups = new Map();
     for (const observation of observations) {
@@ -199,8 +206,9 @@ export function weeklyQuotaObservations(snapshot = {}) {
     const accountWide = [...groups.values()].filter((group) =>
       group.every((observation) => !observation.limitName),
     );
-    const pool = accountWide.length ? accountWide : [...groups.values()];
-    observations = pool.sort((left, right) => right.length - left.length)[0];
+    observations = accountWide.length
+      ? accountWide.sort((left, right) => right.length - left.length)[0]
+      : [];
   } else {
     const accountWide = observations.filter(
       (observation) => !observation.limitName,

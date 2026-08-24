@@ -488,6 +488,7 @@ export function renderTrendCombo({
   // and shows the observed drop per column in a label row instead.
   const meterUsable = Boolean(trend.available && burn.totalPercent > 0);
   const percentMode = Boolean(options.drain) && meterUsable;
+  const meterAvailable = Boolean(trend.available && (trend.points ?? []).length > 0);
   const barBins = percentMode ? burn.bins : actual.bins;
   const binTotal = (bin) => (percentMode ? bin.totalPercent : bin.totalTokens);
   const maxLeft = niceCeiling(
@@ -565,7 +566,7 @@ export function renderTrendCombo({
     `┌${"─".repeat(frameWidth - 2)}┐`,
     frameLine(
       colorize(
-        `TOKEN LEDGER · ${percentMode ? "OBSERVED LIMIT DRAIN + WEEKLY METER" : "ACTUAL TOKENS + WEEKLY QUOTA"} · ${localDateLabel(bounds.startDateString, bounds.timeZone)} – ${localDateLabel(bounds.endDateString, bounds.timeZone)} · ${days}D`,
+        `TOKEN LEDGER · ${percentMode ? "OBSERVED LIMIT DRAIN + WEEKLY METER" : meterAvailable ? "ACTUAL TOKENS + WEEKLY QUOTA" : "ACTUAL TOKENS"} · ${localDateLabel(bounds.startDateString, bounds.timeZone)} – ${localDateLabel(bounds.endDateString, bounds.timeZone)} · ${days}D`,
         PRIMARY_STYLE,
         enabled,
       ),
@@ -575,9 +576,9 @@ export function renderTrendCombo({
       colorize(
         percentMode
           ? "BARS = observed limit % consumed per day by model · LINE = meter remaining · one percent scale"
-          : meterUsable
+          : meterAvailable
             ? "BARS = actual token quantity by model · LINE = meter remaining · -% row = observed drain per column"
-            : "BARS = actual token quantity by model · LINE = observed remaining quota · separate scales",
+            : "BARS = actual token quantity by model · no account-wide weekly meter observed",
         SECONDARY_STYLE,
         enabled,
       ),
@@ -593,7 +594,9 @@ export function renderTrendCombo({
         ? percent(leftValue)
         : compact(leftValue)
       : "";
-    const rightLabel = axisRows.includes(row) ? `${Math.round(rightValue)}%` : "";
+    const rightLabel = meterAvailable && axisRows.includes(row)
+      ? `${Math.round(rightValue)}%`
+      : "";
     const content = chart[row]
       .map(({ char, style }) => colorize(char, style, enabled))
       .join("");
@@ -640,8 +643,12 @@ export function renderTrendCombo({
     const rightLegendWidth = innerWidth - 2 - leftLegendWidth;
     lines.push(frameLine(`${fit(legend[index], leftLegendWidth)}  ${fit(legend[index + 1] ?? "", rightLegendWidth)}`, frameWidth));
   }
-  lines.push(frameLine(colorize("LINE · OBSERVED WEEKLY QUOTA REMAINING · RIGHT AXIS", LINE_STYLE, enabled), frameWidth));
-  lines.push(frameLine(colorize("↟ reset marker returns the line to 100%; it never rises within a cycle", SECONDARY_STYLE, enabled), frameWidth));
+  if (meterAvailable) {
+    lines.push(frameLine(colorize("LINE · OBSERVED WEEKLY QUOTA REMAINING · RIGHT AXIS", LINE_STYLE, enabled), frameWidth));
+    lines.push(frameLine(colorize("↟ reset marker returns the line to 100%; it never rises within a cycle", SECONDARY_STYLE, enabled), frameWidth));
+  } else {
+    lines.push(frameLine(colorize("NO ACCOUNT-WIDE WEEKLY METER OBSERVED", SECONDARY_STYLE, enabled), frameWidth));
+  }
   for (const line of formatAttribution(trend, enabled, frameWidth, percentMode)) {
     lines.push(frameLine(line, frameWidth));
   }
