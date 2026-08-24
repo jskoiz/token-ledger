@@ -9,7 +9,15 @@ const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 function isIgnored(path) {
   const result = spawnSync(
     "git",
-    ["check-ignore", "--no-index", "--quiet", "--", path],
+    [
+      "-c",
+      "core.excludesFile=/dev/null",
+      "check-ignore",
+      "--no-index",
+      "--verbose",
+      "--",
+      path,
+    ],
     { cwd: REPOSITORY_ROOT, encoding: "utf8" },
   );
   assert.ifError(result.error);
@@ -17,7 +25,12 @@ function isIgnored(path) {
     result.status === 0 || result.status === 1,
     result.stderr || `git check-ignore exited with ${result.status}`,
   );
-  return result.status === 0;
+  if (result.status !== 0) return false;
+  const source = result.stdout.trim().split("\t", 1)[0].replace(/:\d+:.*$/, "");
+  const sourcePath = source.startsWith("/")
+    ? resolve(source)
+    : resolve(REPOSITORY_ROOT, source);
+  return sourcePath === resolve(REPOSITORY_ROOT, ".gitignore");
 }
 
 test("only default report PNG families are ignored at the repository root", () => {
