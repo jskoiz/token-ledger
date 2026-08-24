@@ -288,9 +288,12 @@ export function normalizeQuotaTimeline(observations) {
 export function eventCredits(event) {
   // Recompute from token components first so the current rate card applies;
   // snapshots can carry credits stored under an outdated card. Fast-mode
-  // turns (service tier "priority") debit the limit at a higher rate.
+  // turns (service tiers "priority" and "fast") debit the limit at a higher
+  // rate.
   const multiplier =
-    event.serviceTier === "priority" ? FAST_MODE_MULTIPLIER : 1;
+    event.serviceTier === "priority" || event.serviceTier === "fast"
+      ? FAST_MODE_MULTIPLIER
+      : 1;
   const computed = creditsForUsage(event.model, event);
   if (Number.isFinite(computed) && computed >= 0) return computed * multiplier;
   const stored = Number(event.rateCardCredits);

@@ -1715,6 +1715,7 @@ test("fast-mode turns weigh 1.5x in the burn allocation", () => {
         inputTokens: 1_000_000,
         cachedInputTokens: 0,
         outputTokens: 0,
+        serviceTier: "fast",
       },
     ],
     quotaObservations: [
@@ -1735,9 +1736,9 @@ test("fast-mode turns weigh 1.5x in the burn allocation", () => {
   const trend = buildUsageTrend(snapshot, bounds);
   const burn = buildBurnDayBins(trend, bounds, { days: 7, binSize: 1 });
   const day = burn.bins.find((bin) => bin.startDateString === "2026-08-12");
-  // 187.5 fast credits vs 125 normal credits: 25% splits 15 / 10.
-  assert.ok(Math.abs(day.values.get("Sol") - 15) < 0.01);
-  assert.ok(Math.abs(day.values.get("GPT-5.5") - 10) < 0.01);
+  // Both recognized fast tiers weigh 187.5 credits, so 25% splits evenly.
+  assert.ok(Math.abs(day.values.get("Sol") - 12.5) < 0.01);
+  assert.ok(Math.abs(day.values.get("GPT-5.5") - 12.5) < 0.01);
 });
 
 test("the report command writes the dashboard image by default", () => {

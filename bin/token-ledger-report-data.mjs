@@ -68,12 +68,49 @@ function offsetAt(instant, timeZone) {
   return (match[1] === "+" ? 1 : -1) * minutes * 60 * 1_000;
 }
 
-export function zonedMidnight(dateString, timeZone) {
+function localDateTimeParts(timestampMs, timeZone) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(timestampMs));
+  const values = Object.fromEntries(
+    parts
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, Number(part.value)]),
+  );
+  return {
+    dateString: dateStringFromParts(values.year, values.month, values.day),
+    hour: values.hour,
+    minute: values.minute,
+    second: values.second,
+    millisecond: new Date(timestampMs).getUTCMilliseconds(),
+  };
+}
+
+function zonedDateTime(dateString, timeZone, time = {}) {
   const [year, month, day] = dateString.split("-").map(Number);
-  const utcGuess = Date.UTC(year, month - 1, day);
+  const utcGuess = Date.UTC(
+    year,
+    month - 1,
+    day,
+    time.hour ?? 0,
+    time.minute ?? 0,
+    time.second ?? 0,
+    time.millisecond ?? 0,
+  );
   let instant = new Date(utcGuess - offsetAt(new Date(utcGuess), timeZone));
   instant = new Date(utcGuess - offsetAt(instant, timeZone));
   return instant;
+}
+
+export function zonedMidnight(dateString, timeZone) {
+  return zonedDateTime(dateString, timeZone);
 }
 
 function localDateString(timestampMs, timeZone) {
@@ -413,7 +450,12 @@ export function buildTrendReportViewModel({
     shiftCalendarDate(bounds.startDateString, -rangeDays),
     timeZone,
   ).getTime();
-  const priorEndMs = priorStartMs + (effectiveEndMs - startMs);
+  const effectiveLocal = localDateTimeParts(effectiveEndMs, timeZone);
+  const priorEndMs = zonedDateTime(
+    shiftCalendarDate(effectiveLocal.dateString, -rangeDays),
+    timeZone,
+    effectiveLocal,
+  ).getTime();
   let priorEquivalentTokens = 0;
   let priorHasEvents = false;
 

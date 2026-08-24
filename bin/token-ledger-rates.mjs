@@ -2,7 +2,8 @@
 // never used to scale or relabel the actual-token columns.
 export const RATE_CARD_AS_OF = "2026-08-17";
 
-// Fast mode (service tier "priority") debits the plan limit at a higher rate.
+// Fast mode (service tiers "priority" and "fast") debits the plan limit at a
+// higher rate.
 export const FAST_MODE_MULTIPLIER = 1.5;
 
 export const RATE_CARD = {

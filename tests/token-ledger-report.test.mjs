@@ -155,6 +155,36 @@ test("fast mode counts both recognized tiers and stays a subset", () => {
   }
 });
 
+test("prior-period cutoff preserves local wall time across DST", () => {
+  const timeZone = "America/New_York";
+  const bounds = multiDayBounds("2026-03-08", timeZone, 7);
+  const reportTimeMs = Date.parse("2026-03-08T16:00:00.000Z");
+  const vm = buildTrendReportViewModel({
+    bounds,
+    days: 7,
+    reportTimeMs,
+    sourceStatus: "verified-current",
+    snapshot: {
+      events: [
+        {
+          timestamp: "2026-03-01T16:30:00.000Z",
+          model: "gpt-5.6-luna",
+          totalTokens: 11,
+        },
+        {
+          timestamp: "2026-03-08T15:00:00.000Z",
+          model: "gpt-5.6-luna",
+          totalTokens: 20,
+        },
+      ],
+    },
+  });
+
+  // Noon on Mar 8 EDT maps to noon on Mar 1 EST. The prior event at 11:30
+  // EST is inside that local-time-equivalent window.
+  assert.equal(vm.summary.priorEquivalentTokens, 11);
+});
+
 test("reasoning stays inside output and no overhead category exists", () => {
   const events = [
     event(19, 9, {
