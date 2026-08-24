@@ -43,7 +43,7 @@ import {
   normalizeQuotaTimeline,
   weeklyQuotaObservations,
 } from "../bin/token-ledger-trend.mjs";
-import { creditsForUsage } from "../bin/token-ledger-rates.mjs";
+import { creditsForUsage } from "../lib/token-ledger-rates.mjs";
 import {
   renderTrendImage,
   textWidth,

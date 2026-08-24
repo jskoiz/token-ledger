@@ -7,7 +7,7 @@ import {
   buildUsageTrend,
   weeklyQuotaObservations,
 } from "./token-ledger-trend.mjs";
-import { FAST_MODE_MULTIPLIER } from "./token-ledger-rates.mjs";
+import { FAST_MODE_MULTIPLIER } from "../lib/token-ledger-rates.mjs";
 import { buildActualTokenBins } from "./token-ledger-trend-terminal.mjs";
 import { buildCacheReportData } from "./token-ledger-cache-image.mjs";
 import { usageBucketsInRange } from "../lib/token-ledger-usage.mjs";

@@ -1,8 +1,7 @@
 import {
   creditsForUsage,
-  FAST_MODE_MULTIPLIER,
   RATE_CARD_AS_OF,
-} from "./token-ledger-rates.mjs";
+} from "../lib/token-ledger-rates.mjs";
 import {
   splitUsageBucketsAtBoundaries,
   usageBuckets,
@@ -308,10 +307,8 @@ export function eventCredits(event) {
   // Recompute from token components first so the current rate card applies;
   // snapshots can carry credits stored under an outdated card. Fast-mode
   // turns (service tier "priority") debit the limit at a higher rate.
-  const multiplier =
-    event.serviceTier === "priority" ? FAST_MODE_MULTIPLIER : 1;
-  const computed = creditsForUsage(event.model, event);
-  if (Number.isFinite(computed) && computed >= 0) return computed * multiplier;
+  const computed = creditsForUsage(event.model, event, event.serviceTier);
+  if (Number.isFinite(computed) && computed >= 0) return computed;
   const stored = Number(event.rateCardCredits);
   if (event.rateCardCredits !== null && event.rateCardCredits !== undefined) {
     // Stored credits from current snapshots already include the fast-mode
