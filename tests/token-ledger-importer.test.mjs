@@ -758,6 +758,219 @@ test("source labels resolve structured, encoded, and plain thread sources", asyn
   }
 });
 
+test("exported labels redact local paths across platform forms", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-privacy-"));
+  const cases = [
+    {
+      id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      timestamp: "2026-08-23T10:00:00.000Z",
+      source: "/Users/issue34-macos/private-runner",
+      title:
+        "Review cwd:/Users/issue34-macos/private-runner before shipping",
+      expectedTitle: "Review cwd:[local path] before shipping",
+      gitOrigin: "file:///Users/issue34-macos/private-repo",
+      secret: "issue34-macos",
+    },
+    {
+      id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      timestamp: "2026-08-23T11:00:00.000Z",
+      source: "/home/issue34-linux/private-runner",
+      title: "Review /home/issue34-linux/private-runner before shipping",
+      gitOrigin: "file:///home/issue34-linux/private-repo",
+      secret: "issue34-linux",
+    },
+    {
+      id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      timestamp: "2026-08-23T12:00:00.000Z",
+      source: "C:\\Users\\issue34-windows\\private-runner",
+      title:
+        "Review C:\\Users\\issue34-windows\\private-runner before shipping",
+      gitOrigin: "C:\\Users\\issue34-windows\\private-repo",
+      secret: "issue34-windows",
+    },
+    {
+      id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      timestamp: "2026-08-23T13:00:00.000Z",
+      source: "\\\\server\\Users\\issue34-unc\\private-runner",
+      title:
+        "Review \\\\server\\Users\\issue34-unc\\private-runner before shipping",
+      gitOrigin: "\\\\server\\Users\\issue34-unc\\private-repo",
+      secret: "issue34-unc",
+    },
+    {
+      id: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+      timestamp: "2026-08-23T14:00:00.000Z",
+      source: "file:///Users/issue34-file-url/private-runner",
+      title:
+        "Review file:///Users/issue34-file-url/private-runner before shipping",
+      gitOrigin: "file:///Users/issue34-file-url/private-repo",
+      secret: "issue34-file-url",
+    },
+  ];
+  try {
+    const rolloutDirectory = resolve(root, "sessions", "2026", "08", "23");
+    await mkdir(rolloutDirectory, { recursive: true });
+    await writeFile(
+      resolve(root, "session_index.jsonl"),
+      serialize(
+        cases.map((item) => ({
+          id: item.id,
+          thread_name: item.title,
+          updated_at: item.timestamp,
+        })),
+      ),
+    );
+    for (const [index, item] of cases.entries()) {
+      await writeFile(
+        resolve(rolloutDirectory, `rollout-${item.id}.jsonl`),
+        serialize([
+          {
+            timestamp: item.timestamp,
+            type: "session_meta",
+            payload: {
+              id: item.id,
+              source: item.source,
+              cwd: item.source,
+              git: { repository_url: item.gitOrigin },
+            },
+          },
+          ...turnStart(item.timestamp, `turn-privacy-${index}`),
+          tokenCount(
+            new Date(Date.parse(item.timestamp) + 1_000).toISOString(),
+            100 + index,
+            100 + index,
+          ),
+        ]),
+      );
+    }
+
+    const snapshot = await collectUsage({
+      output: resolve(root, "snapshot.json"),
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+    const serialized = JSON.stringify(snapshot);
+
+    assert.equal(snapshot.events.length, cases.length);
+    assert.doesNotMatch(
+      serialized,
+      /(?:\/Users\/|\/home\/|\b[A-Za-z]:[\\/]Users[\\/]|\\\\server[\\/]|file:\/\/\/)/,
+    );
+    for (const item of cases) {
+      assert.equal(serialized.includes(item.secret), false);
+      const event = snapshot.events.find((candidate) =>
+        candidate.threadIds.includes(item.id),
+      );
+      const thread = snapshot.threads.find(
+        (candidate) => candidate.id === item.id,
+      );
+      assert.equal(event.source, "local");
+      assert.equal(event.useType, "interactive");
+      assert.equal(event.project, "local");
+      assert.equal(thread.source, event.source);
+      assert.equal(thread.useType, event.useType);
+      assert.equal(thread.project, event.project);
+      assert.equal(
+        thread.title,
+        item.expectedTitle ?? "Review [local path] before shipping",
+      );
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("SSH remotes with absolute repository paths keep their project label", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-ssh-"));
+  const threadId = "12121212-1212-4121-8121-121212121212";
+  const timestamp = "2026-08-23T15:00:00.000Z";
+  try {
+    const rolloutDirectory = resolve(root, "sessions", "2026", "08", "23");
+    await mkdir(rolloutDirectory, { recursive: true });
+    await writeFile(
+      resolve(rolloutDirectory, `rollout-${threadId}.jsonl`),
+      serialize([
+        {
+          timestamp,
+          type: "session_meta",
+          payload: {
+            id: threadId,
+            source: "desktop",
+            cwd: "/Users/issue34-ssh/worktree",
+            git: {
+              repository_url: "git@example.com:/srv/git/org/repo.git",
+            },
+          },
+        },
+        ...turnStart(timestamp, "turn-ssh"),
+        tokenCount(
+          new Date(Date.parse(timestamp) + 1_000).toISOString(),
+          100,
+          100,
+        ),
+      ]),
+    );
+
+    const snapshot = await collectUsage({
+      output: resolve(root, "snapshot.json"),
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+    const [event] = snapshot.events;
+    const [thread] = snapshot.threads;
+    assert.equal(event.project, "org/repo");
+    assert.equal(thread.project, "org/repo");
+    assert.doesNotMatch(JSON.stringify(snapshot), /srv\/git/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("credential-like title text is redacted before truncation", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-credential-"));
+  const threadId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const credential = `ghp_${"A".repeat(30)}`;
+  try {
+    const rolloutDirectory = resolve(root, "sessions", "2026", "08", "23");
+    await mkdir(rolloutDirectory, { recursive: true });
+    await writeFile(
+      resolve(root, "session_index.jsonl"),
+      serialize([{
+        id: threadId,
+        thread_name: `${"x".repeat(170)} ${credential}`,
+        updated_at: "2026-08-23T15:00:00.000Z",
+      }]),
+    );
+    await writeFile(
+      resolve(rolloutDirectory, `rollout-${threadId}.jsonl`),
+      serialize([
+        {
+          timestamp: "2026-08-23T15:00:00.000Z",
+          type: "session_meta",
+          payload: { id: threadId, source: "desktop", cwd: "project" },
+        },
+        ...turnStart("2026-08-23T15:00:00.000Z", "turn-credential"),
+        tokenCount("2026-08-23T15:00:01.000Z", 100, 100),
+      ]),
+    );
+
+    const snapshot = await collectUsage({
+      output: resolve(root, "snapshot.json"),
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+    const title = snapshot.threads[0].title;
+    assert.ok(title.length <= 180);
+    assert.doesNotMatch(title, /ghp_/);
+    assert.doesNotMatch(title, /A{16,}/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("malformed usage and rate-limit payloads are ignored safely", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
   const threadId = "88888888-8888-4888-8888-888888888888";
