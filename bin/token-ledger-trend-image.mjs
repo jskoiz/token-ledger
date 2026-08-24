@@ -9,7 +9,11 @@ import {
 } from "./token-ledger-trend.mjs";
 import { FAST_MODE_MULTIPLIER } from "./token-ledger-rates.mjs";
 import { buildActualTokenBins } from "./token-ledger-trend-terminal.mjs";
-import { buildCacheReportData } from "./token-ledger-cache-image.mjs";
+import {
+  addInputTotals,
+  buildCacheReportData,
+  inputScale,
+} from "./token-ledger-cache-image.mjs";
 import {
   checkedTokenAdd,
   tokenValue,
@@ -506,23 +510,29 @@ export function renderTrendImage({
     const models = cacheData.models;
     if (models.length <= 4) return models;
     const rest = models.slice(3);
-    const restInput = rest.reduce(
-      (sum, model) => checkedTokenAdd(sum, model.inputTokens, {
-        allowFractional: true,
-      }),
-      0,
-    );
-    const restCached = rest.reduce(
-      (sum, model) => checkedTokenAdd(sum, model.cachedInputTokens, {
-        allowFractional: true,
-      }),
-      0,
+    const remainder = rest.reduce(
+      (row, model) => {
+        addInputTotals(
+          row,
+          model.inputTokens,
+          model.cachedInputTokens,
+          inputScale(model),
+        );
+        return row;
+      },
+      {
+        inputTokens: 0,
+        cachedInputTokens: 0,
+        uncachedInputTokens: 0,
+      },
     );
     return [...models.slice(0, 3), {
       model: `${rest.length} other models`,
-      inputTokens: restInput,
-      cachedInputTokens: restCached,
-      rate: restInput > 0 ? (restCached / restInput) * 100 : null,
+      inputTokens: remainder.inputTokens,
+      cachedInputTokens: remainder.cachedInputTokens,
+      rate: remainder.inputTokens > 0
+        ? (remainder.cachedInputTokens / remainder.inputTokens) * 100
+        : null,
       muted: true,
     }];
   })();

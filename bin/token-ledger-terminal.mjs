@@ -334,17 +334,9 @@ export function quotaCycleSummary(snapshot = {}, displayedEvents = []) {
   };
 }
 
-function summary(events) {
-  const totalTokens = events.reduce(
-    (sum, event) => {
-      if (event?.invalidTokenRecord === true) return sum;
-      const allowFractional = event.rangeAllocationEstimated === true;
-      return checkedTokenAdd(
-        sum,
-        tokenValue(event.totalTokens, { allowFractional }),
-        { allowFractional },
-      );
-    },
+function summary(events, projectRows) {
+  const totalTokens = projectRows.reduce(
+    (sum, row) => sum + row.totalTokens,
     0,
   );
   const calls = events.reduce(
@@ -706,7 +698,7 @@ export function renderTerminal({
   allRows,
 }) {
   const enabled = colorsEnabled(options);
-  const stats = summary(events);
+  const stats = summary(events, allRows);
   const quota = quotaCycleSummary(snapshot, events);
   stats.projectCount = allRows.length;
   const columns = options.width ?? (Number(process.stdout.columns) || 120);

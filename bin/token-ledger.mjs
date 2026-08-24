@@ -33,6 +33,7 @@ import {
   isNonNegativeFiniteValue,
   nonNegativeFiniteValue,
   tokenValue,
+  MAX_SAFE_TOKEN_COUNT,
   usageBuckets,
   usageBucketsInRange,
   usageCallCount,
@@ -59,6 +60,38 @@ const MODEL_COLORS = {
   "gpt-5.4": TERMINAL_MODEL_COLORS.gpt,
   other: TERMINAL_MODEL_COLORS.other,
 };
+
+function createSharedTokenScale() {
+  return {
+    scale: 1,
+    totalTokens: 0,
+    targets: new Set(),
+  };
+}
+
+function addSharedTokenContribution(state, contribution, targets) {
+  const tokens = tokenValue(contribution, { allowFractional: true });
+  if (!(tokens > 0)) return;
+  const scaledTokens = tokens / state.scale;
+  for (const target of targets) {
+    state.targets.add(target);
+    target.totalTokens += scaledTokens;
+  }
+  state.totalTokens += scaledTokens;
+  const scaleFactor = Math.max(
+    1,
+    state.totalTokens / MAX_SAFE_TOKEN_COUNT,
+  );
+  if (scaleFactor === 1) return;
+  for (const target of state.targets) {
+    target.totalTokens /= scaleFactor;
+    if (target.totalTokens >= MAX_SAFE_TOKEN_COUNT - 2) {
+      target.totalTokens = MAX_SAFE_TOKEN_COUNT;
+    }
+  }
+  state.totalTokens = MAX_SAFE_TOKEN_COUNT;
+  state.scale *= scaleFactor;
+}
 
 export function usage() {
   return `Token Ledger
@@ -650,6 +683,7 @@ export function filterDayEvents(snapshot, bounds) {
 export function aggregateProjects(snapshot, events, options = {}) {
   const singletonProjects = options.rawProjects ? new Set() : oneOffProjects(snapshot);
   const grouped = new Map();
+  const sharedTokenScale = createSharedTokenScale();
 
   for (const event of events) {
     if (event?.invalidTokenRecord === true) continue;
@@ -673,11 +707,6 @@ export function aggregateProjects(snapshot, events, options = {}) {
         knownCreditTokens: 0,
         models: new Map(),
       };
-    row.totalTokens = checkedTokenAdd(
-      row.totalTokens,
-      tokenValue(event.totalTokens, { allowFractional }),
-      { allowFractional },
-    );
     row.outputTokens = checkedTokenAdd(
       row.outputTokens,
       tokenValue(event.outputTokens, { allowFractional }),
@@ -714,10 +743,10 @@ export function aggregateProjects(snapshot, events, options = {}) {
       events: 0,
       rateCardCredits: 0,
     };
-    modelRow.totalTokens = checkedTokenAdd(
-      modelRow.totalTokens,
+    addSharedTokenContribution(
+      sharedTokenScale,
       tokenValue(event.totalTokens, { allowFractional }),
-      { allowFractional },
+      [row, modelRow],
     );
     modelRow.events = checkedTokenAdd(modelRow.events, usageCallCount(event), {
       allowFractional,
@@ -748,16 +777,11 @@ export function aggregateProjects(snapshot, events, options = {}) {
     });
 }
 
-function totalSummary(events) {
+function totalSummary(events, projectRows) {
   return events.reduce(
     (summary, event) => {
       if (event?.invalidTokenRecord === true) return summary;
       const allowFractional = event?.rangeAllocationEstimated === true;
-      summary.totalTokens = checkedTokenAdd(
-        summary.totalTokens,
-        tokenValue(event.totalTokens, { allowFractional }),
-        { allowFractional },
-      );
       summary.outputTokens = checkedTokenAdd(
         summary.outputTokens,
         tokenValue(event.outputTokens, { allowFractional }),
@@ -798,6 +822,11 @@ function totalSummary(events) {
       threadIds: new Set(),
     },
   );
+  summary.totalTokens = projectRows.reduce(
+    (sum, row) => sum + row.totalTokens,
+    0,
+  );
+  return summary;
 }
 
 function compact(value, digits = 2) {
@@ -1152,7 +1181,7 @@ function render(
     });
   }
   const enabled = !options.plain && !process.env.NO_COLOR && Boolean(process.stdout.isTTY);
-  const summary = totalSummary(events);
+  const summary = totalSummary(events, allRows);
   const totalTokens = summary.totalTokens;
   const dateLabel = options.range === "rolling24h"
     ? "last 24 hours"

@@ -228,7 +228,7 @@ function emptyAggregate() {
   };
 }
 
-function inputScale(target) {
+export function inputScale(target) {
   return Number.isFinite(target[INPUT_SCALE]) && target[INPUT_SCALE] >= 1
     ? target[INPUT_SCALE]
     : 1;
@@ -243,7 +243,7 @@ function setInputScale(target, scale) {
   });
 }
 
-function addInputTotals(target, inputTokens, cachedInputTokens, sourceScale = 1) {
+export function addInputTotals(target, inputTokens, cachedInputTokens, sourceScale = 1) {
   const targetScale = inputScale(target);
   const normalizedSourceScale = Number.isFinite(sourceScale) && sourceScale >= 1
     ? sourceScale

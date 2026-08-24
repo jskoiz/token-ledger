@@ -273,6 +273,42 @@ test("aggregateProjects sorts by tokens and retains model mix", () => {
   assert.equal(rows[0].totalTokens, 1_000);
 });
 
+test("aggregateProjects keeps capped project shares proportional", () => {
+  const huge = Number.MAX_SAFE_INTEGER;
+  const events = [
+    {
+      project: "alpha",
+      model: "gpt-5.6-luna",
+      totalTokens: huge,
+    },
+    {
+      project: "beta",
+      model: "gpt-5.6-sol",
+      totalTokens: huge,
+    },
+  ];
+  const snapshot = { events: [], threads: [] };
+  const rows = aggregateProjects(snapshot, events, { rawProjects: true });
+
+  assert.deepEqual(rows.map((row) => row.project), ["alpha", "beta"]);
+  assert.ok(rows.every((row) => row.totalTokens < huge));
+  assert.ok(
+    Math.abs(rows[0].totalTokens - huge / 2) < Number.EPSILON * huge,
+  );
+  assert.equal(rows[0].totalTokens + rows[1].totalTokens, huge);
+
+  const output = renderTerminal({
+    options: { plain: true, ascii: true, width: 100 },
+    snapshot,
+    bounds: dayBounds("2026-08-01", "UTC"),
+    events,
+    rows,
+    allRows: rows,
+  });
+  assert.match(output, /alpha.*50\.0%/);
+  assert.match(output, /beta.*50\.0%/);
+});
+
 test("aggregateProjects preserves compacted call and thread counts", () => {
   const rows = aggregateProjects(
     { events: [], threads: [] },
@@ -2107,6 +2143,39 @@ test("cache report preserves unknown coverage when token sums saturate", () => {
   assert.ok(data.unknownBreakdownTokens < huge);
   assert.equal(data.measurementCoveragePercent, 50);
   assert.equal(data.bins.at(-1).measurementCoveragePercent, 50);
+});
+
+test("trend image preserves the cache rate in a capped remainder", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+  const huge = Number.MAX_SAFE_INTEGER;
+  const eventFor = (model, cachedInputTokens) => ({
+    timestamp: "2026-08-15T12:00:00.000Z",
+    model,
+    totalTokens: huge,
+    inputTokens: huge,
+    cachedInputTokens,
+    outputTokens: 0,
+    breakdownAvailable: true,
+  });
+  const snapshot = {
+    generatedAt: "2026-08-15T12:00:00.000Z",
+    events: [
+      eventFor("gpt-5.5", huge),
+      eventFor("gpt-5.6-luna", huge),
+      eventFor("gpt-5.6-sol", huge),
+      eventFor("gpt-5.6-terra", 0),
+      eventFor("gpt-5.4", huge),
+    ],
+  };
+
+  const svg = renderTrendImage({
+    snapshot,
+    bounds,
+    days: 7,
+    options: { imageWidth: 900 },
+  });
+
+  assert.equal((svg.match(/>50\.0%</g) ?? []).length, 1);
 });
 
 test("trend bars partition capped model segments", () => {

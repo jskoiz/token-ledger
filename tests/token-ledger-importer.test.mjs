@@ -949,6 +949,7 @@ test("validates token totals and preserves malformed breakdowns as unknown", asy
     assert.equal(thread.detailedTokens, 100);
     assert.equal(thread.unknownBreakdownTokens, 100);
     assert.equal(thread.coverage, "partial");
+    assert.equal(thread.rateCardCredits, null);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
