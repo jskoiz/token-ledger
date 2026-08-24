@@ -80,9 +80,12 @@ If even the coarsest bounded representation exceeds the hard limit, Token
 Ledger preserves the previous cache and asks you to reduce the source with
 `--no-archived` or the collector's `--since` option. It never replaces the
 production cache with an oversized or partial file. On a normal default-path
-run, a snapshot whose mtime is in the past and less than one hour old skips the
-source walk. An exact-hour or future mtime is not fresh; an older snapshot is
-checked against local source mtimes before it is reused or rebuilt.
+run, the collector validates a bounded source watermark after scanning and
+retries if local sources changed during the scan. Automatic reuse compares that
+persisted watermark with the current local source manifest, so a later
+cache-file mtime cannot hide an append, replacement, truncation, or newly
+created rollout. The cache age shown in reports is an age label only;
+`--no-refresh` explicitly bypasses the source check.
 
 ```bash
 # Force a rebuild from CODEX_HOME or ~/.codex

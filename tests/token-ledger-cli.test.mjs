@@ -1,10 +1,12 @@
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import {
+  appendFile,
   mkdir,
   mkdtemp,
   readFile,
   rm,
+  stat,
   utimes,
   writeFile,
 } from "node:fs/promises";
@@ -13,7 +15,10 @@ import { homedir, tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { writePrivateSnapshot } from "../lib/token-ledger-snapshot.mjs";
+import {
+  readPrivateSnapshot,
+  writePrivateSnapshot,
+} from "../lib/token-ledger-snapshot.mjs";
 import {
   aggregateProjects,
   dayBounds,
@@ -27,10 +32,15 @@ import {
   DEFAULT_SNAPSHOT,
   snapshotCacheIsFresh,
   snapshotFreshness,
-  snapshotNeedsRefresh,
   shouldCheckSourceFreshness,
   weekBounds,
 } from "../bin/token-ledger.mjs";
+import {
+  collectUsage,
+  SOURCE_WATERMARK_VERSION,
+  sourceInventory,
+  sourceWatermarksEqual,
+} from "../lib/token-ledger-importer.mjs";
 import {
   quotaCycleSummary,
   renderFullscreen,
@@ -71,6 +81,48 @@ const ROLLING_24H_FIXTURE = fileURLToPath(
 const CLI_ENTRYPOINT = fileURLToPath(
   new URL("../bin/token-ledger.mjs", import.meta.url),
 );
+
+function sourceRolloutRows(total, turnId, timestamp) {
+  return [
+    {
+      timestamp,
+      type: "event_msg",
+      payload: {
+        type: "task_started",
+        turn_id: turnId,
+        started_at: Date.parse(timestamp) / 1_000,
+      },
+    },
+    {
+      timestamp,
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        info: {
+          total_token_usage: {
+            input_tokens: total,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            reasoning_output_tokens: 0,
+            total_tokens: total,
+          },
+          last_token_usage: {
+            input_tokens: total,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            reasoning_output_tokens: 0,
+            total_tokens: total,
+          },
+          model_context_window: 128_000,
+        },
+      },
+    },
+  ];
+}
+
+function serializeRows(rows) {
+  return `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`;
+}
 
 test(
   "CLI entrypoint supports direct shebang execution",
@@ -612,7 +664,10 @@ test("refresh and source failures retain context without absolute paths", async 
 
     await mkdir(codexHome);
     await writeFile(resolve(codexHome, "sessions"), "not a directory");
-    await writeFile(staleSnapshotPath, JSON.stringify({ events: [] }));
+    await writeFile(
+      staleSnapshotPath,
+      JSON.stringify({ schemaVersion: 2, events: [] }),
+    );
     const staleTime = new Date(Date.now() - 2 * 60 * 60 * 1_000);
     await utimes(staleSnapshotPath, staleTime, staleTime);
 
@@ -786,13 +841,33 @@ test("parseArgs rejects refresh requests that target an explicit snapshot", () =
   );
 });
 
-test("snapshot freshness follows the newest local source mtime", () => {
-  assert.equal(snapshotNeedsRefresh(100, 101), true);
-  assert.equal(snapshotNeedsRefresh(100, 100), false);
-  assert.equal(snapshotNeedsRefresh(100, 99), false);
+test("source watermarks detect changes independent of cache mtime", () => {
+  const original = {
+    version: SOURCE_WATERMARK_VERSION,
+    fingerprint: "original",
+    sourceCount: 1,
+    latestModifiedAt: 200,
+  };
+  assert.equal(sourceWatermarksEqual(original, original), true);
+  assert.equal(
+    sourceWatermarksEqual(original, {
+      ...original,
+      fingerprint: "changed",
+      latestModifiedAt: 100,
+    }),
+    false,
+  );
+  assert.equal(
+    sourceWatermarksEqual(original, {
+      ...original,
+      sourceCount: 2,
+    }),
+    false,
+  );
+  assert.equal(sourceWatermarksEqual(original, null), false);
 });
 
-test("recent terminal snapshots reuse the cache while reports check sources", () => {
+test("automatic loads check source watermarks regardless of cache age", () => {
   const now = 1_000_000;
   assert.equal(snapshotCacheIsFresh(now, now), true);
   assert.equal(snapshotCacheIsFresh(now - 60 * 60 * 1000 + 1, now), true);
@@ -801,7 +876,7 @@ test("recent terminal snapshots reuse the cache while reports check sources", ()
   assert.equal(snapshotCacheIsFresh(now + 1, now), false);
   assert.equal(
     shouldCheckSourceFreshness({ view: "terminal" }, now, now),
-    false,
+    true,
   );
   assert.equal(
     shouldCheckSourceFreshness({ view: "trend", image: true }, now, now),
@@ -809,12 +884,82 @@ test("recent terminal snapshots reuse the cache while reports check sources", ()
   );
   assert.equal(
     shouldCheckSourceFreshness(
-      { view: "terminal" },
-      now - 60 * 60 * 1000,
-      now,
+      { view: "terminal", autoRefresh: false },
     ),
-    true,
+    false,
   );
+});
+
+test("automatic refresh ignores a newer cache mtime when the source watermark changes", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-watermark-load-"));
+  const codexHome = resolve(root, "codex-home");
+  const sourceDirectory = resolve(codexHome, "sessions", "2026", "08");
+  const sourceFile = resolve(
+    sourceDirectory,
+    "rollout-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl",
+  );
+  const snapshotPath = resolve(root, "snapshot.json.gz");
+  try {
+    await mkdir(sourceDirectory, { recursive: true });
+    await writeFile(
+      sourceFile,
+      serializeRows(sourceRolloutRows(
+        100,
+        "turn-1",
+        "2026-08-23T10:00:00.000Z",
+      )),
+    );
+    const initial = await collectUsage({
+      output: snapshotPath,
+      codexHome,
+      includeArchived: true,
+      since: null,
+    });
+
+    await appendFile(
+      sourceFile,
+      serializeRows(sourceRolloutRows(
+        200,
+        "turn-2",
+        "2026-08-23T10:00:01.000Z",
+      )),
+    );
+    const changedSource = await sourceInventory(codexHome, true);
+    await writePrivateSnapshot(snapshotPath, initial);
+    const newerCacheTime = new Date(Date.now() + 1_000);
+    await utimes(snapshotPath, newerCacheTime, newerCacheTime);
+    assert.ok(
+      (await stat(snapshotPath)).mtimeMs > changedSource.watermark.latestModifiedAt,
+    );
+    assert.equal(
+      sourceWatermarksEqual(initial.sourceWatermark, changedSource.watermark),
+      false,
+    );
+
+    const options = parseArgs([
+      "day",
+      "2026-08-23",
+      "--static",
+      "--plain",
+      "--ascii",
+      "--tz",
+      "UTC",
+    ]);
+    options.codexHome = codexHome;
+    options.input = snapshotPath;
+    options.inputExplicit = false;
+    const output = await run(options);
+    const refreshed = await readPrivateSnapshot(snapshotPath);
+
+    assert.match(output, /300 TOKENS/);
+    assert.equal(refreshed.coverage.observedTokens, 300);
+    assert.ok(sourceWatermarksEqual(
+      refreshed.sourceWatermark,
+      changedSource.watermark,
+    ));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("snapshot freshness labels the one-hour cache age without exposing paths", () => {

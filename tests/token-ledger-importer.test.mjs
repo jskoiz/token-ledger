@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import {
+  appendFile,
   chmod,
   mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
   stat,
   writeFile,
@@ -14,7 +16,12 @@ import { resolve } from "node:path";
 import test from "node:test";
 import { gzipSync } from "node:zlib";
 
-import { collectUsage } from "../lib/token-ledger-importer.mjs";
+import {
+  collectUsage,
+  SOURCE_COLLECTION_MAX_ATTEMPTS,
+  sourceInventory,
+  sourceWatermarksEqual,
+} from "../lib/token-ledger-importer.mjs";
 import {
   DEFAULT_SNAPSHOT_MAX_BYTES,
   readPrivateSnapshot,
@@ -57,6 +64,192 @@ function tokenCount(timestamp, total, last) {
 function serialize(rows) {
   return `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`;
 }
+
+function rolloutRows(totals, offset = 0) {
+  const baseMs = Date.parse("2026-08-23T10:00:00.000Z");
+  return totals.flatMap((total, index) => {
+    const turnIndex = offset + index;
+    const timestamp = new Date(baseMs + turnIndex * 1_000).toISOString();
+    return [
+      {
+        timestamp,
+        type: "event_msg",
+        payload: {
+          type: "task_started",
+          turn_id: `turn-${turnIndex + 1}`,
+          started_at: Date.parse(timestamp) / 1_000,
+        },
+      },
+      tokenCount(timestamp, total, total),
+    ];
+  });
+}
+
+async function createRolloutFixture(totals, fileName = "rollout-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl") {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-collection-"));
+  const directory = resolve(root, "sessions", "2026", "08");
+  const file = resolve(directory, fileName);
+  await mkdir(directory, { recursive: true });
+  await writeFile(file, serialize(rolloutRows(totals)));
+  return { root, directory, file };
+}
+
+test("source appends are included before a validated cache is published", async () => {
+  const { root, file } = await createRolloutFixture([100]);
+  const output = resolve(root, "snapshot.json.gz");
+  let appended = false;
+  try {
+    const snapshot = await collectUsage(
+      {
+        output,
+        codexHome: root,
+        includeArchived: true,
+        since: null,
+      },
+      async ({ current }) => {
+        if (current === 1 && !appended) {
+          appended = true;
+          await appendFile(file, serialize(rolloutRows([200], 1)));
+        }
+      },
+    );
+    const writeResult = await writePrivateSnapshot(output, snapshot);
+    const persisted = await readPrivateSnapshot(output);
+    const current = await sourceInventory(root, true);
+
+    assert.equal(snapshot.coverage.observedTokens, 300);
+    assert.equal(writeResult.snapshot.coverage.observedTokens, 300);
+    assert.equal(persisted.coverage.observedTokens, 300);
+    assert.ok(sourceWatermarksEqual(
+      persisted.sourceWatermark,
+      current.watermark,
+    ));
+    assert.ok(!JSON.stringify(persisted).includes(root));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("new rollout files during collection trigger a complete retry", async () => {
+  const { root, directory } = await createRolloutFixture([100]);
+  const newFile = resolve(
+    directory,
+    "rollout-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.jsonl",
+  );
+  let created = false;
+  try {
+    const snapshot = await collectUsage(
+      {
+        output: resolve(root, "snapshot.json"),
+        codexHome: root,
+        includeArchived: true,
+        since: null,
+      },
+      async ({ current }) => {
+        if (current === 1 && !created) {
+          created = true;
+          await writeFile(newFile, serialize(rolloutRows([250])));
+        }
+      },
+    );
+
+    assert.equal(snapshot.coverage.observedTokens, 350);
+    assert.equal(snapshot.coverage.filesScanned, 2);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("replacement during collection triggers a complete retry", async () => {
+  const { root, directory, file } = await createRolloutFixture([100]);
+  const replacement = resolve(directory, "replacement.jsonl");
+  let replaced = false;
+  try {
+    const snapshot = await collectUsage(
+      {
+        output: resolve(root, "snapshot.json"),
+        codexHome: root,
+        includeArchived: true,
+        since: null,
+      },
+      async ({ current }) => {
+        if (current === 1 && !replaced) {
+          replaced = true;
+          await writeFile(replacement, serialize(rolloutRows([300])));
+          await rename(replacement, file);
+        }
+      },
+    );
+
+    assert.equal(snapshot.coverage.observedTokens, 300);
+    assert.equal(snapshot.coverage.filesScanned, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("truncation during collection triggers a complete retry", async () => {
+  const { root, file } = await createRolloutFixture([100, 200]);
+  let truncated = false;
+  try {
+    const snapshot = await collectUsage(
+      {
+        output: resolve(root, "snapshot.json"),
+        codexHome: root,
+        includeArchived: true,
+        since: null,
+      },
+      async ({ current }) => {
+        if (current === 1 && !truncated) {
+          truncated = true;
+          await writeFile(file, serialize(rolloutRows([100])));
+        }
+      },
+    );
+
+    assert.equal(snapshot.coverage.observedTokens, 100);
+    assert.equal(snapshot.coverage.filesScanned, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("continuously changing sources stop after bounded retries", async () => {
+  const { root, file } = await createRolloutFixture([100]);
+  let progressCalls = 0;
+  try {
+    await assert.rejects(
+      () => collectUsage(
+        {
+          output: resolve(root, "snapshot.json"),
+          codexHome: root,
+          includeArchived: true,
+          since: null,
+        },
+        async ({ current }) => {
+          if (current !== 1) return;
+          progressCalls += 1;
+          await appendFile(
+            file,
+            serialize(rolloutRows([100 + progressCalls], progressCalls + 1)),
+          );
+        },
+      ),
+      (error) => {
+        assert.equal(error.code, "ERR_SOURCE_CHANGED_DURING_COLLECTION");
+        assert.match(error.message, /after 3 attempts/);
+        return true;
+      },
+    );
+    assert.equal(progressCalls, SOURCE_COLLECTION_MAX_ATTEMPTS);
+    await assert.rejects(
+      () => stat(resolve(root, "snapshot.json")),
+      { code: "ENOENT" },
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("empty thread settings reset the service tier for the next turn", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
