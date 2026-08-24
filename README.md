@@ -173,10 +173,20 @@ labels.
 
 ## What is estimated
 
-Credit values use the hardcoded rate card dated **2026-08-17**. Cached input is
-priced separately, priority/fast-mode events use the 1.5× multiplier, and
-events without a detailed breakdown or known model rate are unrated. These are
-rate-card estimates, not provider billing totals.
+`rateCardCredits` estimates eligible Codex usage paid with purchased credits
+using the hardcoded OpenAI rate card dated **2026-08-23**. Cached input is
+priced separately. Both `priority` and `fast` service tiers are recognized:
+supported GPT-5.6 and GPT-5.5 models consume purchased credits at 2.5× the
+standard rate, while supported GPT-5.4 consumes them at 2×. Fast mode's
+approximately 1.5× figure describes model speed, not credit consumption.
+Events without a detailed input/output breakdown, a known model rate, or a
+published fast multiplier are unrated.
+
+These purchased-credit estimates are not API-dollar estimates, and Token
+Ledger does not currently report API USD. GPT-5.6 Sol's promotional
+purchased-credit rate does not determine included plan usage, five-hour or
+weekly limits, or legacy credit rates. Raw observed token counts and recorded
+meter readings remain unchanged by the credit calculator.
 
 When meter observations are available, report bars in `--drain` mode represent
 observed meter drops; model attribution within a drop uses rate-card weights
@@ -184,6 +194,10 @@ when possible and token weights as a fallback. Long observation gaps are
 spread across local calendar days as estimates. Tokens-per-meter-point,
 model-split burn, runway, and CLI `View burn` are derived estimates. None is
 official billing, quota, or account-completeness truth.
+
+Model allocation remains an estimate even when current credit weights are
+available. Local history can be pruned or incomplete, so it is not an
+authoritative lifetime account record.
 
 ## Verify
 

@@ -1,8 +1,7 @@
 import {
-  creditsForUsage,
-  FAST_MODE_MULTIPLIER,
-  RATE_CARD_AS_OF,
-} from "./token-ledger-rates.mjs";
+  calculateCodexPurchasedCredits,
+  CODEX_CREDIT_RATE_CARD_AS_OF,
+} from "../lib/token-ledger-rates.mjs";
 import {
   splitUsageBucketsAtBoundaries,
   usageBuckets,
@@ -305,20 +304,13 @@ export function normalizeQuotaTimeline(observations) {
 }
 
 export function eventCredits(event) {
-  // Recompute from token components first so the current rate card applies;
-  // snapshots can carry credits stored under an outdated card. Fast-mode
-  // turns (service tier "priority") debit the limit at a higher rate.
-  const multiplier =
-    event.serviceTier === "priority" ? FAST_MODE_MULTIPLIER : 1;
-  const computed = creditsForUsage(event.model, event);
-  if (Number.isFinite(computed) && computed >= 0) return computed * multiplier;
-  const stored = Number(event.rateCardCredits);
-  if (event.rateCardCredits !== null && event.rateCardCredits !== undefined) {
-    // Stored credits from current snapshots already include the fast-mode
-    // multiplier.
-    if (Number.isFinite(stored) && stored >= 0) return stored;
-  }
-  return null;
+  // Always recompute with the current purchased-credit card. Snapshot values
+  // may have been stored under an older card and must not fill a current gap.
+  return calculateCodexPurchasedCredits({
+    model: event.model,
+    serviceTier: event.serviceTier,
+    usage: event,
+  });
 }
 
 function eventWeight(event, fallbackCreditsPerToken) {
@@ -528,7 +520,7 @@ export function buildUsageTrend(snapshot = {}, bounds) {
       sampleCount: 0,
       allocationMethod: "unavailable",
       observedThroughMs: null,
-      rateCardAsOf: snapshot.provenance?.rateCardAsOf ?? RATE_CARD_AS_OF,
+      rateCardAsOf: CODEX_CREDIT_RATE_CARD_AS_OF,
     };
   }
 
@@ -747,7 +739,7 @@ export function buildUsageTrend(snapshot = {}, bounds) {
     observedThroughMs:
       [...displayPoints].reverse().find((point) => point.observed)
         ?.timestampMs ?? null,
-    rateCardAsOf: snapshot.provenance?.rateCardAsOf ?? RATE_CARD_AS_OF,
+    rateCardAsOf: CODEX_CREDIT_RATE_CARD_AS_OF,
   };
 }
 

@@ -4,6 +4,7 @@ import {
   usageBuckets,
   usageCallCount,
 } from "../lib/token-ledger-usage.mjs";
+import { isFastServiceTier } from "../lib/token-ledger-rates.mjs";
 
 const RESET = "\u001b[0m";
 const PRIMARY_STYLE = [38, 2, 255, 255, 255];
@@ -265,7 +266,7 @@ export function buildActualTokenBins(
     bin.totalTokens += tokens;
     bin.calls += usageCallCount(event);
     bin.values.set(model, (bin.values.get(model) ?? 0) + tokens);
-    if (event.serviceTier === "priority") {
+    if (isFastServiceTier(event.serviceTier)) {
       bin.fastValues.set(model, (bin.fastValues.get(model) ?? 0) + tokens);
     }
   }

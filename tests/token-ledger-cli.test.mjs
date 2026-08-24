@@ -39,11 +39,17 @@ import {
 import {
   buildBurnDayBins,
   buildUsageTrend,
+  eventCredits,
   multiDayBounds,
   normalizeQuotaTimeline,
   weeklyQuotaObservations,
 } from "../bin/token-ledger-trend.mjs";
-import { creditsForUsage } from "../bin/token-ledger-rates.mjs";
+import {
+  calculateCodexPurchasedCredits,
+  codexCreditMultiplier,
+  isFastServiceTier,
+  normalizeCodexCreditModel,
+} from "../lib/token-ledger-rates.mjs";
 import {
   renderTrendImage,
   textWidth,
@@ -1147,8 +1153,12 @@ test("quota burn recomputes current card credits when every cycle event is rated
     [displayed],
   );
   assert.equal(quota.shareBasis, "credits");
-  assert.equal(quota.displayedSharePercent, 25);
-  assert.equal(quota.estimatedDisplayedBurnPercent, 5);
+  assert.ok(
+    Math.abs(quota.displayedSharePercent - (5 / 17) * 100) < 1e-12,
+  );
+  assert.ok(
+    Math.abs(quota.estimatedDisplayedBurnPercent - (5 / 17) * 20) < 1e-12,
+  );
 
   const fallbackDisplayed = {
     timestamp: "2026-08-01T00:00:00.000Z",
@@ -1200,7 +1210,7 @@ test("compact totals promote values that round to 1000 of a unit", () => {
   assert.doesNotMatch(output, /1000K/);
 });
 
-test("rate lookups normalize whitespace model separators", () => {
+test("purchased-credit rates normalize exact current model identifiers", () => {
   const usage = {
     inputTokens: 1_000_000,
     cachedInputTokens: 0,
@@ -1208,9 +1218,27 @@ test("rate lookups normalize whitespace model separators", () => {
     reasoningTokens: 0,
     totalTokens: 1_000_000,
   };
-  const spaced = creditsForUsage("gpt-5.4 mini", usage);
-  assert.equal(spaced, creditsForUsage("gpt-5.4-mini", usage));
-  assert.notEqual(spaced, creditsForUsage("gpt-5.4", usage));
+  const credits = (model, serviceTier = null) =>
+    calculateCodexPurchasedCredits({ model, serviceTier, usage });
+  const spaced = credits("gpt-5.4 mini");
+  assert.equal(spaced, credits("gpt-5.4-mini"));
+  assert.notEqual(spaced, credits("gpt-5.4"));
+  assert.equal(normalizeCodexCreditModel("gpt-5.5-cyber"), "daybreak-red");
+  assert.equal(
+    normalizeCodexCreditModel("gpt-daybreak-red-latest"),
+    "daybreak-red",
+  );
+  for (const model of [
+    "gpt-daybreak-red",
+    "gpt-5.6-cyber",
+    "gpt-5.5-cyber-preview",
+  ]) {
+    assert.equal(normalizeCodexCreditModel(model), "daybreak-red");
+  }
+  assert.equal(normalizeCodexCreditModel("gpt-daybreak-blue"), "daybreak-blue");
+  assert.equal(codexCreditMultiplier("gpt-daybreak-red", "fast"), 2.5);
+  assert.equal(codexCreditMultiplier("gpt-daybreak-blue", "fast"), 2.5);
+  assert.equal(codexCreditMultiplier("gpt-daybreak-red-latest", "fast"), null);
 });
 
 test("quota normalization is monotone inside cycles and marks resets", () => {
@@ -1432,7 +1460,7 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
   // mode stat card explains it.
   assert.match(svg, /fill="#0a655c"/);
   assert.match(svg, /FAST MODE/);
-  assert.match(svg, /1\.50×/);
+  assert.match(svg, /2\.50×/);
   assert.match(svg, /Darker shade = fast mode/);
   // The projects row and the pace block sit in the combined layout.
   assert.match(svg, /WHERE IT WENT · TOP PROJECTS/);
@@ -3003,7 +3031,7 @@ test("burn day bins place observed drops on days in meter percent units", () => 
         rateCardCredits: 9_999,
       },
       {
-        // 100K uncached Sol input = 12.5 credits.
+        // 100K uncached Sol input = 10 credits under the promotional card.
         timestamp: "2026-08-12T12:00:00.000Z",
         model: "gpt-5.6-sol",
         totalTokens: 100_000,
@@ -3043,8 +3071,8 @@ test("burn day bins place observed drops on days in meter percent units", () => 
 
   const day12 = burn.bins[3];
   assert.equal(day12.startDateString, "2026-08-12");
-  approximately(day12.values.get("Luna"), 10);
-  approximately(day12.values.get("Sol"), 10);
+  approximately(day12.values.get("Luna"), 20 * (12.5 / 22.5));
+  approximately(day12.values.get("Sol"), 20 * (10 / 22.5));
   // The eventless 54-hour drop is spread across its span by duration and
   // flagged approximate: 6h on Aug 12, 24h each on Aug 13 and Aug 14.
   approximately(day12.values.get("Unattributed"), 20 * (6 / 54));
@@ -3052,22 +3080,135 @@ test("burn day bins place observed drops on days in meter percent units", () => 
   approximately(burn.bins[5].values.get("Unattributed"), 20 * (24 / 54));
   assert.equal(burn.bins[5].approximate, true);
   approximately(burn.totalPercent, 40);
-  approximately(burn.totals.get("Luna"), 10);
-  approximately(burn.totals.get("Sol"), 10);
+  approximately(burn.totals.get("Luna"), 20 * (12.5 / 22.5));
+  approximately(burn.totals.get("Sol"), 20 * (10 / 22.5));
   approximately(burn.totals.get("Unattributed"), 20);
 });
 
 test("rate card prices Luna at the current published credit rates", () => {
-  const credits = creditsForUsage("gpt-5.6-luna", {
-    totalTokens: 2_000_000,
-    inputTokens: 1_000_000,
-    cachedInputTokens: 0,
-    outputTokens: 1_000_000,
+  const credits = calculateCodexPurchasedCredits({
+    model: "gpt-5.6-luna",
+    serviceTier: null,
+    usage: {
+      totalTokens: 2_000_000,
+      inputTokens: 1_000_000,
+      cachedInputTokens: 0,
+      outputTokens: 1_000_000,
+    },
   });
   assert.equal(credits, 35);
 });
 
-test("fast-mode turns weigh 1.5x in the burn allocation", () => {
+test("purchased-credit calculator applies current rows and fast tiers", () => {
+  const usage = {
+    totalTokens: 3_000_000,
+    inputTokens: 2_000_000,
+    cachedInputTokens: 1_000_000,
+    outputTokens: 1_000_000,
+    reasoningTokens: 1_000_000,
+  };
+  const credits = (model, serviceTier = null, eventUsage = usage) =>
+    calculateCodexPurchasedCredits({ model, serviceTier, usage: eventUsage });
+
+  assert.equal(credits("gpt-5.6-sol"), 610);
+  assert.equal(credits("gpt-5.5-cyber"), 2_218.75);
+  assert.equal(credits("gpt-5.6-sol", " Priority "), 1_525);
+  assert.equal(credits("gpt-5.5", "FAST"), 2_218.75);
+  assert.equal(credits("gpt-5.4", "fast"), 887.5);
+  assert.equal(codexCreditMultiplier("gpt-5.6-luna", "priority"), 2.5);
+  assert.equal(codexCreditMultiplier("gpt-5.4", "fast"), 2);
+
+  for (const tier of ["priority", " Priority ", "fast", "FAST"]) {
+    assert.equal(isFastServiceTier(tier), true);
+  }
+  for (const tier of [null, "", "standard", "flex", "ultrafast", "unknown"]) {
+    assert.equal(isFastServiceTier(tier), false);
+    assert.equal(credits("gpt-5.6-sol", tier), 610);
+  }
+
+  assert.equal(credits("gpt-5.4-mini", "fast"), null);
+  assert.equal(credits("future-model", "priority"), null);
+  assert.equal(credits("future-model", null), null);
+  assert.equal(
+    credits("gpt-5.6-sol", null, {
+      totalTokens: 3_000_000,
+      inputTokens: 2_000_000,
+    }),
+    null,
+  );
+});
+
+test("trend fast shading recognizes both tiers and reports mixed model rates", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+  const event = (model, serviceTier, totalTokens) => ({
+    timestamp: "2026-08-12T12:00:00.000Z",
+    model,
+    serviceTier,
+    totalTokens,
+    inputTokens: totalTokens,
+    cachedInputTokens: 0,
+    outputTokens: 0,
+  });
+  const snapshot = {
+    generatedAt: "2026-08-15T00:00:00.000Z",
+    events: [
+      event("gpt-5.4", "priority", 1_000_000),
+      event("gpt-5.5", " FAST ", 3_000_000),
+      event("gpt-5.4-mini", "fast", 2_000_000),
+      event("gpt-5.6-sol", "standard", 1_000_000),
+      event("gpt-5.6-sol", "ultrafast", 1_000_000),
+    ],
+  };
+  const bins = buildActualTokenBins(snapshot, bounds, 7, 1_000);
+  assert.equal(
+    [...bins.fastTotals.values()].reduce((sum, value) => sum + value, 0),
+    6_000_000,
+  );
+
+  const svg = renderTrendImage({ snapshot, bounds, days: 7 });
+  assert.match(svg, /2\.38×/);
+  assert.match(svg, /2×–2\.5× by model/);
+  assert.match(svg, /some fast usage unrated/);
+  assert.match(svg, /Darker shade = fast mode/);
+
+  const unsupportedSvg = renderTrendImage({
+    snapshot: {
+      generatedAt: snapshot.generatedAt,
+      events: [event("gpt-5.4-mini", "fast", 2_000_000)],
+    },
+    bounds,
+    days: 7,
+  });
+  assert.match(unsupportedSvg, /UNRATED/);
+  assert.doesNotMatch(unsupportedSvg, /1\.00×/);
+});
+
+test("runtime rejects stale stored credits when current pricing is unavailable", () => {
+  assert.equal(eventCredits({
+    model: "future-model",
+    serviceTier: null,
+    totalTokens: 1_000,
+    inputTokens: 1_000,
+    outputTokens: 0,
+    rateCardCredits: 9_999,
+  }), null);
+  assert.equal(eventCredits({
+    model: "gpt-5.6-sol",
+    serviceTier: "fast",
+    totalTokens: 1_000,
+    rateCardCredits: 9_999,
+  }), null);
+  assert.equal(eventCredits({
+    model: "gpt-5.6-sol",
+    serviceTier: null,
+    totalTokens: 1_000,
+    inputTokens: 1_000,
+    outputTokens: 0,
+    rateCardCredits: 9_999,
+  }), 0.1);
+});
+
+test("fast-mode turns use model-specific credit weights in burn allocation", () => {
   const bounds = multiDayBounds("2026-08-15", "UTC", 7);
   const resetsAt = Date.parse("2026-08-16T00:00:00.000Z") / 1_000;
   const snapshot = {
@@ -3110,9 +3251,9 @@ test("fast-mode turns weigh 1.5x in the burn allocation", () => {
   const trend = buildUsageTrend(snapshot, bounds);
   const burn = buildBurnDayBins(trend, bounds, { days: 7, binSize: 1 });
   const day = burn.bins.find((bin) => bin.startDateString === "2026-08-12");
-  // 187.5 fast credits vs 125 normal credits: 25% splits 15 / 10.
-  assert.ok(Math.abs(day.values.get("Sol") - 15) < 0.01);
-  assert.ok(Math.abs(day.values.get("GPT-5.5") - 10) < 0.01);
+  // 250 fast Sol credits vs 125 standard GPT-5.5 credits: 25% splits 2:1.
+  assert.ok(Math.abs(day.values.get("Sol") - 16.6667) < 0.01);
+  assert.ok(Math.abs(day.values.get("GPT-5.5") - 8.3333) < 0.01);
 });
 
 test("the report command writes the dashboard image by default", () => {
