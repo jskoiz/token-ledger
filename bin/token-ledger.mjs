@@ -778,7 +778,7 @@ export function aggregateProjects(snapshot, events, options = {}) {
 }
 
 function totalSummary(events, projectRows) {
-  return events.reduce(
+  const summary = events.reduce(
     (summary, event) => {
       if (event?.invalidTokenRecord === true) return summary;
       const allowFractional = event?.rangeAllocationEstimated === true;
