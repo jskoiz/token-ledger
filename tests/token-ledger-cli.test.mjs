@@ -282,6 +282,36 @@ test("aggregateProjects preserves compacted call and thread counts", () => {
   assert.equal(rows[0].models[0].events, 3);
 });
 
+test("fractional compacted call counts survive terminal aggregation", () => {
+  const bounds = multiDayBounds("2026-08-01", "UTC", 7);
+  const event = {
+    timestamp: "2026-08-02T00:00:00.000Z",
+    project: "fractional-history",
+    model: "gpt-5.6-luna",
+    totalTokens: 150.5,
+    outputTokens: 0,
+    toolCalls: 0,
+    callCount: 0.5,
+    rangeAllocationEstimated: true,
+  };
+  const rows = aggregateProjects({ events: [], threads: [] }, [event], {
+    rawProjects: true,
+  });
+  assert.equal(rows[0].events, 0.5);
+  assert.equal(rows[0].models[0].events, 0.5);
+
+  const output = renderTerminal({
+    options: { plain: true, ascii: true, width: 100 },
+    snapshot: { events: [], threads: [] },
+    snapshotFreshness: null,
+    bounds,
+    events: [event],
+    rows,
+    allRows: rows,
+  });
+  assert.match(output, /0\.5 CALLS/);
+});
+
 test("project labels remove terminal control sequences before rendering", () => {
   const project = "\u001b]8;;https://example.test\u0007\u001b[31msecret\u001b[0m\u0000";
   const rows = aggregateProjects(

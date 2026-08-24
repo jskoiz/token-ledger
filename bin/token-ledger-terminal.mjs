@@ -343,7 +343,10 @@ function summary(events) {
     0,
   );
   const calls = events.reduce(
-    (sum, event) => checkedTokenAdd(sum, usageCallCount(event)),
+    (sum, event) => {
+      const allowFractional = event?.rangeAllocationEstimated === true;
+      return checkedTokenAdd(sum, usageCallCount(event), { allowFractional });
+    },
     0,
   );
   const threadIds = new Set(
