@@ -210,18 +210,26 @@ function modelTotals(events) {
 
 function usageTypeTotals(events) {
   const totals = new Map();
+  let scale = 1;
+  let totalTokens = 0;
   for (const event of events) {
     if (event?.invalidTokenRecord === true) continue;
     const key = String(event.useType || "unknown").trim().toLowerCase() || "unknown";
     const allowFractional = event.rangeAllocationEstimated === true;
+    const tokens = tokenValue(event.totalTokens, { allowFractional });
+    const scaledTokens = tokens / scale;
+    totalTokens += scaledTokens;
     totals.set(
       key,
-      checkedTokenAdd(
-        totals.get(key) ?? 0,
-        tokenValue(event.totalTokens, { allowFractional }),
-        { allowFractional },
-      ),
+      (totals.get(key) ?? 0) + scaledTokens,
     );
+    const scaleFactor = Math.max(1, totalTokens / MAX_SAFE_TOKEN_COUNT);
+    if (scaleFactor === 1) continue;
+    for (const [usageType, value] of totals) {
+      totals.set(usageType, value / scaleFactor);
+    }
+    totalTokens = MAX_SAFE_TOKEN_COUNT;
+    scale *= scaleFactor;
   }
   return [...totals.entries()]
     .map(([key, totalTokens]) => ({

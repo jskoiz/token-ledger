@@ -1112,6 +1112,7 @@ test("terminal shares preserve model and cache proportions when totals saturate"
       inputTokens: huge,
       cachedInputTokens: huge,
       outputTokens: 0,
+      useType: "sdk",
     },
     {
       project: "beta",
@@ -1120,6 +1121,7 @@ test("terminal shares preserve model and cache proportions when totals saturate"
       inputTokens: huge,
       cachedInputTokens: 0,
       outputTokens: 0,
+      useType: "tool",
     },
   ];
   const rows = aggregateProjects({ events, threads: [] }, events, {
@@ -1136,6 +1138,8 @@ test("terminal shares preserve model and cache proportions when totals saturate"
   assert.match(output, /Sol\s+50\.0%/);
   assert.match(output, /Cached\s+50\.0%/);
   assert.match(output, /Uncached\s+50\.0%/);
+  assert.match(output, /SDK\s+50\.0%/);
+  assert.match(output, /Tool\s+50\.0%/);
 });
 
 test("terminal renderer moves the selected project cursor", () => {
