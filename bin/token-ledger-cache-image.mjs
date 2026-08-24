@@ -276,6 +276,19 @@ export function addInputTotals(target, inputTokens, cachedInputTokens, sourceSca
   setInputScale(target, commonScale * scaleFactor);
 }
 
+function alignInputScale(target, commonScale) {
+  const currentScale = inputScale(target);
+  if (currentScale === commonScale) return;
+  const ratio = currentScale / commonScale;
+  target.inputTokens *= ratio;
+  target.cachedInputTokens *= ratio;
+  target.uncachedInputTokens = Math.max(
+    0,
+    target.inputTokens - target.cachedInputTokens,
+  );
+  setInputScale(target, commonScale);
+}
+
 function addInput(target, breakdown, inputCallCount) {
   addInputTotals(target, breakdown.inputTokens, breakdown.cachedInputTokens);
   target.inputEventCount = checkedTokenAdd(
@@ -401,6 +414,15 @@ function accumulateRange(snapshot, bounds, bins = null, dateIndexByString = null
     };
     addInput(modelAggregate, breakdown, inputCallCount);
     modelTotals.set(model, modelAggregate);
+  }
+
+  const commonScale = Math.max(
+    inputScale(totals),
+    ...[...modelTotals.values()].map(inputScale),
+  );
+  alignInputScale(totals, commonScale);
+  for (const model of modelTotals.values()) {
+    alignInputScale(model, commonScale);
   }
 
   const summary = finalizeAggregate(totals);

@@ -1,5 +1,6 @@
 import { buildBurnDayBins, buildUsageTrend, trendModelLabel } from "./token-ledger-trend.mjs";
 import {
+  MAX_SAFE_TOKEN_COUNT,
   checkedTokenAdd,
   splitUsageBucketsAtBoundaries,
   tokenValue,
@@ -14,6 +15,77 @@ const BORDER_STYLE = [38, 2, 88, 88, 88];
 const GRID_STYLE = [38, 2, 72, 72, 72];
 const LINE_STYLE = [1, 38, 2, 255, 236, 168];
 const RESET_LINE_STYLE = [1, 38, 2, 255, 255, 255];
+const TOKEN_SCALE = Symbol("tokenScale");
+
+function tokenScale(target) {
+  return Number.isFinite(target[TOKEN_SCALE]) && target[TOKEN_SCALE] >= 1
+    ? target[TOKEN_SCALE]
+    : 1;
+}
+
+function setTokenScale(target, scale) {
+  Object.defineProperty(target, TOKEN_SCALE, {
+    configurable: true,
+    enumerable: false,
+    value: scale,
+    writable: true,
+  });
+}
+
+function scaleTokenMap(values, ratio) {
+  for (const [model, value] of values) {
+    values.set(model, value * ratio);
+  }
+}
+
+function addBinTokens(bin, model, tokens, fast) {
+  if (!(tokens > 0)) return;
+  const scale = tokenScale(bin);
+  const scaledTokens = tokens / scale;
+  bin.totalTokens += scaledTokens;
+  bin.values.set(model, (bin.values.get(model) ?? 0) + scaledTokens);
+  if (fast) {
+    bin.fastValues.set(model, (bin.fastValues.get(model) ?? 0) + scaledTokens);
+  }
+
+  const scaleFactor = Math.max(1, bin.totalTokens / MAX_SAFE_TOKEN_COUNT);
+  if (scaleFactor === 1) return;
+  bin.totalTokens = MAX_SAFE_TOKEN_COUNT;
+  scaleTokenMap(bin.values, 1 / scaleFactor);
+  scaleTokenMap(bin.fastValues, 1 / scaleFactor);
+  setTokenScale(bin, scale * scaleFactor);
+}
+
+function mergeBinTotals(state, bin) {
+  const sourceScale = tokenScale(bin);
+  const commonScale = Math.max(state.scale, sourceScale);
+  const targetRatio = state.scale / commonScale;
+  const sourceRatio = sourceScale / commonScale;
+  state.totalTokens *= targetRatio;
+  scaleTokenMap(state.values, targetRatio);
+  scaleTokenMap(state.fastValues, targetRatio);
+  for (const [model, value] of bin.values) {
+    state.totalTokens += value * sourceRatio;
+    state.values.set(
+      model,
+      (state.values.get(model) ?? 0) + value * sourceRatio,
+    );
+  }
+  for (const [model, value] of bin.fastValues) {
+    state.fastValues.set(
+      model,
+      (state.fastValues.get(model) ?? 0) + value * sourceRatio,
+    );
+  }
+
+  const scaleFactor = Math.max(1, state.totalTokens / MAX_SAFE_TOKEN_COUNT);
+  if (scaleFactor > 1) {
+    state.totalTokens = MAX_SAFE_TOKEN_COUNT;
+    scaleTokenMap(state.values, 1 / scaleFactor);
+    scaleTokenMap(state.fastValues, 1 / scaleFactor);
+  }
+  state.scale = commonScale * scaleFactor;
+}
 
 // Mirrors the SVG renderer's validated categorical palette.
 export const TREND_MODEL_COLORS = {
@@ -266,46 +338,28 @@ export function buildActualTokenBins(
     const allowFractional = event.rangeAllocationEstimated === true;
     const tokens = tokenValue(event.totalTokens, { allowFractional });
     const model = trendModelLabel(event.model);
-    bin.totalTokens = checkedTokenAdd(bin.totalTokens, tokens, {
-      allowFractional,
-    });
     bin.calls = checkedTokenAdd(bin.calls, usageCallCount(event), {
       allowFractional,
     });
-    bin.values.set(
-      model,
-      checkedTokenAdd(bin.values.get(model) ?? 0, tokens, {
-        allowFractional,
-      }),
-    );
-    if (event.serviceTier === "priority") {
-      bin.fastValues.set(
-        model,
-        checkedTokenAdd(bin.fastValues.get(model) ?? 0, tokens, {
-          allowFractional,
-        }),
-      );
-    }
+    addBinTokens(bin, model, tokens, event.serviceTier === "priority");
   }
 
-  const totals = new Map();
-  const fastTotals = new Map();
+  const totalsState = {
+    scale: 1,
+    totalTokens: 0,
+    values: new Map(),
+    fastValues: new Map(),
+  };
   for (const bin of bins) {
-    for (const [model, value] of bin.values) {
-      totals.set(model, checkedTokenAdd(totals.get(model) ?? 0, value, {
-        allowFractional: true,
-      }));
-    }
-    for (const [model, value] of bin.fastValues) {
-      fastTotals.set(
-        model,
-        checkedTokenAdd(fastTotals.get(model) ?? 0, value, {
-          allowFractional: true,
-        }),
-      );
-    }
+    mergeBinTotals(totalsState, bin);
   }
-  return { bins, totals, fastTotals, binSize, binCount };
+  return {
+    bins,
+    totals: totalsState.values,
+    fastTotals: totalsState.fastValues,
+    binSize,
+    binCount,
+  };
 }
 
 function niceCeiling(value) {

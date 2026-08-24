@@ -2114,6 +2114,33 @@ test("cache report preserves ratios across capped input totals", () => {
   assert.doesNotMatch(svg, /NaN|Infinity|undefined/);
 });
 
+test("cache model shares use the summary overflow scale", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+  const huge = Number.MAX_SAFE_INTEGER;
+  const eventFor = (model) => ({
+    timestamp: "2026-08-15T12:00:00.000Z",
+    model,
+    totalTokens: huge,
+    inputTokens: huge,
+    cachedInputTokens: 0,
+    outputTokens: 0,
+    breakdownAvailable: true,
+  });
+  const data = buildCacheReportData({
+    events: [
+      eventFor("gpt-5.6-luna"),
+      eventFor("gpt-5.6-luna"),
+      eventFor("gpt-5.6-sol"),
+    ],
+  }, bounds, 7, 1_100);
+
+  assert.deepEqual(data.models.map((model) => model.model), ["Luna", "Sol"]);
+  const total = data.inputTokens;
+  assert.ok(Math.abs((data.models[0].inputTokens / total) * 100 - 66.6666667) < 0.0001);
+  assert.ok(Math.abs((data.models[1].inputTokens / total) * 100 - 33.3333333) < 0.0001);
+  assert.ok(data.models[0].inputTokens > data.models[1].inputTokens);
+});
+
 test("cache report preserves unknown coverage when token sums saturate", () => {
   const bounds = multiDayBounds("2026-08-15", "UTC", 7);
   const huge = Number.MAX_SAFE_INTEGER;
@@ -2199,8 +2226,10 @@ test("trend bars partition capped model segments", () => {
 
   const actual = buildActualTokenBins(snapshot, bounds, 7, 1_100);
   assert.equal(actual.bins.at(-1).totalTokens, huge);
-  assert.equal(actual.bins.at(-1).values.get("Luna"), huge);
-  assert.equal(actual.bins.at(-1).values.get("Sol"), huge);
+  assert.equal(actual.bins.at(-1).values.get("Luna"), huge / 2);
+  assert.equal(actual.bins.at(-1).values.get("Sol"), huge / 2);
+  assert.equal(actual.totals.get("Luna"), huge / 2);
+  assert.equal(actual.totals.get("Sol"), huge / 2);
 
   const terminal = renderTrendPlain({
     snapshot,
@@ -2228,6 +2257,37 @@ test("trend bars partition capped model segments", () => {
         (huge / 10_000_000_000_000_000) * 430,
     ) < 0.01,
   );
+});
+
+test("trend legend totals preserve unequal capped model shares", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+  const huge = Number.MAX_SAFE_INTEGER;
+  const eventFor = (model) => ({
+    timestamp: "2026-08-15T12:00:00.000Z",
+    model,
+    totalTokens: huge,
+  });
+  const snapshot = {
+    events: [
+      eventFor("gpt-5.6-luna"),
+      eventFor("gpt-5.6-luna"),
+      eventFor("gpt-5.6-sol"),
+    ],
+  };
+
+  const actual = buildActualTokenBins(snapshot, bounds, 7, 1_100);
+  const total = [...actual.totals.values()].reduce((sum, value) => sum + value, 0);
+  assert.ok(Math.abs((actual.totals.get("Luna") / total) * 100 - 66.6666667) < 0.0001);
+  assert.ok(Math.abs((actual.totals.get("Sol") / total) * 100 - 33.3333333) < 0.0001);
+
+  const output = renderTrendPlain({
+    snapshot,
+    bounds,
+    days: 7,
+    options: { ascii: true, width: 120 },
+  });
+  assert.match(output, /Luna [^\n]*\(66\.7%\)/);
+  assert.match(output, /Sol [^\n]*\(33\.3%\)/);
 });
 
 test("cache report preserves proportions when token sums are normalized", () => {
