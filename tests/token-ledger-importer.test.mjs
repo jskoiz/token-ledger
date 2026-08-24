@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync, rmSync } from "node:fs";
 import {
   chmod,
   mkdtemp,
@@ -14,7 +15,10 @@ import { resolve } from "node:path";
 import test from "node:test";
 import { gzipSync } from "node:zlib";
 
-import { collectUsage } from "../lib/token-ledger-importer.mjs";
+import {
+  collectUsage,
+  collectUsageSequential,
+} from "../lib/token-ledger-importer.mjs";
 import {
   DEFAULT_SNAPSHOT_MAX_BYTES,
   readPrivateSnapshot,
@@ -790,6 +794,224 @@ test("unchanged quota readings retain their full observed span", async () => {
     assert.equal(snapshot.quotaObservations.length, 1);
     assert.equal(snapshot.quotaObservations[0].timestamp, firstSeenAt);
     assert.equal(snapshot.quotaObservations[0].lastSeenAt, lastSeenAt);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("cold scans conservatively skip irrelevant JSONL lines", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
+  const threadId = "abababab-abab-4bab-8bab-abababababab";
+  try {
+    const rolloutDirectory = resolve(root, "sessions", "2026", "08", "23");
+    await mkdir(rolloutDirectory, { recursive: true });
+    const timestamp = "2026-08-23T10:00:00.000Z";
+    const lines = [
+      JSON.stringify({
+        type: "event_msg",
+        payload: { type: "agent_message", message: "ignored" },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        payload: { type: "message", body: "ignored" },
+      }),
+      JSON.stringify({ type: "unrelated", payload: { type: "token_count" } }),
+      JSON.stringify({}),
+      ...turnStart(timestamp, "turn-1").map((row) => JSON.stringify(row)),
+      "not-json",
+      JSON.stringify(tokenCount("2026-08-23T10:00:01.000Z", 100, 100)),
+    ];
+    await writeFile(
+      resolve(rolloutDirectory, `rollout-${threadId}.jsonl`),
+      `${lines.join("\n")}\n`,
+    );
+
+    const originalParse = JSON.parse;
+    let parseCount = 0;
+    let snapshot;
+    try {
+      JSON.parse = (...args) => {
+        parseCount += 1;
+        return originalParse(...args);
+      };
+      snapshot = await collectUsageSequential({
+        output: resolve(root, "snapshot.json"),
+        codexHome: root,
+        includeArchived: true,
+        since: null,
+      });
+    } finally {
+      JSON.parse = originalParse;
+    }
+
+    assert.equal(parseCount, 4);
+    assert.equal(snapshot.coverage.parseErrors, 1);
+    assert.equal(snapshot.coverage.filesScanned, 1);
+    assert.equal(snapshot.events.length, 1);
+    assert.equal(snapshot.coverage.observedModelCalls, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("bounded scans match the sequential reference across collector fixtures", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
+  const threadId = "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd";
+  const parentId = "efefefef-efef-4fef-8fef-efefefefefef";
+  const firstTimestamp = "2026-08-20T10:00:00.000Z";
+  const duplicateTimestamp = "2026-08-20T10:00:01.000Z";
+  const correctionTimestamp = "2026-08-20T10:00:02.000Z";
+  const archivedTimestamp = "2026-08-23T10:00:00.000Z";
+  const rateLimits = {
+    primary: {
+      window_minutes: 10_080,
+      used_percent: 80,
+      resets_at: Date.parse("2026-08-30T10:00:00.000Z") / 1_000,
+    },
+  };
+  try {
+    const sessionDirectory = resolve(root, "sessions", "2026", "08", "20");
+    const archivedDirectory = resolve(
+      root,
+      "archived_sessions",
+      "2026",
+      "08",
+      "23",
+    );
+    await mkdir(sessionDirectory, { recursive: true });
+    await mkdir(archivedDirectory, { recursive: true });
+
+    const first = tokenCount(firstTimestamp, 100, 100);
+    first.payload.rate_limits = rateLimits;
+    const duplicate = tokenCount(duplicateTimestamp, 100, 100);
+    duplicate.payload.rate_limits = rateLimits;
+    const correction = tokenCount(correctionTimestamp, 80, 80);
+    const mainRows = [
+      {
+        timestamp: firstTimestamp,
+        type: "session_meta",
+        payload: { id: threadId, parent_thread_id: parentId },
+      },
+      ...turnStart(firstTimestamp, "turn-main"),
+      first,
+      duplicate,
+      correction,
+    ];
+    await writeFile(
+      resolve(sessionDirectory, `rollout-${threadId}.jsonl`),
+      `${serialize(mainRows.slice(0, 5))}not-json\n${serialize(mainRows.slice(5))}`,
+    );
+    await writeFile(
+      resolve(
+        archivedDirectory,
+        "rollout-11111111-1111-4111-8111-111111111111.jsonl",
+      ),
+      serialize([
+        ...turnStart(archivedTimestamp, "turn-archived"),
+        tokenCount("2026-08-23T10:00:01.000Z", 50, 50),
+      ]),
+    );
+
+    function withoutGeneratedAt(snapshot) {
+      const { generatedAt: _generatedAt, ...stableSnapshot } = snapshot;
+      return stableSnapshot;
+    }
+
+    async function collectPair(includeArchived, since, suffix) {
+      const options = {
+        output: resolve(root, `parallel-${suffix}.json`),
+        codexHome: root,
+        includeArchived,
+        since,
+      };
+      const progress = [];
+      const parallel = await collectUsage(options, ({ current }) => {
+        progress.push(current);
+      });
+      const sequential = await collectUsageSequential({
+        ...options,
+        output: resolve(root, `sequential-${suffix}.json`),
+      });
+      assert.deepEqual(
+        withoutGeneratedAt(parallel),
+        withoutGeneratedAt(sequential),
+      );
+      return { parallel, progress };
+    }
+
+    const all = await collectPair(true, null, "all");
+    assert.deepEqual(all.progress, [1, 2]);
+    assert.equal(all.parallel.coverage.duplicateEventsSkipped, 1);
+    assert.equal(all.parallel.coverage.correctionIntervals, 1);
+    assert.equal(all.parallel.coverage.parseErrors, 1);
+    assert.equal(all.parallel.quotaObservations.length, 1);
+    assert.equal(all.parallel.threads[0].parentThreadId, parentId);
+    assert.equal(all.parallel.coverage.observedModelCalls, 3);
+
+    const withoutArchived = await collectPair(false, null, "active");
+    assert.equal(withoutArchived.parallel.coverage.observedModelCalls, 2);
+
+    const since = await collectPair(
+      true,
+      new Date("2026-08-23T00:00:00.000Z"),
+      "since",
+    );
+    assert.equal(since.parallel.coverage.observedModelCalls, 1);
+    assert.equal(since.parallel.quotaObservations.length, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("worker failure aborts queued scans and removes the temporary spool", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
+  try {
+    const rolloutDirectory = resolve(root, "sessions", "2026", "08", "23");
+    await mkdir(rolloutDirectory, { recursive: true });
+    const ignored = JSON.stringify({
+      type: "event_msg",
+      payload: { type: "agent_message", body: "ignored" },
+    });
+    const largeContent = `${Array(20_000).fill(ignored).join("\n")}\n`;
+    const paths = [];
+    for (let index = 0; index < 5; index += 1) {
+      const suffix = String(index + 1).padStart(12, "0");
+      const path = resolve(
+        rolloutDirectory,
+        `rollout-00000000-0000-4000-8000-${suffix}.jsonl`,
+      );
+      paths.push(path);
+      await writeFile(path, index === 0 ? `${ignored}\n` : largeContent);
+    }
+
+    const spoolPrefix = "token-ledger-import-";
+    const before = (await readdir(tmpdir()))
+      .filter((entry) => entry.startsWith(spoolPrefix))
+      .sort();
+    let removed = false;
+    await assert.rejects(
+      () =>
+        collectUsage(
+          {
+            output: resolve(root, "snapshot.json"),
+            codexHome: root,
+            includeArchived: false,
+            since: null,
+          },
+          ({ current }) => {
+            if (current === 1 && !removed) {
+              removed = true;
+              if (existsSync(paths[4])) rmSync(paths[4]);
+            }
+          },
+        ),
+      /ENOENT/,
+    );
+    const after = (await readdir(tmpdir()))
+      .filter((entry) => entry.startsWith(spoolPrefix))
+      .sort();
+    assert.deepEqual(after, before);
+    assert.equal(removed, true);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
