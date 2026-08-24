@@ -251,6 +251,79 @@ test("collector applies current Sol and priority Daybreak Red purchased-credit r
   }
 });
 
+test("collector leaves unsupported Daybreak latest aliases unrated", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
+  const threadId = "88888888-8888-4888-8888-888888888888";
+  try {
+    const rolloutDirectory = resolve(root, "sessions", "2026", "08", "18");
+    await mkdir(rolloutDirectory, { recursive: true });
+    await writeFile(
+      resolve(rolloutDirectory, `rollout-${threadId}.jsonl`),
+      serialize([
+        ...turnStart(
+          "2026-08-18T12:00:00.000Z",
+          "turn-red-latest",
+          "gpt-daybreak-red-latest",
+        ),
+        {
+          timestamp: "2026-08-18T12:00:00.000Z",
+          type: "event_msg",
+          payload: {
+            type: "thread_settings_applied",
+            thread_settings: {
+              model: "gpt-daybreak-red-latest",
+              reasoning_effort: "medium",
+              service_tier: "priority",
+            },
+          },
+        },
+        tokenCount("2026-08-18T12:00:01.000Z", 100, 100),
+        ...turnStart(
+          "2026-08-18T12:01:00.000Z",
+          "turn-blue-latest",
+          "gpt-5.5-daybreak-blue-latest",
+        ),
+        {
+          timestamp: "2026-08-18T12:01:00.000Z",
+          type: "event_msg",
+          payload: {
+            type: "thread_settings_applied",
+            thread_settings: {
+              model: "gpt-5.5-daybreak-blue-latest",
+              reasoning_effort: "medium",
+              service_tier: "fast",
+            },
+          },
+        },
+        tokenCount("2026-08-18T12:01:01.000Z", 200, 100),
+      ]),
+    );
+
+    const snapshot = await collectUsage({
+      output: resolve(root, "snapshot.json"),
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+
+    assert.equal(snapshot.events.length, 2);
+    assert.deepEqual(
+      snapshot.events.map((event) => event.model),
+      ["daybreak-red", "daybreak-blue"],
+    );
+    assert.deepEqual(
+      snapshot.events.map((event) => event.serviceTier),
+      ["priority", "fast"],
+    );
+    assert.deepEqual(
+      snapshot.events.map((event) => event.rateCardCredits),
+      [null, null],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("exports clamp token subsets and price whitespace model names", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
   const threadId = "33333333-3333-4333-8333-333333333333";
