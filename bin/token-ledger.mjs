@@ -34,6 +34,7 @@ import {
   usageCallCount,
   usageThreadIds,
 } from "../lib/token-ledger-usage.mjs";
+import { calculateCodexPurchasedCredits } from "../lib/token-ledger-rates.mjs";
 
 export const DEFAULT_SNAPSHOT = resolve(
   homedir(),
@@ -695,6 +696,14 @@ function modelLabel(value) {
   return model;
 }
 
+function currentRateCardCredits(event) {
+  return calculateCodexPurchasedCredits({
+    model: event?.model,
+    serviceTier: event?.serviceTier,
+    usage: event,
+  });
+}
+
 export function filterDayEvents(snapshot, bounds) {
   const start = bounds.start.getTime();
   const end = bounds.end.getTime();
@@ -731,8 +740,9 @@ export function aggregateProjects(snapshot, events, options = {}) {
     row.toolCalls += Number(event.toolCalls) || 0;
     row.events += usageCallCount(event);
     for (const threadId of usageThreadIds(event)) row.threadIds.add(threadId);
-    if (event.rateCardCredits !== null && Number.isFinite(Number(event.rateCardCredits))) {
-      row.rateCardCredits += Number(event.rateCardCredits);
+    const rateCardCredits = currentRateCardCredits(event);
+    if (Number.isFinite(rateCardCredits)) {
+      row.rateCardCredits += rateCardCredits;
       row.knownCreditTokens += Number(event.totalTokens) || 0;
     }
 
@@ -745,8 +755,8 @@ export function aggregateProjects(snapshot, events, options = {}) {
     };
     modelRow.totalTokens += Number(event.totalTokens) || 0;
     modelRow.events += usageCallCount(event);
-    if (event.rateCardCredits !== null && Number.isFinite(Number(event.rateCardCredits))) {
-      modelRow.rateCardCredits += Number(event.rateCardCredits);
+    if (Number.isFinite(rateCardCredits)) {
+      modelRow.rateCardCredits += rateCardCredits;
     }
     row.models.set(model, modelRow);
     grouped.set(project, row);
@@ -778,8 +788,9 @@ function totalSummary(events) {
       for (const threadId of usageThreadIds(event)) {
         summary.threadIds.add(threadId);
       }
-      if (event.rateCardCredits !== null && Number.isFinite(Number(event.rateCardCredits))) {
-        summary.rateCardCredits += Number(event.rateCardCredits);
+      const rateCardCredits = currentRateCardCredits(event);
+      if (Number.isFinite(rateCardCredits)) {
+        summary.rateCardCredits += rateCardCredits;
         summary.knownCreditTokens += Number(event.totalTokens) || 0;
       }
       return summary;

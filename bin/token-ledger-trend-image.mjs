@@ -11,6 +11,7 @@ import { buildActualTokenBins } from "./token-ledger-trend-terminal.mjs";
 import { buildCacheReportData } from "./token-ledger-cache-image.mjs";
 import { usageBucketsInRange } from "../lib/token-ledger-usage.mjs";
 import {
+  calculateCodexPurchasedCredits,
   codexCreditMultiplier,
   isFastServiceTier,
 } from "../lib/token-ledger-rates.mjs";
@@ -404,7 +405,8 @@ function fallbackProjectRows(snapshot, bounds) {
 
 function fastRateSummary(snapshot, bounds) {
   let ratedTokens = 0;
-  let weightedMultiplierTokens = 0;
+  let standardCardCredits = 0;
+  let fastCardCredits = 0;
   let unratedTokens = 0;
   const multipliers = new Set();
   for (const event of usageBucketsInRange(
@@ -415,12 +417,28 @@ function fastRateSummary(snapshot, bounds) {
     if (!isFastServiceTier(event.serviceTier)) continue;
     const tokens = Math.max(0, Number(event.totalTokens) || 0);
     const multiplier = codexCreditMultiplier(event.model, event.serviceTier);
-    if (multiplier === null) {
+    const standardCredits = calculateCodexPurchasedCredits({
+      model: event.model,
+      serviceTier: null,
+      usage: event,
+    });
+    const fastCredits = calculateCodexPurchasedCredits({
+      model: event.model,
+      serviceTier: event.serviceTier,
+      usage: event,
+    });
+    if (
+      multiplier === null ||
+      !Number.isFinite(standardCredits) ||
+      !(standardCredits > 0) ||
+      !Number.isFinite(fastCredits)
+    ) {
       unratedTokens += tokens;
       continue;
     }
     ratedTokens += tokens;
-    weightedMultiplierTokens += tokens * multiplier;
+    standardCardCredits += standardCredits;
+    fastCardCredits += fastCredits;
     multipliers.add(multiplier);
   }
   const sortedMultipliers = [...multipliers].sort((left, right) => left - right);
@@ -428,7 +446,7 @@ function fastRateSummary(snapshot, bounds) {
     ratedTokens,
     unratedTokens,
     effectiveMultiplier:
-      ratedTokens > 0 ? weightedMultiplierTokens / ratedTokens : null,
+      standardCardCredits > 0 ? fastCardCredits / standardCardCredits : null,
     minimumMultiplier: sortedMultipliers[0] ?? null,
     maximumMultiplier: sortedMultipliers.at(-1) ?? null,
     mixedMultipliers: sortedMultipliers.length > 1,

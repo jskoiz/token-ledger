@@ -49,6 +49,7 @@ import {
   apiUsdForUsage,
   calculateCodexPurchasedCredits,
   codexCreditMultiplier,
+  hasDetailedTokenBreakdown,
   isFastServiceTier,
   normalizeCodexCreditModel,
   partitionTokenUsage,
@@ -276,6 +277,47 @@ test("aggregateProjects sorts by tokens and retains model mix", () => {
     ["Sol", "Luna"],
   );
   assert.equal(rows[0].totalTokens, 1_000);
+});
+
+test("ordinary terminal credit shares use the current rate card", () => {
+  const events = [
+    {
+      project: "alpha",
+      model: "gpt-5.6-sol",
+      totalTokens: 1_000_000,
+      inputTokens: 1_000_000,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      rateCardCredits: 9_999,
+    },
+    {
+      project: "beta",
+      model: "gpt-5.6-luna",
+      totalTokens: 1_000_000,
+      inputTokens: 1_000_000,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      rateCardCredits: 0.001,
+    },
+  ];
+  const rows = aggregateProjects({ events: [], threads: [] }, events, {
+    rawProjects: true,
+  });
+
+  assert.equal(rows[0].rateCardCredits, 100);
+  assert.equal(rows[1].rateCardCredits, 5);
+  assert.equal(rows[0].knownCreditTokens, 1_000_000);
+  assert.equal(rows[1].knownCreditTokens, 1_000_000);
+
+  const output = renderTerminal({
+    options: { plain: true, ascii: true, width: 100 },
+    bounds: dayBounds("2026-08-01", "UTC"),
+    events,
+    rows,
+    allRows: rows,
+  });
+  assert.match(output, /95\.2% credits/);
+  assert.match(output, /4\.76% credits/);
 });
 
 test("aggregateProjects preserves compacted call and thread counts", () => {
@@ -1311,6 +1353,28 @@ test("purchased-credit rates normalize exact current model identifiers", () => {
   assert.equal(codexCreditMultiplier("gpt-daybreak-red", "fast"), 2.5);
   assert.equal(codexCreditMultiplier("gpt-daybreak-blue", "fast"), 2.5);
   assert.equal(codexCreditMultiplier("gpt-daybreak-red-latest", "fast"), null);
+});
+
+test("proportional fragments retain detailed token breakdowns through reconciliation noise", () => {
+  const fraction = 1 / 101;
+  const usage = {
+    inputTokens: fraction,
+    cachedInputTokens: 0,
+    outputTokens: 5 * fraction,
+    totalTokens: 6 * fraction,
+  };
+
+  assert.notEqual(usage.inputTokens + usage.outputTokens, usage.totalTokens);
+  assert.equal(hasDetailedTokenBreakdown(usage), true);
+  assert.ok(Number.isFinite(calculateCodexPurchasedCredits({
+    model: "gpt-5.6-luna",
+    serviceTier: null,
+    usage,
+  })));
+  assert.equal(
+    hasDetailedTokenBreakdown({ ...usage, totalTokens: 7 * fraction }),
+    false,
+  );
 });
 
 test("quota normalization is monotone inside cycles and marks resets", () => {
@@ -3465,7 +3529,7 @@ test("trend fast shading recognizes both tiers and reports mixed model rates", (
   );
 
   const svg = renderTrendImage({ snapshot, bounds, days: 7 });
-  assert.match(svg, /2\.38×/);
+  assert.match(svg, /2\.43×/);
   assert.match(svg, /2×–2\.5× by model/);
   assert.match(svg, /some fast usage unrated/);
   assert.match(svg, /Darker shade = fast mode/);
