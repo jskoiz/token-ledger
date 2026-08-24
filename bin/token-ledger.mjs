@@ -1220,10 +1220,10 @@ function rangeDescription(options, bounds) {
 function emptyRangeMessage(options, snapshot, bounds) {
   const range = rangeDescription(options, bounds);
   const cutoffMs = snapshotCollectionCutoffMs(snapshot);
-  const isBeforeCutoff =
-    Number.isFinite(cutoffMs) && bounds.end.getTime() <= cutoffMs;
+  const hasUncollectedHistory =
+    Number.isFinite(cutoffMs) && bounds.start.getTime() < cutoffMs;
   const lines = [
-    isBeforeCutoff
+    hasUncollectedHistory
       ? `No model-call events were collected for ${range} (${bounds.timeZone}); history before the snapshot cutoff is outside this snapshot and is not a verified zero.`
       : `No model-call events found for ${range} (${bounds.timeZone}).`,
   ];

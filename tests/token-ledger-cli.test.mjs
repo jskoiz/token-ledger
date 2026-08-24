@@ -330,6 +330,10 @@ test("parseArgs normalizes and validates the collection cutoff", () => {
     () => parseArgs(["day", "2026-08-20", "--since", "not-a-date"]),
     /--since requires a valid ISO timestamp/,
   );
+  assert.throws(
+    () => parseArgs(["day", "2026-08-20", "--since", "01/02/2026"]),
+    /--since requires a valid ISO timestamp/,
+  );
 });
 
 test("parseArgs treats an empty command and help aliases as help", () => {
@@ -1282,7 +1286,7 @@ test("filtered collection scope is visible in terminal and PNG renderers", () =>
   assert.match(cacheSvg, /TRUNCATED HISTORY/);
 });
 
-test("ranges before the cutoff are reported as not collected", async () => {
+test("empty ranges with uncollected history are reported as not collected", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-since-empty-"));
   const snapshotPath = resolve(root, "scoped-snapshot.json");
   try {
@@ -1295,18 +1299,12 @@ test("ranges before the cutoff are reported as not collected", async () => {
           includeArchived: true,
         },
       },
-      events: [{
-        timestamp: "2026-08-20T13:00:00.000Z",
-        project: "scoped",
-        threadId: "scoped-1",
-        model: "gpt-5.6-luna",
-        totalTokens: 100,
-      }],
-      threads: [{ id: "scoped-1", project: "scoped" }],
+      events: [],
+      threads: [],
     });
-    const output = await run(parseArgs([
+    const runEmptyDay = (date) => run(parseArgs([
       "day",
-      "2026-08-19",
+      date,
       "--input",
       snapshotPath,
       "--no-refresh",
@@ -1318,8 +1316,12 @@ test("ranges before the cutoff are reported as not collected", async () => {
       "--tz",
       "UTC",
     ]));
+    const output = await runEmptyDay("2026-08-19");
     assert.match(output, /not a verified zero/);
     assert.match(output, /History: TRUNCATED HISTORY · before 2026-08-20T12:00:00\.000Z/);
+    const partialOutput = await runEmptyDay("2026-08-20");
+    assert.match(partialOutput, /not a verified zero/);
+    assert.doesNotMatch(partialOutput, /No model-call events found/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
