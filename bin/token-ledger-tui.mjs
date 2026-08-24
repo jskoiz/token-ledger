@@ -63,22 +63,40 @@ export function startInteractive(view, {
       }
     };
 
-    function teardown(error = null, afterRestore = null) {
+    function teardown(
+      error = null,
+      afterRestore = null,
+      { preserveSignalGuards = false } = {},
+    ) {
       if (closed) return;
       closed = true;
       const cleanupErrors = [];
       let restorationPending = false;
       let settled = false;
+      const signalGuards = preserveSignalGuards
+        ? registrations.filter(({ target, event }) =>
+          target === signalTarget && SUPPORTED_SIGNALS.includes(event))
+        : [];
+      const signalGuardSet = new Set(signalGuards);
       const settle = () => {
         if (settled) return;
         settled = true;
+        for (const { target, event, handler } of signalGuards) {
+          attemptCleanup(cleanupErrors, () => target.off(event, handler));
+        }
         if (afterRestore) afterRestore();
         if (error !== null) reject(error);
         else if (cleanupErrors.length > 0) reject(cleanupErrors[0]);
         else resolve();
       };
 
-      for (const { target, event, handler } of registrations.splice(0)) {
+      const activeRegistrations = registrations.splice(0);
+      for (const registration of activeRegistrations) {
+        const { target, event, handler } = registration;
+        if (signalGuardSet.has(registration)) {
+          registrations.push(registration);
+          continue;
+        }
         attemptCleanup(cleanupErrors, () => target.off(event, handler));
       }
       if (rawModeTouched) {
@@ -128,11 +146,12 @@ export function startInteractive(view, {
     }
 
     function onSignal(signal) {
+      if (closed) return;
       const exitCode = 128 + SIGNAL_EXIT_CODES[signal];
       signalTarget.exitCode = exitCode;
       teardown(null, () => {
         if (signalTarget.pid) signalTarget.kill(signalTarget.pid, signal);
-      });
+      }, { preserveSignalGuards: true });
     }
 
     function onStreamError(streamError) {
@@ -165,7 +184,9 @@ export function startInteractive(view, {
       registerListener(stdin, "error", onStreamError);
       registerListener(stdout, "error", onStreamError);
       for (const signal of SUPPORTED_SIGNALS) {
-        registerListener(signalTarget, signal, () => onSignal(signal), "once");
+        // Keep a live guard through deferred terminal restoration so a second
+        // signal cannot reach Node's default termination path mid-cleanup.
+        registerListener(signalTarget, signal, () => onSignal(signal));
       }
       rawModeTouched = true;
       setRawMode(true);

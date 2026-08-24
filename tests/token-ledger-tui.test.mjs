@@ -241,7 +241,10 @@ test("signals re-raise only after terminal restoration flushes", async () => {
   const session = start(terminal);
 
   terminal.signalTarget.emit("SIGTERM");
+  terminal.signalTarget.emit("SIGINT");
   assert.deepEqual(signalOrder, []);
+  assert.equal(terminal.signalTarget.listenerCount("SIGINT"), 1);
+  assert.equal(terminal.signalTarget.listenerCount("SIGTERM"), 1);
   assert.ok(terminal.state.writes.at(-1).includes(SHOW_CURSOR));
 
   terminal.state.flushWriteCallbacks();
