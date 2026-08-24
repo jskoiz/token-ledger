@@ -21,6 +21,7 @@ import {
   usageCallCount,
   usageDetailedCallCount,
   usageInputCallCount,
+  MAX_SAFE_TOKEN_COUNT,
 } from "../lib/token-ledger-usage.mjs";
 
 const COLORS = {
@@ -40,6 +41,7 @@ const COLORS = {
 
 const MIN_BIN_WIDTH = 34;
 const MAX_MODEL_ROWS = 6;
+const INPUT_SCALE = Symbol("inputScale");
 
 function percent(value) {
   if (!Number.isFinite(value)) return "—";
@@ -224,25 +226,56 @@ function emptyAggregate() {
   };
 }
 
-function addInput(target, breakdown, inputCallCount) {
-  target.inputTokens = checkedTokenAdd(
-    target.inputTokens,
-    breakdown.inputTokens,
-    { allowFractional: true },
+function inputScale(target) {
+  return Number.isFinite(target[INPUT_SCALE]) && target[INPUT_SCALE] >= 1
+    ? target[INPUT_SCALE]
+    : 1;
+}
+
+function setInputScale(target, scale) {
+  Object.defineProperty(target, INPUT_SCALE, {
+    configurable: true,
+    enumerable: false,
+    value: scale,
+    writable: true,
+  });
+}
+
+function addInputTotals(target, inputTokens, cachedInputTokens, sourceScale = 1) {
+  const targetScale = inputScale(target);
+  const normalizedSourceScale = Number.isFinite(sourceScale) && sourceScale >= 1
+    ? sourceScale
+    : 1;
+  const commonScale = Math.max(targetScale, normalizedSourceScale);
+  const targetRatio = targetScale / commonScale;
+  const sourceRatio = normalizedSourceScale / commonScale;
+  const input = Number.isFinite(inputTokens) && inputTokens >= 0
+    ? inputTokens
+    : 0;
+  const cached = Math.min(
+    input,
+    Number.isFinite(cachedInputTokens) && cachedInputTokens >= 0
+      ? cachedInputTokens
+      : 0,
   );
-  target.cachedInputTokens = checkedTokenAdd(
-    target.cachedInputTokens,
-    breakdown.cachedInputTokens,
-    { allowFractional: true },
+  const nextInput = target.inputTokens * targetRatio + input * sourceRatio;
+  const nextCached = target.cachedInputTokens * targetRatio + cached * sourceRatio;
+  const scaleFactor = Math.max(
+    1,
+    nextInput / MAX_SAFE_TOKEN_COUNT,
+    nextCached / MAX_SAFE_TOKEN_COUNT,
   );
-  target.cachedInputTokens = Math.min(
-    target.inputTokens,
-    target.cachedInputTokens,
-  );
+  target.inputTokens = nextInput / scaleFactor;
+  target.cachedInputTokens = nextCached / scaleFactor;
   target.uncachedInputTokens = Math.max(
     0,
     target.inputTokens - target.cachedInputTokens,
   );
+  setInputScale(target, commonScale * scaleFactor);
+}
+
+function addInput(target, breakdown, inputCallCount) {
+  addInputTotals(target, breakdown.inputTokens, breakdown.cachedInputTokens);
   target.inputEventCount = checkedTokenAdd(
     target.inputEventCount,
     inputCallCount,
@@ -260,12 +293,14 @@ function finalizeAggregate(aggregate) {
     : aggregate.eventCount > 0
       ? (aggregate.detailedEventCount / aggregate.eventCount) * 100
       : null;
-  return {
+  const finalized = {
     ...aggregate,
     uncachedInputTokens,
     rate: rateFor(aggregate.inputTokens, aggregate.cachedInputTokens),
     measurementCoveragePercent,
   };
+  setInputScale(finalized, inputScale(aggregate));
+  return finalized;
 }
 
 function accumulateRange(snapshot, bounds, bins = null, dateIndexByString = null) {
@@ -424,13 +459,11 @@ function combinedModelRows(models) {
   const visible = models.slice(0, MAX_MODEL_ROWS - 1);
   const remainder = models.slice(MAX_MODEL_ROWS - 1).reduce(
     (row, model) => {
-      row.inputTokens = checkedTokenAdd(row.inputTokens, model.inputTokens, {
-        allowFractional: true,
-      });
-      row.cachedInputTokens = checkedTokenAdd(
-        row.cachedInputTokens,
+      addInputTotals(
+        row,
+        model.inputTokens,
         model.cachedInputTokens,
-        { allowFractional: true },
+        inputScale(model),
       );
       row.inputEventCount = checkedTokenAdd(
         row.inputEventCount,

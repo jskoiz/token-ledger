@@ -1984,10 +1984,10 @@ test("cache report caps safe token sums before rendering", () => {
   assert.equal(inferredOverflow.totalTokens, 0);
 });
 
-test("cache report keeps capped ratios finite", () => {
+test("cache report preserves ratios across capped input totals", () => {
   const bounds = multiDayBounds("2026-08-15", "UTC", 7);
   const first = Number.MAX_SAFE_INTEGER;
-  const second = 100;
+  const second = first;
   const eventFor = (inputTokens, cachedInputTokens) => ({
     timestamp: "2026-08-15T12:00:00.000Z",
     model: "gpt-5.6-luna",
@@ -2013,7 +2013,11 @@ test("cache report keeps capped ratios finite", () => {
       if (key in aggregate) assert.ok(Number.isFinite(aggregate[key]), `${key} overflowed`);
     }
   }
-  assert.ok(Math.abs(data.rate - 100) < 0.000_000_1);
+  assert.ok(Math.abs(data.rate - 50) < 0.000_000_1);
+  for (const aggregate of [data, ...data.bins, ...data.models]) {
+    if (!(aggregate.inputTokens > 0)) continue;
+    assert.ok(Math.abs(aggregate.rate - 50) < 0.000_000_1);
+  }
   assert.equal(
     data.cachedInputTokens + data.uncachedInputTokens,
     data.inputTokens,
@@ -2021,8 +2025,60 @@ test("cache report keeps capped ratios finite", () => {
   assert.equal(data.measurementCoveragePercent, 100);
 
   const svg = renderCacheReportImage({ snapshot, bounds, days: 7 });
-  assert.match(svg, />100\.0% cached</);
+  assert.match(svg, />50\.0% cached</);
   assert.doesNotMatch(svg, /NaN|Infinity|undefined/);
+});
+
+test("trend bars partition capped model segments", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+  const huge = Number.MAX_SAFE_INTEGER;
+  const snapshot = {
+    generatedAt: "2026-08-15T12:00:00.000Z",
+    events: [
+      {
+        timestamp: "2026-08-15T12:00:00.000Z",
+        model: "gpt-5.6-luna",
+        totalTokens: huge,
+      },
+      {
+        timestamp: "2026-08-15T13:00:00.000Z",
+        model: "gpt-5.6-sol",
+        totalTokens: huge,
+      },
+    ],
+  };
+
+  const actual = buildActualTokenBins(snapshot, bounds, 7, 1_100);
+  assert.equal(actual.bins.at(-1).totalTokens, huge);
+  assert.equal(actual.bins.at(-1).values.get("Luna"), huge);
+  assert.equal(actual.bins.at(-1).values.get("Sol"), huge);
+
+  const terminal = renderTrendPlain({
+    snapshot,
+    bounds,
+    days: 7,
+    options: { ascii: true, width: 120 },
+  });
+  const chartRows = terminal.split("\n").slice(4, 15);
+  assert.equal(chartRows.filter((line) => line.includes("█")).length, 9);
+
+  const image = renderTrendImage({
+    snapshot,
+    bounds,
+    days: 7,
+    options: { imageWidth: 900 },
+  });
+  const usageHeights = [...image.matchAll(
+    /<rect [^>]*height="([\d.]+)"[^>]*data-series="usage-bars"/g,
+  )].map((match) => Number(match[1]));
+  assert.equal(usageHeights.length, 2);
+  assert.ok(Math.abs(usageHeights[0] - usageHeights[1]) < 0.01);
+  assert.ok(
+    Math.abs(
+      usageHeights.reduce((sum, height) => sum + height, 0) -
+        (huge / 10_000_000_000_000_000) * 430,
+    ) < 0.01,
+  );
 });
 
 test("cache report preserves proportions when token sums are normalized", () => {

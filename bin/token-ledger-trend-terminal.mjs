@@ -321,7 +321,12 @@ function allocateSegmentHeights(entries, total, maxValue, plotHeight) {
     ? Math.max(1, Math.round((total / maxValue) * (plotHeight - 1)))
     : 0;
   if (!barHeight) return [];
-  const ideal = entries.map(([, value]) => (value / total) * barHeight);
+  // Model counters can cap independently when the bin total reaches the
+  // safe-token limit. Partition the already-scaled bar across the model
+  // entries so capped components cannot make the stack taller than its bin.
+  const segmentTotal = entries.reduce((sum, [, value]) => sum + value, 0);
+  const partitionTotal = segmentTotal > 0 ? segmentTotal : total;
+  const ideal = entries.map(([, value]) => (value / partitionTotal) * barHeight);
   const heights = ideal.map(Math.floor);
   let remainder = barHeight - heights.reduce((sum, value) => sum + value, 0);
   const order = ideal

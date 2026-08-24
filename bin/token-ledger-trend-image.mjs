@@ -1190,9 +1190,12 @@ export function renderTrendImage({
   const segmentLabels = [];
   for (const { bin, centerX, x } of barGeometry) {
     const entries = sortedModelEntries(bin.values);
+    const segmentTotal = entries.reduce((sum, [, value]) => sum + value, 0);
+    const partitionTotal = segmentTotal > 0 ? segmentTotal : binTotalOf(bin);
+    const barHeight = (binTotalOf(bin) / maxBar) * plotHeight;
     let y = plotBottom;
     for (const [model, value] of entries) {
-      const segmentHeight = (value / maxBar) * plotHeight;
+      const segmentHeight = (value / partitionTotal) * barHeight;
       y -= segmentHeight;
       if (segmentHeight <= 0.4) continue;
       const baseColor = styleForModel(model);
