@@ -22,8 +22,10 @@ import {
 } from "../lib/token-ledger-snapshot.mjs";
 import {
   buildUsageBuckets,
+  normalizeTokenUsage,
   SNAPSHOT_SCHEMA_VERSION,
   splitUsageBucketsAtBoundaries,
+  usageBuckets,
   usageBucketStats,
 } from "../lib/token-ledger-usage.mjs";
 
@@ -499,11 +501,13 @@ test("usage buckets cap safe aggregates and exclude invalid totals", () => {
     latestTimestampMs: Date.parse("2026-08-22T12:00:01.000Z"),
     policy: [{ maximumAgeMs: Infinity, resolutionMs: 86_400_000 }],
   });
-  const detailed = buckets.find((bucket) => bucket.breakdownAvailable === true);
-  const unknown = buckets.find((bucket) => bucket.breakdownAvailable === false);
-  assert.equal(detailed.totalTokens, Number.MAX_SAFE_INTEGER);
-  assert.equal(detailed.inputTokens, Number.MAX_SAFE_INTEGER);
-  assert.equal(detailed.cachedInputTokens, Number.MAX_SAFE_INTEGER);
+  const capped = buckets.find(
+    (bucket) => bucket.totalTokens === Number.MAX_SAFE_INTEGER,
+  );
+  const unknown = buckets.find((bucket) => bucket.totalTokens === 100);
+  assert.equal(capped.breakdownAvailable, false);
+  assert.equal(capped.inputTokens, Number.MAX_SAFE_INTEGER);
+  assert.equal(capped.cachedInputTokens, Number.MAX_SAFE_INTEGER);
   assert.equal(unknown.totalTokens, 100);
   assert.equal(unknown.inputTokens, 0);
   assert.equal(usageBucketStats(buckets).callCount, 3);
@@ -563,6 +567,20 @@ test("compacted buckets split proportionally at range boundaries", () => {
     fragments.reduce((sum, fragment) => sum + fragment.callCount, 0) -
       bucket.callCount,
   ) < 1e-9);
+  const normalizedFragments = usageBuckets({ events: fragments });
+  assert.ok(normalizedFragments.every((fragment) => fragment.breakdownAvailable));
+});
+
+test("estimated token components tolerate floating-point reconciliation", () => {
+  const normalized = normalizeTokenUsage({
+    inputTokens: 0.1,
+    outputTokens: 0.5,
+    totalTokens: 0.6,
+    rangeAllocationEstimated: true,
+    breakdownAvailable: true,
+  });
+
+  assert.equal(normalized.breakdownAvailable, true);
 });
 
 test("dense recent usage compacts during collection before memory grows unbounded", () => {
@@ -904,6 +922,56 @@ test("validates token totals and preserves malformed breakdowns as unknown", asy
     assert.equal(thread.totalTokens, 200);
     assert.equal(thread.detailedTokens, 100);
     assert.equal(thread.unknownBreakdownTokens, 100);
+    assert.equal(thread.coverage, "partial");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("coverage preserves unknown totals after safe-counter saturation", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-saturation-"));
+  const threadId = "13131313-1313-4131-8131-131313131313";
+  const firstTimestamp = "2026-08-18T21:00:00.000Z";
+  const secondTimestamp = "2026-08-18T21:01:00.000Z";
+  const huge = Number.MAX_SAFE_INTEGER;
+  const totalOnlyRecord = (timestamp) => ({
+    timestamp,
+    type: "event_msg",
+    payload: {
+      type: "token_count",
+      info: {
+        total_token_usage: { total_tokens: huge },
+        last_token_usage: { total_tokens: huge },
+        model_context_window: 128000,
+      },
+    },
+  });
+
+  try {
+    const rolloutDirectory = resolve(root, "sessions", "2026", "08", "18");
+    await mkdir(rolloutDirectory, { recursive: true });
+    await writeFile(
+      resolve(rolloutDirectory, `rollout-${threadId}.jsonl`),
+      serialize([
+        ...turnStart(firstTimestamp, "saturation-detailed"),
+        tokenCount(firstTimestamp, huge, huge),
+        ...turnStart(secondTimestamp, "saturation-unknown"),
+        totalOnlyRecord(secondTimestamp),
+      ]),
+    );
+
+    const snapshot = await collectUsage({
+      output: resolve(root, "snapshot.json"),
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+    const [thread] = snapshot.threads;
+    assert.equal(snapshot.coverage.observedTokens, huge);
+    assert.equal(snapshot.coverage.detailedTokens, huge);
+    assert.equal(snapshot.coverage.unknownBreakdownTokens, huge);
+    assert.equal(snapshot.coverage.detailedPercent, 50);
+    assert.equal(thread.unknownBreakdownTokens, huge);
     assert.equal(thread.coverage, "partial");
   } finally {
     await rm(root, { recursive: true, force: true });
