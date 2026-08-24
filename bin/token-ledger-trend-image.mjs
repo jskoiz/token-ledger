@@ -474,10 +474,11 @@ export function renderTrendImage({
     ),
     end: bounds.start,
   };
-  const priorTotals = buildActualTokenBins(snapshot, priorBounds, days, plotWidth, {
+  const priorActual = buildActualTokenBins(snapshot, priorBounds, days, plotWidth, {
     minBinWidth: MIN_BAR_WIDTH,
     preferDaily: true,
-  }).totals;
+  });
+  const priorTotals = priorActual.totals;
 
   const latestQuotaPoint = [...(trend.points ?? [])]
     .filter(
@@ -757,7 +758,8 @@ export function renderTrendImage({
     const priorValue = priorTotals.get(model) ?? 0;
     let chip = null;
     if (priorValue >= 1_000_000) {
-      const ratio = tokens / priorValue;
+      const ratio =
+        (tokens / priorValue) * ((actual.scale ?? 1) / (priorActual.scale ?? 1));
       const delta = (ratio - 1) * 100;
       chip = {
         text: ratio >= 5

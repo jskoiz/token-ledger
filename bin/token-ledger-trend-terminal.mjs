@@ -370,6 +370,7 @@ export function buildActualTokenBins(
     bins,
     totals: totalsState.values,
     fastTotals: totalsState.fastValues,
+    scale: totalsState.scale,
     binSize,
     binCount,
   };

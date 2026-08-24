@@ -1572,6 +1572,38 @@ test("trend token bins share one overflow scale across calendar days", () => {
   );
 });
 
+test("image trend deltas reconcile independently scaled periods", () => {
+  const huge = Number.MAX_SAFE_INTEGER;
+  const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+  const snapshot = {
+    events: [
+      {
+        timestamp: "2026-08-08T12:00:00.000Z",
+        model: "gpt-5.6-luna",
+        totalTokens: huge,
+      },
+      {
+        timestamp: "2026-08-15T12:00:00.000Z",
+        model: "gpt-5.6-luna",
+        totalTokens: huge,
+      },
+      {
+        timestamp: "2026-08-15T13:00:00.000Z",
+        model: "gpt-5.6-luna",
+        totalTokens: huge,
+      },
+    ],
+  };
+
+  const svg = renderTrendImage({
+    snapshot,
+    bounds,
+    days: 7,
+    options: { imageWidth: 1_280 },
+  });
+  assert.match(svg, /\+100\.0%/);
+});
+
 test("image trend renderer emits stacked model bars and a quota line", () => {
   const bounds = multiDayBounds("2026-08-15", "Pacific/Honolulu", 7);
   const resetOne = Date.parse("2026-08-11T10:00:00.000Z") / 1_000;
