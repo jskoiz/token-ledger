@@ -696,6 +696,14 @@ export function renderTrendImage({
     bounds.timeZone,
     history,
   ].filter(Boolean).join(" · ");
+  const headerTitleWidth = textWidth(title, 27, 800) -
+    0.27 * (title.length - 1);
+  const headerAvailableWidth = contentRight - outer;
+  const headerMetadataFits = headerTitleWidth + textWidth(subtitle, 14) + 24 <=
+    headerAvailableWidth;
+  const renderedSubtitle = headerMetadataFits
+    ? subtitle
+    : truncateText(subtitle, headerAvailableWidth, 14);
   const description = percentMode
     ? "Dark report card: compact actual-token stat cards beside pace and runway, stacked columns of observed weekly-meter drain with an explicitly estimated per-model split, the OpenAI-reported weekly limit remaining as an amber line, a partial final day ending at report time, a compressed cache-rate-by-period strip, and top projects beside per-model cache rates."
     : "Dark report card: compact model stat cards with week-over-week delta chips beside pace and runway, stacked columns of local token volume by model with fast-mode usage in a darker shade, the OpenAI-reported weekly limit remaining as a smoothed amber line, a partial final day ending at report time, a compressed cache-rate-by-period strip, and top projects beside per-model cache rates.";
@@ -716,8 +724,8 @@ export function renderTrendImage({
     }),
     svgText({
       x: contentRight,
-      y: headerBaseline,
-      value: subtitle,
+      y: headerMetadataFits ? headerBaseline : headerBaseline + 24,
+      value: renderedSubtitle,
       fill: COLORS.muted,
       size: 14,
       anchor: "end",

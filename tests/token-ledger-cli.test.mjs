@@ -951,7 +951,12 @@ test("unfiltered reads reject a cache with a filtered collection scope", async (
         "--tz",
         "UTC",
       ])),
-      /Snapshot collection scope does not match the requested filters/,
+      (error) => {
+        assert.match(error.message, /Snapshot collection scope does not match the requested filters/);
+        assert.match(error.message, /For --input, supply matching --since\/--no-archived filters/);
+        assert.match(error.message, /--refresh cannot be combined with --input/);
+        return true;
+      },
     );
     await assert.rejects(
       () => run(parseArgs([
@@ -1267,6 +1272,7 @@ test("filtered collection scope is visible in terminal and PNG renderers", () =>
     projectRows: rows,
   });
   assert.match(trendSvg, /TRUNCATED HISTORY/);
+  assert.match(trendSvg, /<text[^>]*y="77"[^>]*>[^<]*TRUNCATED HISTORY/);
 
   const cacheSvg = renderCacheReportImage({
     snapshot,

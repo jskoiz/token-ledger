@@ -921,8 +921,11 @@ function snapshotScopeError(snapshot, options) {
       : "archived sessions excluded";
     return `${since}; ${archives}`;
   };
+  const remedy = options.inputExplicit
+    ? "For --input, supply matching --since/--no-archived filters or rebuild that file with the collector; --refresh cannot be combined with --input."
+    : "Rebuild it with --refresh.";
   return new Error(
-    `Snapshot collection scope does not match the requested filters (requested ${describe(requested)}; found ${describe(actual)}). Rebuild it with --refresh.`,
+    `Snapshot collection scope does not match the requested filters (requested ${describe(requested)}; found ${describe(actual)}). ${remedy}`,
   );
 }
 
