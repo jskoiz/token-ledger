@@ -9,8 +9,19 @@ const HIDE_CURSOR = "\u001b[?25l";
 const SHOW_CURSOR = "\u001b[?25h";
 const CLEAR_SCREEN = "\u001b[2J\u001b[H";
 const RESET = "\u001b[0m";
+const SUPPORTED_SIGNALS = ["SIGINT", "SIGHUP", "SIGTERM"];
+const SIGNAL_EXIT_CODES = {
+  SIGINT: 2,
+  SIGHUP: 1,
+  SIGTERM: 15,
+};
 
-export function startInteractive(view) {
+export function startInteractive(view, {
+  stdin = process.stdin,
+  stdout = process.stdout,
+  signalTarget = process,
+  render = renderFullscreen,
+} = {}) {
   const {
     options,
     snapshot,
@@ -20,8 +31,6 @@ export function startInteractive(view) {
     rows,
     allRows,
   } = view;
-  const stdin = process.stdin;
-  const stdout = process.stdout;
   // Interactive mode needs a raw-mode-capable terminal on both ends. Capture
   // the capability once here; the handlers below rely on it unconditionally.
   const setRawMode =
@@ -33,63 +42,164 @@ export function startInteractive(view) {
   return new Promise((resolve, reject) => {
     let selectedIndex = 0;
     let closed = false;
+    let rawModeTouched = false;
+    let streamFlowTouched = false;
+    let terminalStateTouched = false;
+    const previousRawMode = stdin.isRaw === true;
+    const previousFlowing = stdin.readableFlowing;
+    const registrations = [];
 
-    const draw = () => {
-      const width = Math.max(40, stdout.columns || 120);
-      const height = Math.max(12, stdout.rows || 32);
-      const screen = renderFullscreen({
-        options: { ...options, forceColor: true, selectedIndex },
-        snapshot,
-        snapshotFreshness,
-        bounds,
-        events,
-        rows,
-        allRows,
-        width,
-        height,
-      });
-      stdout.write(`${SCREEN_BASE}${CLEAR_SCREEN}${screen}`);
+    const registerListener = (target, event, handler, method = "on") => {
+      const registration = { target, event, handler };
+      registrations.push(registration);
+      target[method](event, handler);
     };
 
-    const finish = (error = null) => {
+    const attemptCleanup = (cleanupErrors, action) => {
+      try {
+        action();
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    };
+
+    function teardown(
+      error = null,
+      afterRestore = null,
+      { preserveSignalGuards = false } = {},
+    ) {
       if (closed) return;
       closed = true;
-      stdin.off("data", onData);
-      stdout.off("resize", draw);
-      process.off("SIGINT", onSignal);
-      setRawMode(false);
-      stdin.pause();
-      stdout.write(`${RESET}${SHOW_CURSOR}${EXIT_ALT_SCREEN}`);
-      if (error) reject(error);
-      else resolve();
-    };
+      const cleanupErrors = [];
+      let restorationPending = false;
+      let settled = false;
+      const signalGuards = preserveSignalGuards
+        ? registrations.filter(({ target, event }) =>
+          target === signalTarget && SUPPORTED_SIGNALS.includes(event))
+        : [];
+      const signalGuardSet = new Set(signalGuards);
+      const settle = () => {
+        if (settled) return;
+        settled = true;
+        for (const { target, event, handler } of signalGuards) {
+          attemptCleanup(cleanupErrors, () => target.off(event, handler));
+        }
+        if (afterRestore) afterRestore();
+        if (error !== null) reject(error);
+        else if (cleanupErrors.length > 0) reject(cleanupErrors[0]);
+        else resolve();
+      };
 
-    const onSignal = () => finish();
-    const onData = (input) => {
-      const action = actionFor(input);
-      if (action === "quit") {
-        finish();
-        return;
+      const activeRegistrations = registrations.splice(0);
+      for (const registration of activeRegistrations) {
+        const { target, event, handler } = registration;
+        if (signalGuardSet.has(registration)) {
+          registrations.push(registration);
+          continue;
+        }
+        attemptCleanup(cleanupErrors, () => target.off(event, handler));
       }
-      if (action === "up") {
-        selectedIndex = Math.max(0, selectedIndex - 1);
-        draw();
-        return;
+      if (rawModeTouched) {
+        attemptCleanup(cleanupErrors, () => setRawMode(previousRawMode));
       }
-      if (action === "down") {
-        selectedIndex = Math.min(Math.max(0, rows.length - 1), selectedIndex + 1);
-        draw();
-        return;
+      if (streamFlowTouched) {
+        attemptCleanup(cleanupErrors, () => {
+          if (previousFlowing === true) stdin.resume();
+          else stdin.pause();
+        });
       }
-    };
+      if (terminalStateTouched) {
+        attemptCleanup(cleanupErrors, () => {
+          const restoration = `${RESET}${SHOW_CURSOR}${EXIT_ALT_SCREEN}`;
+          if (afterRestore) {
+            restorationPending = true;
+            stdout.write(restoration, settle);
+          } else {
+            stdout.write(restoration);
+          }
+        });
+      }
 
-    setRawMode(true);
-    stdin.setEncoding("utf8");
-    stdin.resume();
-    stdin.on("data", onData);
-    stdout.on("resize", draw);
-    process.once("SIGINT", onSignal);
-    stdout.write(`${ENTER_ALT_SCREEN}${SCREEN_BASE}${HIDE_CURSOR}${CLEAR_SCREEN}`);
-    draw();
+      if (!restorationPending) settle();
+    }
+
+    function draw() {
+      if (closed) return;
+      try {
+        const width = Math.max(40, stdout.columns || 120);
+        const height = Math.max(12, stdout.rows || 32);
+        const screen = render({
+          options: { ...options, forceColor: true, selectedIndex },
+          snapshot,
+          snapshotFreshness,
+          bounds,
+          events,
+          rows,
+          allRows,
+          width,
+          height,
+        });
+        stdout.write(`${SCREEN_BASE}${CLEAR_SCREEN}${screen}`);
+      } catch (drawError) {
+        teardown(drawError);
+      }
+    }
+
+    function onSignal(signal) {
+      if (closed) return;
+      const exitCode = 128 + SIGNAL_EXIT_CODES[signal];
+      signalTarget.exitCode = exitCode;
+      teardown(null, () => {
+        if (signalTarget.pid) signalTarget.kill(signalTarget.pid, signal);
+      }, { preserveSignalGuards: true });
+    }
+
+    function onStreamError(streamError) {
+      teardown(streamError ?? new Error("Interactive stream failed."));
+    }
+
+    function onData(input) {
+      if (closed) return;
+      try {
+        const action = actionFor(input);
+        if (action === "quit") {
+          teardown();
+          return;
+        }
+        if (action === "up") {
+          selectedIndex = Math.max(0, selectedIndex - 1);
+          draw();
+          return;
+        }
+        if (action === "down") {
+          selectedIndex = Math.min(Math.max(0, rows.length - 1), selectedIndex + 1);
+          draw();
+        }
+      } catch (inputError) {
+        teardown(inputError);
+      }
+    }
+
+    try {
+      registerListener(stdin, "error", onStreamError);
+      registerListener(stdout, "error", onStreamError);
+      for (const signal of SUPPORTED_SIGNALS) {
+        // Keep a live guard through deferred terminal restoration so a second
+        // signal cannot reach Node's default termination path mid-cleanup.
+        registerListener(signalTarget, signal, () => onSignal(signal));
+      }
+      rawModeTouched = true;
+      setRawMode(true);
+      stdin.setEncoding("utf8");
+      streamFlowTouched = true;
+      stdin.resume();
+      registerListener(stdin, "data", onData);
+      registerListener(stdout, "resize", draw);
+      terminalStateTouched = true;
+      stdout.write(`${ENTER_ALT_SCREEN}${SCREEN_BASE}${HIDE_CURSOR}${CLEAR_SCREEN}`);
+      draw();
+    } catch (setupError) {
+      teardown(setupError);
+    }
   });
 }
