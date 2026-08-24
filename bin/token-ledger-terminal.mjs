@@ -12,6 +12,7 @@ import {
   usageCallCount,
   usageThreadIds,
 } from "../lib/token-ledger-usage.mjs";
+import { calendarDateParts } from "../lib/token-ledger-calendar.mjs";
 
 const RESET = "\u001b[0m";
 const PRIMARY_STYLE = [38, 2, 255, 255, 255];
@@ -161,18 +162,12 @@ function dateLabel(bounds, range = "day", rollingLabel = "1 day") {
     const end = `${monthNames[endParts[1] - 1]} ${String(endParts[2]).padStart(2, "0")}`;
     return `${start} – ${end} ${endParts[0]}`;
   }
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: bounds.timeZone,
+  const values = calendarDateParts(bounds.dateString, {
     weekday: "short",
     day: "2-digit",
     month: "short",
     year: "numeric",
-  }).formatToParts(bounds.start);
-  const values = Object.fromEntries(
-    parts
-      .filter((part) => part.type !== "literal")
-      .map((part) => [part.type, part.value]),
-  );
+  });
   return `${values.weekday} ${values.day} ${values.month} ${values.year}`.toUpperCase();
 }
 

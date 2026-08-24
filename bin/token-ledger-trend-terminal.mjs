@@ -4,6 +4,13 @@ import {
   usageBuckets,
   usageCallCount,
 } from "../lib/token-ledger-usage.mjs";
+import {
+  createTimeZoneFormatter,
+  formatCalendarDate,
+  localDateBoundary,
+  localDateString,
+  shiftCalendarDate,
+} from "../lib/token-ledger-calendar.mjs";
 
 const RESET = "\u001b[0m";
 const PRIMARY_STYLE = [38, 2, 255, 255, 255];
@@ -112,86 +119,11 @@ function modelSort(left, right) {
   );
 }
 
-function dateParts(dateString) {
-  return dateString.split("-").map(Number);
-}
-
-function dateStringFromParts(year, month, day) {
-  return [year, month, day]
-    .map((value, index) =>
-      index === 0 ? String(value) : String(value).padStart(2, "0"),
-    )
-    .join("-");
-}
-
-function shiftCalendarDate(dateString, amount) {
-  const [year, month, day] = dateParts(dateString);
-  const date = new Date(Date.UTC(year, month - 1, day + amount));
-  return dateStringFromParts(
-    date.getUTCFullYear(),
-    date.getUTCMonth() + 1,
-    date.getUTCDate(),
-  );
-}
-
-function timeZoneFormatter(timeZone) {
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    timeZoneName: "longOffset",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hourCycle: "h23",
-  });
-}
-
-function timeZoneOffsetMs(instant, formatter) {
-  const parts = formatter.formatToParts(instant);
-  const value = parts.find((part) => part.type === "timeZoneName")?.value ?? "GMT";
-  if (value === "GMT") return 0;
-  const match = value.match(/^GMT([+-])(\d{2}):?(\d{2})?$/);
-  if (!match) return 0;
-  const minutes = Number(match[2]) * 60 + Number(match[3] || 0);
-  return (match[1] === "+" ? 1 : -1) * minutes * 60 * 1_000;
-}
-
-function zonedMidnight(
-  dateString,
-  timeZone,
-  formatter = timeZoneFormatter(timeZone),
-) {
-  const [year, month, day] = dateParts(dateString);
-  const utcGuess = Date.UTC(year, month - 1, day);
-  const first = new Date(utcGuess - timeZoneOffsetMs(new Date(utcGuess), formatter));
-  return new Date(utcGuess - timeZoneOffsetMs(first, formatter));
-}
-
-function localDateString(
-  timestamp,
-  timeZone,
-  formatter = timeZoneFormatter(timeZone),
-) {
-  const parts = formatter.formatToParts(new Date(timestamp));
-  const values = Object.fromEntries(
-    parts
-      .filter((part) => part.type !== "literal")
-      .map((part) => [part.type, part.value]),
-  );
-  return `${values.year}-${values.month}-${values.day}`;
-}
-
-function localDateLabel(dateString, timeZone) {
-  const date = zonedMidnight(dateString, timeZone);
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone,
+function localDateLabel(dateString) {
+  return formatCalendarDate(dateString, {
     month: "short",
     day: "2-digit",
-  })
-    .format(date)
-    .toUpperCase();
+  }).toUpperCase();
 }
 
 export function chooseBinSize(days, width, { minBinWidth = 1, preferDaily = false } = {}) {
@@ -242,14 +174,14 @@ export function buildActualTokenBins(
       index,
     ]),
   );
-  const dateFormatter = timeZoneFormatter(bounds.timeZone);
+  const dateFormatter = createTimeZoneFormatter(bounds.timeZone);
   const binBoundaries = [
     bins[0]?.startDateString,
     ...bins.map((bin) => bin.endDateString),
   ]
     .filter(Boolean)
     .map((dateString) =>
-      zonedMidnight(dateString, bounds.timeZone, dateFormatter).getTime());
+      localDateBoundary(dateString, bounds.timeZone, dateFormatter).getTime());
   for (const event of splitUsageBucketsAtBoundaries(
     usageBuckets(snapshot),
     binBoundaries,
@@ -376,7 +308,7 @@ function lineRow(remainingPercent, plotHeight) {
   );
 }
 
-function xLabelLine(bins, plotWidth, leftWidth, rightWidth, timeZone) {
+function xLabelLine(bins, plotWidth, leftWidth, rightWidth) {
   const labels = Array.from({ length: plotWidth }, () => " ");
   const write = (label, offset) => {
     for (let index = 0; index < label.length; index += 1) {
@@ -387,7 +319,7 @@ function xLabelLine(bins, plotWidth, leftWidth, rightWidth, timeZone) {
   bins.forEach((bin, index) => {
     const start = Math.round((index * plotWidth) / bins.length);
     const end = Math.round(((index + 1) * plotWidth) / bins.length);
-    const label = localDateLabel(bin.startDateString, timeZone);
+    const label = localDateLabel(bin.startDateString);
     if (end - start >= label.length) {
       write(label, start + Math.floor((end - start - label.length) / 2));
     } else if (index === 0 || index === bins.length - 1 || end - start >= 4) {
@@ -565,7 +497,7 @@ export function renderTrendCombo({
     `┌${"─".repeat(frameWidth - 2)}┐`,
     frameLine(
       colorize(
-        `TOKEN LEDGER · ${percentMode ? "OBSERVED LIMIT DRAIN + WEEKLY METER" : "ACTUAL TOKENS + WEEKLY QUOTA"} · ${localDateLabel(bounds.startDateString, bounds.timeZone)} – ${localDateLabel(bounds.endDateString, bounds.timeZone)} · ${days}D`,
+        `TOKEN LEDGER · ${percentMode ? "OBSERVED LIMIT DRAIN + WEEKLY METER" : "ACTUAL TOKENS + WEEKLY QUOTA"} · ${localDateLabel(bounds.startDateString)} – ${localDateLabel(bounds.endDateString)} · ${days}D`,
         PRIMARY_STYLE,
         enabled,
       ),
@@ -601,7 +533,7 @@ export function renderTrendCombo({
   }
   const axis = `${" ".repeat(leftWidth)}${colorize(`└${"─".repeat(plotWidth)}┘`, BORDER_STYLE, enabled)}${" ".repeat(rightWidth)}`;
   lines.push(frameLine(axis, frameWidth));
-  lines.push(frameLine(xLabelLine(barBins, plotWidth, leftWidth, rightWidth, bounds.timeZone), frameWidth));
+  lines.push(frameLine(xLabelLine(barBins, plotWidth, leftWidth, rightWidth), frameWidth));
   if (!percentMode && meterUsable) {
     lines.push(frameLine(drainLabelLine(burn.bins, plotWidth, leftWidth, rightWidth, enabled), frameWidth));
     lines.push(frameLine(fit("CALENDAR DAY · -% = OBSERVED METER DROP", innerWidth, "center"), frameWidth));

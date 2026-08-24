@@ -5,7 +5,6 @@ import {
 import {
   compact,
   escapeXml,
-  shiftCalendarDate,
   svgRect,
   svgText,
   textWidth,
@@ -20,6 +19,13 @@ import {
   usageDetailedCallCount,
   usageInputCallCount,
 } from "../lib/token-ledger-usage.mjs";
+import {
+  createTimeZoneFormatter,
+  formatCalendarDate,
+  localDateBoundary,
+  localDateString,
+  shiftCalendarDate,
+} from "../lib/token-ledger-calendar.mjs";
 
 const COLORS = {
   background: "#0e1420",
@@ -50,60 +56,17 @@ function rateFor(inputTokens, cachedInputTokens) {
   return inputTokens > 0 ? (cachedInputTokens / inputTokens) * 100 : null;
 }
 
-function localDateFormatter(timeZone) {
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    timeZoneName: "longOffset",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
+function shortDateLabel(dateString) {
+  return formatCalendarDate(dateString, {
+    month: "short",
+    day: "numeric",
   });
 }
 
-function localDateString(timestampMs, formatter) {
-  const parts = formatter.formatToParts(new Date(timestampMs));
-  const values = Object.fromEntries(
-    parts
-      .filter((part) => part.type !== "literal")
-      .map((part) => [part.type, part.value]),
-  );
-  return `${values.year}-${values.month}-${values.day}`;
-}
-
-function timeZoneOffsetMs(timestampMs, formatter) {
-  const parts = formatter.formatToParts(new Date(timestampMs));
-  const value = parts.find((part) => part.type === "timeZoneName")?.value ?? "GMT";
-  if (value === "GMT") return 0;
-  const match = value.match(/^GMT([+-])(\d{2}):?(\d{2})?$/);
-  if (!match) return 0;
-  const minutes = Number(match[2]) * 60 + Number(match[3] || 0);
-  return (match[1] === "+" ? 1 : -1) * minutes * 60 * 1_000;
-}
-
-function zonedMidnightMs(dateString, formatter) {
-  const [year, month, day] = dateString.split("-").map(Number);
-  const utcGuess = Date.UTC(year, month - 1, day);
-  const first = utcGuess - timeZoneOffsetMs(utcGuess, formatter);
-  return utcGuess - timeZoneOffsetMs(first, formatter);
-}
-
-function calendarDate(dateString) {
-  return new Date(`${dateString}T00:00:00.000Z`);
-}
-
-function shortDateLabel(dateString) {
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone: "UTC",
-    month: "short",
-    day: "numeric",
-  }).format(calendarDate(dateString));
-}
-
 function weekdayLabel(dateString) {
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone: "UTC",
+  return formatCalendarDate(dateString, {
     weekday: "short",
-  }).format(calendarDate(dateString)).toUpperCase();
+  }).toUpperCase();
 }
 
 function periodLabel(bounds) {
@@ -382,7 +345,7 @@ function accumulateRange(snapshot, bounds, bins = null, dateIndexByString = null
   const tokenScale = { value: 1 };
   const dateFormatter = bins === null
     ? null
-    : localDateFormatter(bounds.timeZone);
+    : createTimeZoneFormatter(bounds.timeZone);
 
   const events = bins === null
     ? usageBucketsInRange(snapshot, startMs, endMs)
@@ -391,7 +354,11 @@ function accumulateRange(snapshot, bounds, bins = null, dateIndexByString = null
         [
           startMs,
           ...bins.map((bin) =>
-            zonedMidnightMs(bin.endDateString, dateFormatter)),
+            localDateBoundary(
+              bin.endDateString,
+              bounds.timeZone,
+              dateFormatter,
+            ).getTime()),
           endMs,
         ],
       );
@@ -407,7 +374,7 @@ function accumulateRange(snapshot, bounds, bins = null, dateIndexByString = null
     let { breakdown } = parsed;
     const dateString = dateFormatter === null
       ? null
-      : localDateString(parsed.timestampMs, dateFormatter);
+      : localDateString(parsed.timestampMs, bounds.timeZone, dateFormatter);
     const binIndex = dateString === null ? null : dateIndexByString.get(dateString);
     const bin = binIndex === undefined || binIndex === null ? null : bins[binIndex];
     const existingModelAggregate = breakdown.detailed && breakdown.inputTokens > 0
