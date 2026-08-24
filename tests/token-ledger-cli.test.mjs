@@ -102,6 +102,20 @@ test("non-image CLI paths do not load image renderers or Sharp", () => {
   }
 });
 
+function nonLineControlCodes(value) {
+  return [...value]
+    .map((character) => character.codePointAt(0))
+    .filter(
+      (code) =>
+        ((code >= 0 && code <= 31) || (code >= 127 && code <= 159)) &&
+        ![9, 10, 13].includes(code),
+    );
+}
+
+function stripGeneratedSgr(value) {
+  return value.replace(/\u001b\[[0-9;]*m/g, "");
+}
+
 test(
   "CLI entrypoint supports direct shebang execution",
   { skip: process.platform === "win32" },
@@ -323,6 +337,130 @@ test("project labels remove terminal control sequences before rendering", () => 
   assert.equal(sanitizeTerminalText(project), "secret ");
   assert.equal(rows[0].project, "secret");
   assert.equal(rows[0].displayProject, "secret");
+});
+
+test("terminal text sanitizer handles OSC, CSI, controls, and Unicode", () => {
+  const belOsc = "\u001b]8;;https://example.test\u0007";
+  const stOsc = "\u001b]8;;https://example.test\u001b\\";
+  const hostile = `${belOsc}旅館${stOsc}\u001b[2J\u009b31m\u0000\u0085`;
+  const sanitized = sanitizeTerminalText(hostile);
+
+  assert.equal(sanitized.trim(), "旅館");
+  assert.deepEqual(nonLineControlCodes(sanitized), []);
+});
+
+test("terminal renderers sanitize use types before grouping and layout", () => {
+  const belOsc = "\u001b]0;title\u0007";
+  const stOsc = "\u001b]0;title\u001b\\";
+  const events = [
+    {
+      project: "旅館 🐈",
+      threadId: "thread-1",
+      model: "gpt-5.5",
+      useType: `${belOsc}sdk\u001b[2J\u009b31m\u0000`,
+      totalTokens: 1,
+      inputTokens: 1,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      rateCardCredits: 1,
+    },
+    {
+      project: "旅館 🐈",
+      threadId: "thread-2",
+      model: "gpt-5.5",
+      useType: `${stOsc}sdk`,
+      totalTokens: 1,
+      inputTokens: 1,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      rateCardCredits: 1,
+    },
+  ];
+  const snapshot = {
+    events: [],
+    threads: [
+      { id: "thread-1", project: "旅館 🐈" },
+      { id: "thread-2", project: "旅館 🐈" },
+    ],
+  };
+  const rows = aggregateProjects(snapshot, events, { rawProjects: true });
+  const bounds = dayBounds("2026-08-20", "UTC");
+  const renderArgs = {
+    snapshot,
+    bounds,
+    events,
+    rows,
+    allRows: rows,
+  };
+
+  const plain = renderTerminal({
+    ...renderArgs,
+    options: { plain: true, ascii: true, width: 120, forceColor: false },
+  });
+  const color = renderTerminal({
+    ...renderArgs,
+    options: { plain: false, ascii: true, width: 120, forceColor: true },
+  });
+  const fullscreen = renderFullscreen({
+    ...renderArgs,
+    options: { plain: true, ascii: true, forceColor: false },
+    width: 120,
+    height: 40,
+  });
+
+  assert.match(plain, /旅館 🐈/);
+  assert.match(plain, /SDK\s+100\.0%/);
+  assert.deepEqual(nonLineControlCodes(plain), []);
+  assert.deepEqual(nonLineControlCodes(stripGeneratedSgr(color)), []);
+  assert.deepEqual(nonLineControlCodes(fullscreen), []);
+});
+
+test("explicit snapshots sanitize labels in static output", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-terminal-text-"));
+  const snapshotPath = resolve(root, "explicit-snapshot.json");
+  try {
+    await writeFile(
+      snapshotPath,
+      JSON.stringify({
+        schemaVersion: 2,
+        generatedAt: "2026-08-20T12:00:00.000Z",
+        events: [{
+          timestamp: "2026-08-20T12:00:00.000Z",
+          project: "explicit 🐈",
+          threadId: "explicit-thread",
+          model: "gpt-5.5",
+          useType: "\u001b]0;title\u0007sdk\u001b[2J\u009b31m\u0000",
+          inputTokens: 1,
+          cachedInputTokens: 0,
+          outputTokens: 0,
+          totalTokens: 1,
+          rateCardCredits: 1,
+        }],
+        threads: [{ id: "explicit-thread", project: "explicit 🐈" }],
+        quotaObservations: [],
+      }),
+    );
+
+    const output = await run(parseArgs([
+      "day",
+      "2026-08-20",
+      "--input",
+      snapshotPath,
+      "--no-refresh",
+      "--static",
+      "--plain",
+      "--ascii",
+      "--raw-projects",
+      "--tz",
+      "UTC",
+    ]));
+
+    assert.match(output, /explicit 🐈/);
+    assert.match(output, /SDK\s+100\.0%/);
+    assert.deepEqual(nonLineControlCodes(output), []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("parseArgs accepts the day subcommand and date option", () => {

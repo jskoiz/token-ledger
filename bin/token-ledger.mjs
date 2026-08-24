@@ -28,6 +28,9 @@ import {
   usageCallCount,
   usageThreadIds,
 } from "../lib/token-ledger-usage.mjs";
+import { sanitizeTerminalText } from "../lib/token-ledger-terminal-text.mjs";
+
+export { sanitizeTerminalText };
 
 export const DEFAULT_SNAPSHOT = resolve(
   homedir(),
@@ -524,13 +527,6 @@ export function rolling24hBounds(value = new Date(), timeZone = DEFAULT_TIME_ZON
   return rollingDurationBounds(value, timeZone, 1);
 }
 
-export function sanitizeTerminalText(value) {
-  return String(value ?? "")
-    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "")
-    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
-    .replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ");
-}
-
 function cleanLabel(value, fallback) {
   const label = sanitizeTerminalText(value)
     .replace(/\s+/g, " ")
@@ -814,7 +810,7 @@ function runYouPlot(rows, options, dateLabel, unit) {
   const chartInput = [
     "project\tvalue",
     ...rows.map(
-      (row) => `${row.displayProject.replace(/[\t\r\n]+/g, " ")}\t${chartNumber(row.totalTokens, unit.divisor)}`,
+      (row) => `${sanitizeTerminalText(row.displayProject).replace(/[\t\r\n]+/g, " ")}\t${chartNumber(row.totalTokens, unit.divisor)}`,
     ),
   ].join("\n");
   const terminalWidth = Number(process.stdout.columns) || 100;
@@ -1126,7 +1122,7 @@ async function render(
       summary.rateCardCredits > 0 && row.rateCardCredits > 0
         ? ` · ${percent((row.rateCardCredits / summary.rateCardCredits) * 100)} credits`
         : "";
-    return `${String(index + 1).padStart(2, " ")}  ${row.displayProject} · ${compact(row.totalTokens)} · ${percent(shares[index])} · ${row.threads.toLocaleString()} threads${knownCreditShare}\n    ${modelMix(row, enabled)}`;
+    return `${String(index + 1).padStart(2, " ")}  ${sanitizeTerminalText(row.displayProject)} · ${compact(row.totalTokens)} · ${percent(shares[index])} · ${row.threads.toLocaleString()} threads${knownCreditShare}\n    ${modelMix(row, enabled)}`;
   });
 
   return `${header.join("\n")}\n\n${details.join("\n")}`;

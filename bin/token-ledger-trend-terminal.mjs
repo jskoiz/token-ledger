@@ -4,6 +4,7 @@ import {
   usageBuckets,
   usageCallCount,
 } from "../lib/token-ledger-usage.mjs";
+import { sanitizeTerminalText } from "../lib/token-ledger-terminal-text.mjs";
 
 const RESET = "\u001b[0m";
 const PRIMARY_STYLE = [38, 2, 255, 255, 255];
@@ -51,7 +52,7 @@ function colorize(value, style, enabled) {
 }
 
 function stripAnsi(value) {
-  return String(value).replace(/\u001b\[[0-9;]*m/g, "");
+  return sanitizeTerminalText(value);
 }
 
 function visibleLength(value) {
