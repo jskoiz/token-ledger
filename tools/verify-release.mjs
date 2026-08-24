@@ -213,7 +213,7 @@ async function writeSmokeFixture(path) {
   const now = Date.now();
   const hour = 60 * 60 * 1000;
   const fixture = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     generatedAt: new Date(now - 5 * 60 * 1000).toISOString(),
     events: [
       {

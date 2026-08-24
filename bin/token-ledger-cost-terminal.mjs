@@ -8,6 +8,7 @@ import {
   hasDetailedTokenBreakdown,
   normalizeCodexCreditModel,
 } from "../lib/token-ledger-rates.mjs";
+import { sanitizeTerminalText } from "../lib/token-ledger-text.mjs";
 
 function nonNegative(value) {
   const number = Number(value);
@@ -41,7 +42,7 @@ function modelLabel(model) {
     "gpt-5.3-codex": "GPT-5.3 Codex",
     "gpt-5.2": "GPT-5.2",
   };
-  return labels[normalized] ?? String(model ?? "Unknown model");
+  return sanitizeTerminalText(labels[normalized] ?? String(model ?? "Unknown model"));
 }
 
 function creditReason(event) {

@@ -35,11 +35,12 @@ import {
   usageThreadIds,
 } from "../lib/token-ledger-usage.mjs";
 import { calculateCodexPurchasedCredits } from "../lib/token-ledger-rates.mjs";
+import { sanitizeTerminalText } from "../lib/token-ledger-text.mjs";
 
 export const DEFAULT_SNAPSHOT = resolve(
   homedir(),
   ".token-ledger",
-  "token-ledger-snapshot-v2.json.gz",
+  "token-ledger-snapshot-v3.json.gz",
 );
 const DEFAULT_TOP = 10;
 const DEFAULT_TIME_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -136,7 +137,7 @@ Help:
   -h, --help                Show the quick guide
   --help-all                Show this complete reference
 
-The default snapshot is ~/.token-ledger/token-ledger-snapshot-v2.json.gz.
+The default snapshot is ~/.token-ledger/token-ledger-snapshot-v3.json.gz.
 Token Ledger reads local Codex data only. It does not upload your usage.`;
 }
 
@@ -589,12 +590,7 @@ export function rolling24hBounds(value = new Date(), timeZone = DEFAULT_TIME_ZON
   return rollingDurationBounds(value, timeZone, 1);
 }
 
-export function sanitizeTerminalText(value) {
-  return String(value ?? "")
-    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "")
-    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
-    .replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ");
-}
+export { sanitizeTerminalText };
 
 function cleanLabel(value, fallback) {
   const label = sanitizeTerminalText(value)

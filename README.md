@@ -98,7 +98,7 @@ Use `--image-output`, `--image-width`, `--date`, `--tz`, and `--no-open` the
 same way as on the standard report.
 
 The default privacy-reduced snapshot is
-`~/.token-ledger/token-ledger-snapshot-v2.json.gz`. It is gzip-compressed,
+`~/.token-ledger/token-ledger-snapshot-v3.json.gz`. It is gzip-compressed,
 written atomically with mode `0600`, targets 12 MiB, and has a hard 16 MiB
 on-disk limit. Its expanded JSON representation also targets 48 MiB and has a
 64 MiB safety limit, so the old 93 MiB raw-cache behavior cannot recur on the
@@ -130,7 +130,7 @@ tledger week --refresh
 tledger week --no-refresh
 
 # Read an explicit snapshot without automatic freshness checks
-tledger week --input /path/to/token-ledger-snapshot-v2.json.gz
+tledger week --input /path/to/token-ledger-snapshot-v3.json.gz
 ```
 
 `--refresh` rebuilds the default snapshot and cannot be combined with
@@ -138,13 +138,13 @@ tledger week --input /path/to/token-ledger-snapshot-v2.json.gz
 refresh occurs. The collector can also be run directly:
 
 ```bash
-node lib/token-ledger-importer.mjs --output /path/to/token-ledger-snapshot-v2.json.gz
+node lib/token-ledger-importer.mjs --output /path/to/token-ledger-snapshot-v3.json.gz
 ```
 
 Explicit `.json` snapshots remain readable for fixtures and deliberate exports,
 but `.json.gz` is the bounded production cache format. After an upgrade, the
-new cache does not read or delete schema-v1 cache files; remove an old generated
-cache separately once the v2 cache is proven.
+new cache does not read or delete schema-v1 or schema-v2 cache files; remove an
+old generated cache separately once the v3 cache is proven.
 
 ## Report versus CLI
 

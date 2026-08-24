@@ -392,7 +392,7 @@ test("parseArgs defaults the week end day to today", () => {
   );
   assert.equal(
     options.input,
-    resolve(homedir(), ".token-ledger", "token-ledger-snapshot-v2.json.gz"),
+    resolve(homedir(), ".token-ledger", "token-ledger-snapshot-v3.json.gz"),
   );
   assert.equal(options.input, DEFAULT_SNAPSHOT);
 });
@@ -512,7 +512,7 @@ test("rolling view describes an empty range as the last 24 hours", async () => {
   try {
     await writeFile(
       snapshotPath,
-      JSON.stringify({ schemaVersion: 2, events: [], threads: [] }),
+      JSON.stringify({ schemaVersion: 3, events: [], threads: [] }),
     );
     const output = await run(parseArgs([
       "1d",
@@ -665,7 +665,7 @@ test("CLI reads an explicit gzip-compressed snapshot", async () => {
   const snapshotPath = resolve(root, "snapshot.json.gz");
   try {
     await writePrivateSnapshot(snapshotPath, {
-      schemaVersion: 2,
+      schemaVersion: 3,
       generatedAt: "2026-08-20T12:00:00.000Z",
       events: [{
         id: "gzip-event",
@@ -699,6 +699,42 @@ test("CLI reads an explicit gzip-compressed snapshot", async () => {
     assert.match(output, /Compressed Project/);
     assert.match(output, /1\.20K/);
     assert.ok(!output.includes(root));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects legacy snapshots before repricing aliases", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-legacy-rate-card-"));
+  const snapshotPath = resolve(root, "snapshot.json");
+  try {
+    await writeFile(snapshotPath, JSON.stringify({
+      schemaVersion: 2,
+      generatedAt: "2026-08-20T12:00:00.000Z",
+      events: [{
+        timestamp: "2026-08-20T12:00:00.000Z",
+        model: "gpt-5.5",
+        serviceTier: "fast",
+        totalTokens: 1_000,
+        inputTokens: 1_000,
+        cachedInputTokens: 0,
+        outputTokens: 0,
+      }],
+      threads: [],
+    }));
+
+    await assert.rejects(
+      () => run(parseArgs([
+        "cost",
+        "1d",
+        "--input",
+        snapshotPath,
+        "--no-refresh",
+        "--basis",
+        "codex-credits",
+      ])),
+      /Snapshot uses an unsupported schema: snapshot\.json\. Rebuild it with --refresh\./,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -785,7 +821,7 @@ test("static freshness uses the wall clock after snapshot loading", async () => 
   const afterLoadMs = beforeLoadMs + 1_000;
   try {
     await writeFile(snapshotPath, JSON.stringify({
-      schemaVersion: 2,
+      schemaVersion: 3,
       generatedAt: new Date(afterLoadMs).toISOString(),
       events: [{
         project: "alpha",
@@ -2610,7 +2646,7 @@ test("report emits progress while generating the PNG", async () => {
     await writeFile(
       snapshotPath,
       `${JSON.stringify({
-        schemaVersion: 2,
+        schemaVersion: 3,
         generatedAt: "2026-08-15T12:00:00.000Z",
         events: [
           {
@@ -2670,7 +2706,7 @@ test("cache-rate report uses its separate renderer and progress label", async ()
     await writeFile(
       snapshotPath,
       `${JSON.stringify({
-        schemaVersion: 2,
+        schemaVersion: 3,
         generatedAt: "2026-08-15T12:00:00.000Z",
         events: [
           {
@@ -2727,7 +2763,7 @@ test("cache-rate report ignores unused project metadata for an empty range", asy
     await writeFile(
       snapshotPath,
       `${JSON.stringify({
-        schemaVersion: 2,
+        schemaVersion: 3,
         generatedAt: "2026-08-15T12:00:00.000Z",
         events: [
           null,
@@ -2777,7 +2813,7 @@ test("standard image views retain the empty-range diagnostic", async () => {
     await writeFile(
       snapshotPath,
       `${JSON.stringify({
-        schemaVersion: 2,
+        schemaVersion: 3,
         generatedAt: "2026-08-15T12:00:00.000Z",
         events: [
           null,
@@ -2826,7 +2862,7 @@ test("cache-rate report uses a distinct default filename", async () => {
     await writeFile(
       snapshotPath,
       `${JSON.stringify({
-        schemaVersion: 2,
+        schemaVersion: 3,
         generatedAt: "2026-08-15T12:00:00.000Z",
         events: [
           {
@@ -3547,6 +3583,24 @@ test("cost renderer labels units, coverage, and unrated usage explicitly", () =>
   });
   assert.match(unrated, /Total rated amount: —/);
   assert.doesNotMatch(unrated, /\$0\.00/);
+});
+
+test("cost renderer sanitizes fallback model labels", () => {
+  const output = renderCostTerminal({
+    events: [{
+      model: "future\u001b]2;owned\u0007-model",
+      totalTokens: 1_000,
+      inputTokens: 1_000,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+    }],
+    bounds: weekBounds("2026-08-23", "UTC"),
+    basis: "api-usd",
+  });
+
+  assert.match(output, /future-model/);
+  assert.doesNotMatch(output, /owned/);
+  assert.doesNotMatch(output, /\u001b/);
 });
 
 test("trend fast shading recognizes both tiers and reports mixed model rates", () => {
