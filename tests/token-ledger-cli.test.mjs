@@ -45,11 +45,15 @@ import {
   weeklyQuotaObservations,
 } from "../bin/token-ledger-trend.mjs";
 import {
+  API_USD_LONG_CONTEXT_THRESHOLD_TOKENS,
+  apiUsdForUsage,
   calculateCodexPurchasedCredits,
   codexCreditMultiplier,
   isFastServiceTier,
   normalizeCodexCreditModel,
+  partitionTokenUsage,
 } from "../lib/token-ledger-rates.mjs";
+import { renderCostTerminal } from "../bin/token-ledger-cost-terminal.mjs";
 import {
   renderTrendImage,
   textWidth,
@@ -86,6 +90,13 @@ test(
     assert.ifError(result.error);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /--help/);
+    assert.match(result.stdout, /cost 7d --basis api-usd/);
+
+    const costHelp = spawnSync(CLI_ENTRYPOINT, ["cost", "--help"], {
+      encoding: "utf8",
+    });
+    assert.equal(costHelp.status, 0, costHelp.stderr);
+    assert.match(costHelp.stdout, /cost 7d --basis api-usd/);
   },
 );
 
@@ -382,6 +393,63 @@ test("parseArgs accepts rolling day and week duration aliases", () => {
     () => parseArgs(["2d", "today"]),
     /does not accept --date/,
   );
+});
+
+test("parseArgs requires an explicit basis for cost ranges", () => {
+  const oneDay = parseArgs(["cost", "1d", "--basis", "api-usd"]);
+  assert.equal(oneDay.view, "cost");
+  assert.equal(oneDay.range, "rolling24h");
+  assert.equal(oneDay.basis, "api-usd");
+  assert.equal(oneDay.static, true);
+
+  const twoWeeks = parseArgs(["cost", "2w", "--basis", "codex-credits"]);
+  assert.equal(twoWeeks.range, "rolling");
+  assert.equal(twoWeeks.rollingDays, 14);
+  assert.equal(twoWeeks.basis, "codex-credits");
+
+  const week = parseArgs(["cost", "week", "--basis", "api-usd"]);
+  assert.equal(week.range, "week");
+  assert.equal(week.date, "today");
+
+  assert.throws(
+    () => parseArgs(["cost", "7d"]),
+    /requires --basis codex-credits or --basis api-usd/,
+  );
+  assert.throws(
+    () => parseArgs(["cost", "month", "--basis", "api-usd"]),
+    /Cost range must be 1d, Nd, Nw, or week/,
+  );
+  assert.throws(
+    () => parseArgs(["cost", "7d", "--basis", "credits"]),
+    /--basis must be codex-credits or api-usd/,
+  );
+  assert.throws(
+    () => parseArgs(["week", "--basis", "api-usd"]),
+    /--basis is only available with the cost command/,
+  );
+});
+
+test("parseArgs rejects cost-incompatible report and interactive flags", () => {
+  const base = ["cost", "7d", "--basis", "api-usd"];
+  const rejections = new Map([
+    ["--drain", /--drain is only available for the trend view/],
+    ["--cache-rate", /--cache-rate is only available with the report command/],
+    ["--image", /--image is only available for the trend view/],
+    ["--no-open", /--no-open is only available for the trend view/],
+    ["--youplot", /--youplot is not available with the cost command/],
+    ["--raw-projects", /--raw-projects is not available with the cost command/],
+    ["--top", /--top is not available with the cost command/],
+    ["--width", /--width is not available with the cost command/],
+    ["--ascii", /--ascii is not available with the cost command/],
+  ]);
+  for (const [flag, message] of rejections) {
+    const args = flag === "--top"
+      ? [...base, flag, "5"]
+      : flag === "--width"
+        ? [...base, flag, "80"]
+        : [...base, flag];
+    assert.throws(() => parseArgs(args), message);
+  }
 });
 
 test("parseArgs accepts --no-open for trend images and rejects it elsewhere", () => {
@@ -3136,6 +3204,231 @@ test("purchased-credit calculator applies current rows and fast tiers", () => {
     }),
     null,
   );
+});
+
+test("API USD calculator keeps cache partitions exclusive and separate from credits", () => {
+  const usage = {
+    model: "gpt-5.6-sol",
+    totalTokens: 210_000,
+    inputTokens: 200_000,
+    cachedInputTokens: 50_000,
+    cacheWriteInputTokens: 25_000,
+    outputTokens: 10_000,
+    reasoningTokens: 5_000,
+    callCount: 1,
+  };
+  const partition = partitionTokenUsage(usage);
+  assert.deepEqual(partition, {
+    uncachedInputTokens: 125_000,
+    cachedInputTokens: 50_000,
+    cacheWriteInputTokens: 25_000,
+    outputTokens: 10_000,
+    reasoningTokens: 5_000,
+  });
+  assert.equal(
+    partition.uncachedInputTokens + partition.cachedInputTokens +
+      partition.cacheWriteInputTokens,
+    usage.inputTokens,
+  );
+
+  const api = apiUsdForUsage(usage);
+  const credits = calculateCodexPurchasedCredits({
+    model: usage.model,
+    usage,
+  });
+  assert.equal(api.amount, 0.845);
+  assert.equal(api.currency, "USD");
+  assert.equal(api.ratedTokens, usage.totalTokens);
+  assert.equal(api.unratedTokens, 0);
+  assert.equal(api.complete, true);
+  assert.equal(credits, 20.5);
+  assert.notEqual(api.amount, credits);
+});
+
+test("API USD calculator has explicit standard text rates for every credit-card model", () => {
+  const expected = new Map([
+    ["gpt-5.6-sol", [4, 0.4, 20]],
+    ["gpt-5.6-terra", [2, 0.2, 12]],
+    ["gpt-5.6-luna", [0.2, 0.02, 1.2]],
+    ["gpt-5.5", [5, 0.5, 30]],
+    ["daybreak-blue", [4, 0.4, 20]],
+    ["daybreak-red", [12.5, 1.25, 75]],
+    ["gpt-5.4", [2.5, 0.25, 15]],
+    ["gpt-5.4-mini", [0.75, 0.075, 4.5]],
+    ["gpt-5.3-codex", [1.75, 0.175, 14]],
+    ["gpt-5.2", [1.75, 0.175, 14]],
+  ]);
+  const amount = (model, inputTokens, cachedInputTokens, outputTokens) =>
+    apiUsdForUsage({
+      model,
+      totalTokens: inputTokens + outputTokens,
+      inputTokens,
+      cachedInputTokens,
+      outputTokens,
+    }).amount;
+  const approximately = (actual, expected, label) =>
+    assert.ok(
+      Math.abs(actual - expected) < 1e-12,
+      `${label}: expected ${expected}, got ${actual}`,
+    );
+
+  for (const [model, [input, cached, output]] of expected) {
+    approximately(amount(model, 100_000, 0, 0), input / 10, `${model} input`);
+    approximately(
+      amount(model, 100_000, 100_000, 0),
+      cached / 10,
+      `${model} cached input`,
+    );
+    approximately(amount(model, 0, 0, 1_000_000), output, `${model} output`);
+  }
+});
+
+test("API USD calculator applies Sol fast and exact long-context prices", () => {
+  const event = (inputTokens, serviceTier = null, callCount = 1) => ({
+    model: "gpt-5.6-sol",
+    serviceTier,
+    totalTokens: inputTokens + 1_000,
+    inputTokens,
+    cachedInputTokens: 0,
+    cacheWriteInputTokens: 0,
+    outputTokens: 1_000,
+    callCount,
+  });
+  const atThreshold = apiUsdForUsage(
+    event(API_USD_LONG_CONTEXT_THRESHOLD_TOKENS),
+  );
+  assert.equal(atThreshold.amount, 1.108);
+
+  const aboveThreshold = apiUsdForUsage(
+    event(API_USD_LONG_CONTEXT_THRESHOLD_TOKENS + 1),
+  );
+  assert.equal(aboveThreshold.amount, 2.206008);
+
+  for (const tier of ["fast", " FAST ", "priority", " Priority "]) {
+    assert.equal(
+      apiUsdForUsage(event(100_000, tier)).amount,
+      0.84,
+    );
+  }
+  assert.equal(
+    apiUsdForUsage(event(API_USD_LONG_CONTEXT_THRESHOLD_TOKENS + 1, "fast")).amount,
+    4.412016,
+  );
+});
+
+test("API USD calculator is conservative for compacted and unsupported usage", () => {
+  const sol = (inputTokens, callCount) => ({
+    model: "gpt-5.6-sol",
+    totalTokens: inputTokens,
+    inputTokens,
+    cachedInputTokens: 0,
+    outputTokens: 0,
+    callCount,
+  });
+  const safe = apiUsdForUsage(sol(200_000, 2));
+  assert.equal(safe.amount, 0.8);
+  assert.equal(safe.complete, true);
+  assert.equal(safe.estimated, true);
+
+  const ambiguous = apiUsdForUsage(sol(300_000, 2));
+  assert.equal(ambiguous.amount, null);
+  assert.equal(ambiguous.ratedTokens, 0);
+  assert.equal(ambiguous.unratedTokens, 300_000);
+  assert.deepEqual(ambiguous.reasons, ["compacted-long-context-ambiguous"]);
+
+  const unknownCompactedCount = apiUsdForUsage({
+    ...sol(300_000, undefined),
+    callCount: undefined,
+    resolutionSeconds: 3_600,
+  });
+  assert.equal(unknownCompactedCount.amount, null);
+  assert.deepEqual(
+    unknownCompactedCount.reasons,
+    ["compacted-long-context-ambiguous"],
+  );
+
+  const exactMissingCount = apiUsdForUsage({
+    ...sol(300_000, undefined),
+    callCount: undefined,
+  });
+  assert.equal(exactMissingCount.amount, 2.4);
+
+  const ultrafast = apiUsdForUsage({ ...sol(100_000, 1), serviceTier: "ultrafast" });
+  assert.equal(ultrafast.amount, null);
+  assert.deepEqual(ultrafast.reasons, ["ultrafast-unrated"]);
+
+  const unsupportedFast = apiUsdForUsage({
+    ...sol(100_000, 1),
+    model: "gpt-5.5",
+    serviceTier: "priority",
+  });
+  assert.equal(unsupportedFast.amount, null);
+  assert.deepEqual(unsupportedFast.reasons, ["unsupported-api-fast-tier"]);
+
+  assert.equal(apiUsdForUsage({
+    ...sol(100_000, 1),
+    model: "future-model",
+  }).amount, null);
+  assert.equal(apiUsdForUsage({
+    model: "gpt-5.6-sol",
+    totalTokens: 100_000,
+    inputTokens: 100_000,
+  }).amount, null);
+
+  const partialCacheWrite = apiUsdForUsage({
+    model: "gpt-5.5",
+    totalTokens: 1_100,
+    inputTokens: 1_000,
+    cachedInputTokens: 0,
+    cacheWriteInputTokens: 200,
+    outputTokens: 100,
+  });
+  assert.equal(partialCacheWrite.ratedTokens, 900);
+  assert.equal(partialCacheWrite.unratedTokens, 200);
+  assert.equal(partialCacheWrite.complete, false);
+  assert.deepEqual(partialCacheWrite.reasons, ["unsupported-cache-write-price"]);
+});
+
+test("cost renderer labels units, coverage, and unrated usage explicitly", () => {
+  const bounds = weekBounds("2026-08-23", "UTC");
+  const events = [
+    {
+      model: "gpt-5.6-sol",
+      totalTokens: 101_000,
+      inputTokens: 100_000,
+      cachedInputTokens: 0,
+      outputTokens: 1_000,
+      callCount: 1,
+    },
+    {
+      model: "future-model",
+      totalTokens: 50_000,
+      inputTokens: 50_000,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+    },
+  ];
+  const api = renderCostTerminal({ events, bounds, basis: "api-usd" });
+  assert.match(api, /^Hypothetical API-equivalent cost \(USD\)/);
+  assert.match(api, /Total rated amount: \$0\.42/);
+  assert.match(api, /Rated token coverage: 66\.9%/);
+  assert.match(api, /Unrated tokens: 50\.0K/);
+  assert.match(api, /unknown-model/);
+  assert.match(api, /not an actual bill/);
+
+  const credits = renderCostTerminal({ events, bounds, basis: "codex-credits" });
+  assert.match(credits, /^Codex purchased-credit estimate/);
+  assert.match(credits, /credits/);
+  assert.doesNotMatch(credits, /\$/);
+  assert.match(credits, /do not infer included-plan/);
+
+  const unrated = renderCostTerminal({
+    events: [events[1]],
+    bounds,
+    basis: "api-usd",
+  });
+  assert.match(unrated, /Total rated amount: —/);
+  assert.doesNotMatch(unrated, /\$0\.00/);
 });
 
 test("trend fast shading recognizes both tiers and reports mixed model rates", () => {

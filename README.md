@@ -29,6 +29,8 @@ use `npx tledger` instead.
 | Last 24 hours | `tledger 1d` |
 | Last 7 calendar days | `tledger week` |
 | Rolling 30 days | `tledger 30d` |
+| Purchased-credit estimate | `tledger cost 7d --basis codex-credits` |
+| Hypothetical API USD estimate | `tledger cost 7d --basis api-usd` |
 | 7-day PNG report | `tledger report 7d` |
 | Cache-only PNG report | `tledger report 7d --cache-rate` |
 
@@ -45,6 +47,42 @@ rolling 24-hour view ending when the command starts. In a TTY, the project
 dashboard is interactive. `j`/`k` select a project; `q`, `Q`, `Esc`, or
 `Ctrl-C` exits. Enter does not inspect a project, and `d` / `w` / `m` do not
 change the range; choose the range in the command.
+
+## Cost estimates
+
+The `cost` command is a static terminal report and always requires an explicit
+basis. It accepts `1d`, any positive `Nd` or `Nw` duration, or `week`:
+
+```bash
+tledger cost 7d --basis codex-credits --no-refresh --plain
+tledger cost week --basis api-usd --no-refresh --plain
+```
+
+Both reports recompute the selected local events against a dated rate card and
+show rated-token coverage, unrated tokens, and reason labels. They do not reuse
+a stored amount when current pricing is unavailable.
+
+| Basis | Unit and estimate | It does not prove |
+| --- | --- | --- |
+| `codex-credits` | Eligible usage paid with Codex purchased credits | Included-plan meter consumption, five-hour or weekly limits, or API dollars |
+| `api-usd` | Hypothetical API-equivalent text-token cost in USD | An API invoice, account usage, contract terms, taxes, regional pricing, or unsupported tool/image/search charges |
+
+The API basis partitions cached reads, cache writes, and uncached input without
+double counting. Published GPT-5.6 cache-write pricing is applied when the
+local record contains cache-write tokens. GPT-5.6 Sol API `fast` and `priority`
+usage is priced at 2× the corresponding Standard API rate; this is separate
+from the 2.5× purchased-credit multiplier. `ultrafast`, other unsupported
+tiers, and fast use without a published model-specific API price remain
+unrated.
+
+For an exact single GPT-5.6 Sol call above 272,000 input tokens, the API basis
+applies the published long-context rates to the full request. A compacted
+multi-call bucket at or below that aggregate threshold is safely priced at the
+standard context rate. Above it, Token Ledger cannot recover which individual
+request crossed the threshold, so the bucket is visibly unrated as
+`compacted-long-context-ambiguous` rather than guessed. Local history can also
+be incomplete or pruned, and unrecognized models or incomplete token
+breakdowns reduce coverage instead of becoming zero-cost usage.
 
 ## Cache and input controls
 
@@ -182,11 +220,12 @@ approximately 1.5× figure describes model speed, not credit consumption.
 Events without a detailed input/output breakdown, a known model rate, or a
 published fast multiplier are unrated.
 
-These purchased-credit estimates are not API-dollar estimates, and Token
-Ledger does not currently report API USD. GPT-5.6 Sol's promotional
-purchased-credit rate does not determine included plan usage, five-hour or
-weekly limits, or legacy credit rates. Raw observed token counts and recorded
-meter readings remain unchanged by the credit calculator.
+These purchased-credit estimates are not API-dollar estimates. The separate
+`cost --basis api-usd` view uses an independent API rate card and does not
+convert credits to dollars. GPT-5.6 Sol's promotional purchased-credit rate
+does not determine included plan usage, five-hour or weekly limits, or legacy
+credit rates. Raw observed token counts and recorded meter readings remain
+unchanged by either calculator.
 
 When meter observations are available, report bars in `--drain` mode represent
 observed meter drops; model attribution within a drop uses rate-card weights
