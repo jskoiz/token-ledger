@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
 import {
   chmod,
@@ -11,6 +12,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { gzipSync } from "node:zlib";
 
@@ -304,6 +306,59 @@ test("snapshot reader rejects compressed inputs above the pre-read limit", async
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test(
+  "snapshot reader rejects non-regular inputs before reading",
+  { skip: process.platform === "win32" },
+  async (t) => {
+    const root = await mkdtemp(resolve(tmpdir(), "token-ledger-non-regular-read-"));
+    try {
+      const directory = resolve(root, "directory.json");
+      await mkdir(directory);
+      await assert.rejects(
+        () => readPrivateSnapshot(directory),
+        (error) => {
+          assert.equal(error.code, "ERR_SNAPSHOT_NOT_REGULAR");
+          assert.equal(error.message, "Snapshot input must be a regular file.");
+          return true;
+        },
+      );
+
+      const fifo = resolve(root, "input.json");
+      const fifoResult = spawnSync("mkfifo", [fifo], { encoding: "utf8" });
+      if (fifoResult.error || fifoResult.status !== 0) {
+        t.skip("mkfifo is unavailable on this platform");
+        return;
+      }
+      const modulePath = fileURLToPath(
+        new URL("../lib/token-ledger-snapshot.mjs", import.meta.url),
+      );
+      const child = spawnSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          `import { pathToFileURL } from "node:url";
+const { readPrivateSnapshot } = await import(pathToFileURL(process.argv[1]).href);
+try {
+  await readPrivateSnapshot(process.argv[2]);
+  process.stdout.write("resolved");
+} catch (error) {
+  process.stdout.write(error.code ?? error.message);
+}`,
+          modulePath,
+          fifo,
+        ],
+        { encoding: "utf8", timeout: 1_000 },
+      );
+      assert.ifError(child.error);
+      assert.equal(child.status, 0, child.stderr);
+      assert.equal(child.stdout, "ERR_SNAPSHOT_NOT_REGULAR");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
 
 test("snapshot reader bounds gzip expansion and preserves valid reads", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-gzip-read-json-"));
