@@ -4,6 +4,7 @@ import {
   RATE_CARD_AS_OF,
 } from "./token-ledger-rates.mjs";
 import {
+  MAX_SAFE_TOKEN_COUNT,
   checkedFiniteAdd,
   checkedTokenAdd,
   splitUsageBucketsAtBoundaries,
@@ -333,11 +334,21 @@ function eventWeight(event, fallbackCreditsPerToken) {
   return fallbackCreditsPerToken > 0 ? tokens * fallbackCreditsPerToken : tokens;
 }
 
+function addRatedTotals(totals, credits, tokens) {
+  const scaledTokens = tokens / totals.scale;
+  const scaledCredits = credits / totals.scale;
+  const nextTokens = totals.tokens + scaledTokens;
+  const nextCredits = checkedFiniteAdd(totals.credits, scaledCredits);
+  const scaleFactor = Math.max(1, nextTokens / MAX_SAFE_TOKEN_COUNT);
+  totals.tokens = nextTokens / scaleFactor;
+  totals.credits = nextCredits / scaleFactor;
+  totals.scale *= scaleFactor;
+}
+
 function allocateBurn(delta, events, timeZone) {
   if (!(delta > 0)) return { contributions: new Map(), method: "none" };
 
-  let ratedCredits = 0;
-  let ratedTokens = 0;
+  const ratedTotals = { credits: 0, tokens: 0, scale: 1 };
   let hasUnrated = false;
   for (const event of events) {
     if (event?.invalidTokenRecord === true) continue;
@@ -345,13 +356,13 @@ function allocateBurn(delta, events, timeZone) {
     const allowFractional = event.rangeAllocationEstimated === true;
     const tokens = tokenValue(event.totalTokens, { allowFractional });
     if (Number.isFinite(credits) && credits > 0) {
-      ratedCredits = checkedFiniteAdd(ratedCredits, credits);
-      ratedTokens = checkedTokenAdd(ratedTokens, tokens, { allowFractional });
+      addRatedTotals(ratedTotals, credits, tokens);
     } else if (tokens > 0) {
       hasUnrated = true;
     }
   }
 
+  const { credits: ratedCredits, tokens: ratedTokens } = ratedTotals;
   const fallbackCreditsPerToken =
     ratedCredits > 0 && ratedTokens > 0 ? ratedCredits / ratedTokens : 0;
   const weights = new Map();

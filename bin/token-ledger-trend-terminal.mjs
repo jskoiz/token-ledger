@@ -87,6 +87,18 @@ function mergeBinTotals(state, bin) {
   state.scale = commonScale * scaleFactor;
 }
 
+function alignBinsToScale(bins, scale) {
+  for (const bin of bins) {
+    const sourceScale = tokenScale(bin);
+    if (sourceScale === scale) continue;
+    const ratio = sourceScale / scale;
+    bin.totalTokens *= ratio;
+    scaleTokenMap(bin.values, ratio);
+    scaleTokenMap(bin.fastValues, ratio);
+    setTokenScale(bin, scale);
+  }
+}
+
 // Mirrors the SVG renderer's validated categorical palette.
 export const TREND_MODEL_COLORS = {
   Luna: [38, 2, 42, 120, 214],
@@ -353,6 +365,7 @@ export function buildActualTokenBins(
   for (const bin of bins) {
     mergeBinTotals(totalsState, bin);
   }
+  alignBinsToScale(bins, totalsState.scale);
   return {
     bins,
     totals: totalsState.values,

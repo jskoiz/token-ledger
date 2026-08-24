@@ -1286,6 +1286,46 @@ test("quota burn keeps unrated usage out of credit-share mode after saturation",
   assert.equal(quota.estimatedDisplayedBurnPercent, 20);
 });
 
+test("trend burn keeps rated token and credit scales aligned", () => {
+  const huge = Number.MAX_SAFE_INTEGER;
+  const bounds = multiDayBounds("2026-08-02", "UTC", 2);
+  const snapshot = {
+    events: [
+      {
+        timestamp: "2026-08-01T01:00:00.000Z",
+        model: "gpt-5.6-luna",
+        totalTokens: huge,
+        rateCardCredits: 1,
+      },
+      {
+        timestamp: "2026-08-01T02:00:00.000Z",
+        model: "gpt-5.6-luna",
+        totalTokens: huge,
+        rateCardCredits: 1,
+      },
+      {
+        timestamp: "2026-08-01T03:00:00.000Z",
+        model: "gpt-5.6-sol",
+        totalTokens: huge,
+        rateCardCredits: null,
+      },
+    ],
+    quotaObservations: [
+      {
+        timestamp: "2026-08-02T00:00:00.000Z",
+        usedPercent: 30,
+        windowMinutes: 10_080,
+        resetsAt: Date.parse("2026-08-08T00:00:00.000Z") / 1_000,
+      },
+    ],
+  };
+
+  const interval = buildUsageTrend(snapshot, bounds).burnIntervals[0];
+  assert.equal(interval.method, "mixed");
+  assert.equal(interval.contributions.Luna, 20);
+  assert.equal(interval.contributions.Sol, 10);
+});
+
 test("compact totals promote values that round to 1000 of a unit", () => {
   const events = [
     {
@@ -1448,6 +1488,48 @@ test("combo trend bins actual tokens and overlays an explicit reset marker", () 
   assert.match(drainOutput, /■ Sol 10\.0% of limit · 2\.00K tok/);
   assert.match(drainOutput, /■ Unattributed 5\.00% of limit/);
   assert.match(drainOutput, /Columns sum to observed meter drops/);
+});
+
+test("trend token bins share one overflow scale across calendar days", () => {
+  const huge = Number.MAX_SAFE_INTEGER;
+  const bounds = multiDayBounds("2026-08-15", "UTC", 3);
+  const bins = buildActualTokenBins(
+    {
+      events: [
+        {
+          timestamp: "2026-08-13T01:00:00.000Z",
+          model: "gpt-5.6-luna",
+          totalTokens: huge,
+        },
+        {
+          timestamp: "2026-08-13T02:00:00.000Z",
+          model: "gpt-5.6-luna",
+          totalTokens: huge,
+        },
+        {
+          timestamp: "2026-08-14T01:00:00.000Z",
+          model: "gpt-5.6-luna",
+          totalTokens: huge,
+        },
+      ],
+    },
+    bounds,
+    3,
+    96,
+    { binSize: 1 },
+  );
+  const firstDay = bins.bins[0].totalTokens;
+  const secondDay = bins.bins[1].totalTokens;
+  assert.ok(firstDay > secondDay);
+  assert.ok(Math.abs(firstDay / secondDay - 2) < 1e-12);
+  assert.ok(
+    Math.abs(firstDay + secondDay - huge) <=
+      Number.EPSILON * huge * 8,
+  );
+  assert.ok(
+    Math.abs(bins.totals.get("Luna") - huge) <=
+      Number.EPSILON * huge * 8,
+  );
 });
 
 test("image trend renderer emits stacked model bars and a quota line", () => {
