@@ -1,10 +1,12 @@
 import { spawnSync } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import {
   mkdir,
   mkdtemp,
   readFile,
   rm,
+  stat,
   utimes,
   writeFile,
 } from "node:fs/promises";
@@ -13,7 +15,10 @@ import { homedir, tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { writePrivateSnapshot } from "../lib/token-ledger-snapshot.mjs";
+import {
+  readPrivateSnapshot,
+  writePrivateSnapshot,
+} from "../lib/token-ledger-snapshot.mjs";
 import {
   aggregateProjects,
   dayBounds,
@@ -71,6 +76,479 @@ const ROLLING_24H_FIXTURE = fileURLToPath(
 const CLI_ENTRYPOINT = fileURLToPath(
   new URL("../bin/token-ledger.mjs", import.meta.url),
 );
+
+function lifecycleJsonl(rows) {
+  return `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`;
+}
+
+function lifecycleTokenCount(timestamp, totalTokens) {
+  const usage = {
+    input_tokens: totalTokens - 200,
+    cached_input_tokens: 200,
+    output_tokens: 200,
+    reasoning_output_tokens: 50,
+    total_tokens: totalTokens,
+  };
+  return {
+    timestamp,
+    type: "event_msg",
+    payload: {
+      type: "token_count",
+      rate_limits: {
+        primary: {
+          window_minutes: 10_080,
+          used_percent: 42,
+          resets_at: Date.parse("2026-08-27T00:00:00.000Z") / 1_000,
+        },
+        secondary: {
+          window_minutes: 60,
+          used_percent: 12,
+          resets_at: Date.parse("2026-08-20T13:00:00.000Z") / 1_000,
+        },
+        plan_type: "pro",
+        limit_name: "minute",
+      },
+      info: {
+        total_token_usage: usage,
+        last_token_usage: usage,
+        model_context_window: 128_000,
+      },
+    },
+  };
+}
+
+async function writeLifecycleRollout(
+  codexHome,
+  threadId,
+  timestamp,
+  totalTokens,
+  {
+    archived = false,
+    parentThreadId = null,
+    repositoryUrl = "https://github.com/acme/metadata-project.git",
+  } = {},
+) {
+  const directory = resolve(
+    codexHome,
+    archived ? "archived_sessions" : "sessions",
+    "2026",
+    "08",
+    "20",
+  );
+  await mkdir(directory, { recursive: true });
+  const path = resolve(directory, `rollout-${threadId}.jsonl`);
+  const startedAt = Date.parse(timestamp) / 1_000;
+  const turnId = `lifecycle-turn-${threadId.slice(0, 8)}`;
+  const callId = `lifecycle-call-${threadId.slice(0, 8)}`;
+  const sessionMeta = {
+    id: threadId,
+    cwd: "/private/tmp/rollout-project",
+    git: { repository_url: repositoryUrl },
+    source: "vscode",
+  };
+  if (parentThreadId) sessionMeta.parent_thread_id = parentThreadId;
+  await writeFile(
+    path,
+    lifecycleJsonl([
+      {
+        timestamp,
+        type: "session_meta",
+        payload: sessionMeta,
+      },
+      {
+        timestamp,
+        type: "event_msg",
+        payload: {
+          type: "thread_settings_applied",
+          thread_settings: {
+            model: "gpt-5.6-luna",
+            reasoning_effort: "high",
+            service_tier: "priority",
+          },
+        },
+      },
+      {
+        timestamp,
+        type: "event_msg",
+        payload: {
+          type: "task_started",
+          turn_id: turnId,
+          started_at: startedAt,
+        },
+      },
+      {
+        timestamp,
+        type: "turn_context",
+        payload: {
+          turn_id: turnId,
+          model: "gpt-5.6-luna",
+          effort: "high",
+        },
+      },
+      {
+        timestamp,
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "shell",
+          call_id: callId,
+        },
+      },
+      lifecycleTokenCount(timestamp, totalTokens),
+    ]),
+  );
+  return path;
+}
+
+async function writeLifecycleIndex(codexHome, threadId, title, updatedAt) {
+  const path = resolve(codexHome, "session_index.jsonl");
+  await writeFile(
+    path,
+    lifecycleJsonl([{ id: threadId, thread_name: title, updated_at: updatedAt }]),
+  );
+  return path;
+}
+
+function writeLifecycleStateDatabase(
+  path,
+  {
+    threadId,
+    parentThreadId,
+    threadSource,
+    tokensUsed,
+    title = "SQLite title",
+    model = "gpt-5.5",
+    effort = "low",
+  },
+) {
+  const database = new DatabaseSync(path);
+  try {
+    database.exec(`
+      CREATE TABLE threads (
+        id TEXT PRIMARY KEY,
+        created_at INTEGER,
+        updated_at INTEGER,
+        source TEXT,
+        cwd TEXT,
+        title TEXT,
+        name TEXT,
+        tokens_used INTEGER,
+        git_sha TEXT,
+        git_branch TEXT,
+        git_origin_url TEXT,
+        agent_nickname TEXT,
+        agent_role TEXT,
+        model TEXT,
+        reasoning_effort TEXT,
+        thread_source TEXT
+      );
+      CREATE TABLE thread_spawn_edges (
+        parent_thread_id TEXT,
+        child_thread_id TEXT
+      );
+    `);
+    database.prepare(`
+      INSERT INTO threads (
+        id, created_at, updated_at, source, cwd, title, name, tokens_used,
+        git_sha, git_branch, git_origin_url, agent_nickname, agent_role,
+        model, reasoning_effort, thread_source
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      threadId,
+      Date.parse("2026-08-20T11:59:00.000Z") / 1_000,
+      Date.parse("2026-08-20T12:01:00.000Z") / 1_000,
+      "exec",
+      "/private/tmp/sqlite-project",
+      title,
+      "SQLite fallback name",
+      tokensUsed,
+      "deadbeef",
+      "main",
+      "https://github.com/acme/sqlite-project.git",
+      "metadata-agent",
+      "worker",
+      model,
+      effort,
+      threadSource,
+    );
+    database.prepare(
+      "INSERT INTO thread_spawn_edges (parent_thread_id, child_thread_id) VALUES (?, ?)",
+    ).run(parentThreadId, threadId);
+  } finally {
+    database.close();
+  }
+}
+
+function updateLifecycleStateDatabase(path, threadSource, tokensUsed) {
+  const database = new DatabaseSync(path);
+  try {
+    database.prepare(
+      "UPDATE threads SET thread_source = ?, tokens_used = ?",
+    ).run(threadSource, tokensUsed);
+  } finally {
+    database.close();
+  }
+}
+
+function lifecycleRun(codexHome, cachePath, includeArchived = true) {
+  const argv = [
+    "day",
+    "2026-08-20",
+    "--codex-home",
+    codexHome,
+    "--input",
+    cachePath,
+    "--static",
+    "--plain",
+    "--ascii",
+    "--raw-projects",
+    "--tz",
+    "UTC",
+  ];
+  if (!includeArchived) argv.push("--no-archived");
+  const options = parseArgs(argv);
+  // Keep the parsed option in automatic-refresh mode while redirecting the
+  // default private cache into the hermetic fixture.
+  options.input = cachePath;
+  options.inputExplicit = false;
+  return run(options);
+}
+
+async function ageLifecycleCache(cachePath, sourcePaths) {
+  const cacheTimeMs = Date.now() - 2 * 60 * 60 * 1_000;
+  const cacheDate = new Date(cacheTimeMs);
+  const sourceDate = new Date(cacheTimeMs - 1_000);
+  await utimes(cachePath, cacheDate, cacheDate);
+  for (const sourcePath of sourcePaths) {
+    await utimes(sourcePath, sourceDate, sourceDate);
+  }
+  return cacheTimeMs;
+}
+
+async function setLifecycleSourceNewer(sourcePath, cacheTimeMs) {
+  const newer = new Date(cacheTimeMs + 1_000);
+  await utimes(sourcePath, newer, newer);
+}
+
+test("successful metadata-backed refresh lifecycle remains hermetic", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-refresh-lifecycle-"));
+  const codexHome = resolve(root, "codex-home");
+  const cachePath = resolve(root, "cache", "token-ledger-snapshot-v2.json.gz");
+  const noArchivedCachePath = resolve(
+    root,
+    "cache-no-archived",
+    "token-ledger-snapshot-v2.json.gz",
+  );
+  const activeThreadId = "11111111-1111-4111-8111-111111111111";
+  const parentThreadId = "22222222-2222-4222-8222-222222222222";
+  const archivedThreadId = "33333333-3333-4333-8333-333333333333";
+  const timestamp = "2026-08-20T12:00:00.000Z";
+  const activeRolloutPath = await writeLifecycleRollout(
+    codexHome,
+    activeThreadId,
+    timestamp,
+    1_000,
+    { parentThreadId },
+  );
+  const archivedRolloutPath = await writeLifecycleRollout(
+    codexHome,
+    archivedThreadId,
+    timestamp,
+    500,
+    {
+      archived: true,
+      repositoryUrl: "https://github.com/acme/archived-project.git",
+    },
+  );
+  const indexPath = await writeLifecycleIndex(
+    codexHome,
+    activeThreadId,
+    "Indexed metadata title",
+    timestamp,
+  );
+  const currentStatePath = resolve(codexHome, "state_5.sqlite");
+  try {
+    await mkdir(codexHome, { recursive: true });
+    writeLifecycleStateDatabase(currentStatePath, {
+      threadId: activeThreadId,
+      parentThreadId,
+      threadSource: "automation",
+      tokensUsed: 9_999,
+    });
+
+    const firstOutput = await lifecycleRun(codexHome, cachePath);
+    const firstSnapshot = await readPrivateSnapshot(cachePath);
+    assert.match(firstOutput, /metadata-project/);
+    assert.match(firstOutput, /1\.00K/);
+    assert.equal(firstSnapshot.coverage.filesScanned, 2);
+    assert.equal(firstSnapshot.coverage.observedTokens, 1_500);
+    assert.equal(firstSnapshot.coverage.observedModelCalls, 2);
+
+    const activeThread = firstSnapshot.threads.find(
+      (thread) => thread.id === activeThreadId,
+    );
+    assert.deepEqual(
+      {
+        title: activeThread.title,
+        project: activeThread.project,
+        model: activeThread.model,
+        effort: activeThread.effort,
+        source: activeThread.source,
+        useType: activeThread.useType,
+        parentThreadId: activeThread.parentThreadId,
+        reportedCumulativeTokens: activeThread.reportedCumulativeTokens,
+      },
+      {
+        title: "Indexed metadata title",
+        project: "acme/metadata-project",
+        model: "gpt-5.6-luna",
+        effort: "high",
+        source: "automation",
+        useType: "automation",
+        parentThreadId,
+        reportedCumulativeTokens: 9_999,
+      },
+    );
+    const activeEvent = firstSnapshot.events.find((event) =>
+      event.threadIds.includes(activeThreadId),
+    );
+    assert.deepEqual(
+      {
+        inputTokens: activeEvent.inputTokens,
+        cachedInputTokens: activeEvent.cachedInputTokens,
+        outputTokens: activeEvent.outputTokens,
+        totalTokens: activeEvent.totalTokens,
+        toolCalls: activeEvent.toolCalls,
+        serviceTier: activeEvent.serviceTier,
+      },
+      {
+        inputTokens: 800,
+        cachedInputTokens: 200,
+        outputTokens: 200,
+        totalTokens: 1_000,
+        toolCalls: 1,
+        serviceTier: "priority",
+      },
+    );
+    assert.equal(firstSnapshot.quotaObservations.length, 2);
+    assert.equal(
+      firstSnapshot.quotaObservations.find(
+        (quota) => quota.windowMinutes === 10_080,
+      ).usedPercent,
+      42,
+    );
+    assert.equal(
+      firstSnapshot.quotaObservations.find(
+        (quota) => quota.windowMinutes === 60,
+      ).usedPercent,
+      12,
+    );
+    assert.equal((await stat(cachePath)).mode & 0o777, 0o600);
+    assert.deepEqual(
+      [...(await readFile(cachePath)).subarray(0, 2)],
+      [0x1f, 0x8b],
+    );
+
+    const initialCache = await readFile(cachePath);
+    const sourcePaths = [
+      activeRolloutPath,
+      archivedRolloutPath,
+      indexPath,
+      currentStatePath,
+    ];
+    const unchangedCacheTimeMs = await ageLifecycleCache(cachePath, sourcePaths);
+    await lifecycleRun(codexHome, cachePath);
+    assert.deepEqual(await readFile(cachePath), initialCache);
+
+    await writeLifecycleRollout(
+      codexHome,
+      activeThreadId,
+      timestamp,
+      1_500,
+      { parentThreadId },
+    );
+    await setLifecycleSourceNewer(activeRolloutPath, unchangedCacheTimeMs);
+    await lifecycleRun(codexHome, cachePath);
+    let refreshedSnapshot = await readPrivateSnapshot(cachePath);
+    assert.equal(
+      refreshedSnapshot.events.find((event) =>
+        event.threadIds.includes(activeThreadId),
+      ).totalTokens,
+      1_500,
+    );
+
+    const indexCacheTimeMs = await ageLifecycleCache(cachePath, sourcePaths);
+    await writeLifecycleIndex(
+      codexHome,
+      activeThreadId,
+      "Fresh indexed metadata title",
+      "2026-08-20T12:05:00.000Z",
+    );
+    await setLifecycleSourceNewer(indexPath, indexCacheTimeMs);
+    await lifecycleRun(codexHome, cachePath);
+    refreshedSnapshot = await readPrivateSnapshot(cachePath);
+    assert.equal(
+      refreshedSnapshot.threads.find((thread) => thread.id === activeThreadId)
+        .title,
+      "Fresh indexed metadata title",
+    );
+
+    const currentStateCacheTimeMs = await ageLifecycleCache(
+      cachePath,
+      sourcePaths,
+    );
+    updateLifecycleStateDatabase(currentStatePath, "realtime_voice", 12_345);
+    await setLifecycleSourceNewer(currentStatePath, currentStateCacheTimeMs);
+    await lifecycleRun(codexHome, cachePath);
+    refreshedSnapshot = await readPrivateSnapshot(cachePath);
+    const refreshedCurrentThread = refreshedSnapshot.threads.find(
+      (thread) => thread.id === activeThreadId,
+    );
+    assert.equal(refreshedCurrentThread.source, "voice");
+    assert.equal(refreshedCurrentThread.useType, "voice");
+    assert.equal(refreshedCurrentThread.reportedCumulativeTokens, 12_345);
+
+    await rm(currentStatePath);
+    const legacyStatePath = resolve(codexHome, "sqlite", "state_5.sqlite");
+    await mkdir(resolve(codexHome, "sqlite"), { recursive: true });
+    writeLifecycleStateDatabase(legacyStatePath, {
+      threadId: activeThreadId,
+      parentThreadId,
+      threadSource: "subagent",
+      tokensUsed: 22_222,
+      title: "Legacy SQLite title",
+    });
+    const legacyCacheTimeMs = await ageLifecycleCache(cachePath, [
+      activeRolloutPath,
+      archivedRolloutPath,
+      indexPath,
+      legacyStatePath,
+    ]);
+    await setLifecycleSourceNewer(legacyStatePath, legacyCacheTimeMs);
+    await lifecycleRun(codexHome, cachePath);
+    refreshedSnapshot = await readPrivateSnapshot(cachePath);
+    const refreshedLegacyThread = refreshedSnapshot.threads.find(
+      (thread) => thread.id === activeThreadId,
+    );
+    assert.equal(refreshedLegacyThread.source, "subagent");
+    assert.equal(refreshedLegacyThread.useType, "subagent");
+    assert.equal(refreshedLegacyThread.reportedCumulativeTokens, 22_222);
+
+    const noArchivedOutput = await lifecycleRun(
+      codexHome,
+      noArchivedCachePath,
+      false,
+    );
+    const noArchivedSnapshot = await readPrivateSnapshot(noArchivedCachePath);
+    assert.match(noArchivedOutput, /metadata-project/);
+    assert.doesNotMatch(noArchivedOutput, /archived-project/);
+    assert.equal(noArchivedSnapshot.coverage.filesScanned, 1);
+    assert.equal(noArchivedSnapshot.coverage.observedTokens, 1_500);
+    assert.equal(noArchivedSnapshot.events.length, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test(
   "CLI entrypoint supports direct shebang execution",
