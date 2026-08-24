@@ -40,6 +40,12 @@ The main options are:
 - `--no-open` writes a PNG without opening it.
 - `--help-all` shows the complete command and option reference.
 
+Default report images are local repository-root artifacts and are ignored by
+Git: `token-ledger-report-<period>.png`,
+`token-ledger-cache-report-<period>.png`, and
+`token-ledger-trend-<period>.png`. Use `--image-output <file>` when you want
+to choose an intentional destination, such as a tracked image under `docs/`.
+
 `week` covers seven local calendar days ending on the selected day. `1d` is a
 rolling 24-hour view ending when the command starts. In a TTY, the project
 dashboard is interactive. `j`/`k` select a project; `q`, `Q`, `Esc`, or
