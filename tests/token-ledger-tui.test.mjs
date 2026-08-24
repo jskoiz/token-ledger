@@ -96,7 +96,7 @@ function assertListenersRemoved(terminal) {
   assert.equal(terminal.stdin.listenerCount("data"), 0);
   assert.equal(terminal.stdout.listenerCount("error"), 0);
   assert.equal(terminal.stdout.listenerCount("resize"), 0);
-  for (const signal of ["SIGINT"]) {
+  for (const signal of ["SIGINT", "SIGHUP", "SIGTERM"]) {
     assert.equal(terminal.signalTarget.listenerCount(signal), 0);
   }
 }
@@ -210,12 +210,14 @@ test("stream errors and supported signals share teardown", async () => {
     assertTerminalRestored(terminal);
   }
 
-  for (const signal of ["SIGINT"]) {
+  const signalExitCodes = { SIGINT: 130, SIGHUP: 129, SIGTERM: 143 };
+  for (const signal of Object.keys(signalExitCodes)) {
     const terminal = createTerminal();
     const session = start(terminal);
     terminal.signalTarget.emit(signal);
 
     await session;
+    assert.equal(terminal.signalTarget.exitCode, signalExitCodes[signal]);
     assertTerminalRestored(terminal);
   }
 });

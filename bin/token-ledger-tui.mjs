@@ -9,7 +9,12 @@ const HIDE_CURSOR = "\u001b[?25l";
 const SHOW_CURSOR = "\u001b[?25h";
 const CLEAR_SCREEN = "\u001b[2J\u001b[H";
 const RESET = "\u001b[0m";
-const SUPPORTED_SIGNALS = ["SIGINT"];
+const SUPPORTED_SIGNALS = ["SIGINT", "SIGHUP", "SIGTERM"];
+const SIGNAL_EXIT_CODES = {
+  SIGINT: 2,
+  SIGHUP: 1,
+  SIGTERM: 15,
+};
 
 export function startInteractive(view, {
   stdin = process.stdin,
@@ -108,8 +113,13 @@ export function startInteractive(view, {
       }
     }
 
-    function onSignal() {
+    function onSignal(signal) {
       teardown();
+      const exitCode = 128 + SIGNAL_EXIT_CODES[signal];
+      signalTarget.exitCode = exitCode;
+      if (signalTarget.pid) {
+        signalTarget.kill(signalTarget.pid, signal);
+      }
     }
 
     function onStreamError(streamError) {
@@ -142,7 +152,7 @@ export function startInteractive(view, {
       registerListener(stdin, "error", onStreamError);
       registerListener(stdout, "error", onStreamError);
       for (const signal of SUPPORTED_SIGNALS) {
-        registerListener(signalTarget, signal, onSignal, "once");
+        registerListener(signalTarget, signal, () => onSignal(signal), "once");
       }
       rawModeTouched = true;
       setRawMode(true);
