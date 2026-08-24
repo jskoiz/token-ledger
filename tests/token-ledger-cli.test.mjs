@@ -334,6 +334,10 @@ test("parseArgs normalizes and validates the collection cutoff", () => {
     () => parseArgs(["day", "2026-08-20", "--since", "01/02/2026"]),
     /--since requires a valid ISO timestamp/,
   );
+  assert.throws(
+    () => parseArgs(["day", "2026-08-20", "--since", "2026-02-30T00:00:00Z"]),
+    /--since requires a valid ISO timestamp/,
+  );
 });
 
 test("parseArgs treats an empty command and help aliases as help", () => {
