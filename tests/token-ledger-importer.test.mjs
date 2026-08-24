@@ -307,6 +307,22 @@ test("snapshot reader rejects compressed inputs above the pre-read limit", async
   }
 });
 
+test("snapshot reader scales memory with the file, not the configured ceiling", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-large-read-limit-"));
+  try {
+    const output = resolve(root, "tiny.json");
+    const snapshot = { events: [] };
+    await writeFile(output, JSON.stringify(snapshot));
+
+    assert.deepEqual(
+      await readPrivateSnapshot(output, { maxJsonBytes: Number.MAX_SAFE_INTEGER }),
+      snapshot,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test(
   "snapshot reader rejects non-regular inputs before reading",
   { skip: process.platform === "win32" },
