@@ -11,6 +11,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { gzipSync } from "node:zlib";
 
@@ -600,6 +601,182 @@ function turnStart(timestamp, turnId, model = "gpt-5.5") {
     },
   ];
 }
+
+async function writeSingleUsageRollout(root, threadId) {
+  const timestamp = "2026-08-18T10:00:00.000Z";
+  const rolloutDirectory = resolve(root, "sessions", "2026", "08", "18");
+  await mkdir(rolloutDirectory, { recursive: true });
+  await writeFile(
+    resolve(rolloutDirectory, `rollout-${threadId}.jsonl`),
+    serialize([
+      ...turnStart(timestamp, "turn-state-metadata"),
+      tokenCount("2026-08-18T10:00:01.000Z", 100, 100),
+    ]),
+  );
+}
+
+test("state enrichment tolerates missing optional columns and edge table", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-state-schema-"));
+  const threadId = "abababab-abab-4bab-8bab-abababababab";
+  const database = new DatabaseSync(resolve(root, "state_5.sqlite"));
+  try {
+    database.exec(
+      "CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT, tokens_used INTEGER)",
+    );
+    database
+      .prepare("INSERT INTO threads (id, title, tokens_used) VALUES (?, ?, ?)")
+      .run(threadId, "Reduced state schema", 250);
+    database.close();
+    await writeSingleUsageRollout(root, threadId);
+
+    const snapshot = await collectUsage({
+      output: resolve(root, "snapshot.json"),
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+
+    assert.equal(snapshot.events.length, 1);
+    assert.equal(snapshot.events[0].totalTokens, 100);
+    assert.equal(snapshot.threads[0].title, "Reduced state schema");
+    assert.equal(snapshot.threads[0].reportedCumulativeTokens, 250);
+    assert.deepEqual(snapshot.metadata.stateDatabase, {
+      status: "available",
+      reason: null,
+      threadRows: 1,
+      parentEdges: 0,
+    });
+  } finally {
+    if (database.isOpen) database.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("thread rows survive an incompatible spawn-edge schema", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-state-edges-"));
+  const threadId = "acacacac-acac-4cac-8cac-acacacacacac";
+  const database = new DatabaseSync(resolve(root, "state_5.sqlite"));
+  try {
+    database.exec(
+      "CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT);" +
+        "CREATE TABLE thread_spawn_edges (parent TEXT, child TEXT)",
+    );
+    database
+      .prepare("INSERT INTO threads (id, title) VALUES (?, ?)")
+      .run(threadId, "Usable thread metadata");
+    database.close();
+    await writeSingleUsageRollout(root, threadId);
+
+    const snapshot = await collectUsage({
+      output: resolve(root, "snapshot.json"),
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+
+    assert.equal(snapshot.coverage.observedTokens, 100);
+    assert.equal(snapshot.threads[0].title, "Usable thread metadata");
+    assert.deepEqual(snapshot.metadata.stateDatabase, {
+      status: "partial",
+      reason: "schema-mismatch",
+      threadRows: 1,
+      parentEdges: 0,
+    });
+  } finally {
+    if (database.isOpen) database.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("rollout totals survive an incompatible state database schema", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-state-mismatch-"));
+  const threadId = "bcbcbcbc-bcbc-4cbc-8cbc-bcbcbcbcbcbc";
+  const database = new DatabaseSync(resolve(root, "state_5.sqlite"));
+  try {
+    database.exec("CREATE TABLE unrelated_metadata (value TEXT)");
+    database.close();
+    await writeSingleUsageRollout(root, threadId);
+
+    const snapshot = await collectUsage({
+      output: resolve(root, "snapshot.json"),
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+
+    assert.equal(snapshot.coverage.observedTokens, 100);
+    assert.equal(snapshot.events.length, 1);
+    assert.deepEqual(snapshot.metadata.stateDatabase, {
+      status: "unavailable",
+      reason: "schema-mismatch",
+      threadRows: 0,
+      parentEdges: 0,
+    });
+  } finally {
+    if (database.isOpen) database.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("rollout totals survive a corrupt state database", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-state-corrupt-"));
+  const threadId = "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd";
+  try {
+    await writeFile(resolve(root, "state_5.sqlite"), "not a sqlite database");
+    await writeSingleUsageRollout(root, threadId);
+
+    const snapshot = await collectUsage({
+      output: resolve(root, "snapshot.json"),
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+
+    assert.equal(snapshot.coverage.observedTokens, 100);
+    assert.equal(snapshot.events.length, 1);
+    assert.deepEqual(snapshot.metadata.stateDatabase, {
+      status: "unavailable",
+      reason: "corrupt",
+      threadRows: 0,
+      parentEdges: 0,
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("rollout totals survive a busy state database", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-state-busy-"));
+  const threadId = "dededede-dede-4ede-8ede-dededededede";
+  const database = new DatabaseSync(resolve(root, "state_5.sqlite"));
+  try {
+    database.exec("CREATE TABLE threads (id TEXT PRIMARY KEY)");
+    database.exec("BEGIN EXCLUSIVE");
+    await writeSingleUsageRollout(root, threadId);
+
+    const snapshot = await collectUsage({
+      output: resolve(root, "snapshot.json"),
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+
+    assert.equal(snapshot.coverage.observedTokens, 100);
+    assert.equal(snapshot.events.length, 1);
+    assert.deepEqual(snapshot.metadata.stateDatabase, {
+      status: "unavailable",
+      reason: "busy",
+      threadRows: 0,
+      parentEdges: 0,
+    });
+  } finally {
+    if (database.isOpen) {
+      database.exec("ROLLBACK");
+      database.close();
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("source labels resolve structured, encoded, and plain thread sources", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
