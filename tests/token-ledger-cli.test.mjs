@@ -43,9 +43,11 @@ import {
 } from "../bin/token-ledger-terminal.mjs";
 import {
   buildBurnDayBins,
+  buildRangeAnalysis,
   buildUsageTrend,
   multiDayBounds,
   normalizeQuotaTimeline,
+  priorPeriodBounds,
   weeklyQuotaObservations,
 } from "../bin/token-ledger-trend.mjs";
 import { creditsForUsage } from "../lib/token-ledger-rates.mjs";
@@ -1980,6 +1982,188 @@ test("combo trend bins actual tokens and overlays an explicit reset marker", () 
   assert.match(drainOutput, /■ Sol 10\.0% of limit · 2\.00K tok/);
   assert.match(drainOutput, /■ Unattributed 5\.00% of limit/);
   assert.match(drainOutput, /Columns sum to observed meter drops/);
+});
+
+test("all report renderers consume one immutable range analysis", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+  const priorBounds = priorPeriodBounds(bounds, 7);
+  const resetAt = Date.parse("2026-08-16T00:00:00.000Z") / 1_000;
+  const sourceEvents = [
+    {
+      timestamp: "2026-08-09T12:00:00.000Z",
+      startAt: "2026-08-08T12:00:00.000Z",
+      endAt: "2026-08-10T12:00:00.000Z",
+      project: "compacted",
+      threadId: "compacted-thread",
+      model: "gpt-5.6-luna",
+      totalTokens: 3_000,
+      inputTokens: 2_400,
+      cachedInputTokens: 1_200,
+      outputTokens: 600,
+      callCount: 2,
+    },
+    {
+      timestamp: "2026-08-12T12:00:00.000Z",
+      project: "priority",
+      threadId: "priority-thread",
+      model: "gpt-5.6-sol",
+      totalTokens: 2_000,
+      inputTokens: 1_000,
+      cachedInputTokens: 700,
+      outputTokens: 1_000,
+      serviceTier: "priority",
+    },
+    {
+      timestamp: "2026-08-14T12:00:00.000Z",
+      project: "standard",
+      threadId: "standard-thread",
+      model: "gpt-5.5",
+      totalTokens: 1_000,
+      inputTokens: 800,
+      cachedInputTokens: 0,
+      outputTokens: 200,
+    },
+    {
+      timestamp: "2026-08-05T12:00:00.000Z",
+      project: "prior",
+      threadId: "prior-thread",
+      model: "gpt-5.6-sol",
+      totalTokens: 700,
+      inputTokens: 500,
+      cachedInputTokens: 250,
+      outputTokens: 200,
+    },
+  ];
+  let rawPasses = 0;
+  const events = new Proxy(sourceEvents, {
+    get(target, property) {
+      if (property === Symbol.iterator) {
+        return function* trackedIterator() {
+          rawPasses += 1;
+          yield* target;
+        };
+      }
+      return target[property];
+    },
+  });
+  const snapshot = {
+    generatedAt: "2026-08-15T12:00:00.000Z",
+    events,
+    quotaObservations: [
+      {
+        timestamp: "2026-08-10T12:00:00.000Z",
+        usedPercent: 20,
+        windowMinutes: 10_080,
+        resetsAt: resetAt,
+      },
+      {
+        timestamp: "2026-08-14T12:00:00.000Z",
+        usedPercent: 35,
+        windowMinutes: 10_080,
+        resetsAt: resetAt,
+      },
+    ],
+  };
+  const analysis = buildRangeAnalysis(snapshot, bounds, { priorBounds });
+  assert.equal(Object.isFrozen(analysis), true);
+  assert.equal(Object.isFrozen(analysis.currentEvents), true);
+  assert.equal(Object.isFrozen(analysis.priorEvents), true);
+  assert.equal(analysis.trend.available, true);
+  assert.ok(analysis.boundaryCount >= 4);
+
+  const currentEvents = filterDayEvents(snapshot, bounds, analysis);
+  const rows = aggregateProjects(snapshot, currentEvents, { rawProjects: true }, analysis);
+  const trend = buildUsageTrend(snapshot, bounds, { analysis });
+  const actual = buildActualTokenBins(
+    snapshot,
+    bounds,
+    7,
+    110,
+    { events: analysis.currentEvents },
+  );
+  const cache = buildCacheReportData(
+    snapshot,
+    bounds,
+    7,
+    110,
+    actual.binSize,
+    analysis.currentEvents,
+  );
+  const plain = renderTrendPlain({
+    snapshot,
+    bounds,
+    trend,
+    days: 7,
+    options: { width: 96 },
+    analysis,
+  });
+  const image = renderTrendImage({
+    snapshot,
+    bounds,
+    trend,
+    days: 7,
+    options: { imageWidth: 900 },
+    projectRows: rows,
+    analysis,
+  });
+  const cacheImage = renderCacheReportImage({
+    snapshot,
+    bounds,
+    days: 7,
+    options: { imageWidth: 900 },
+    analysis,
+  });
+
+  const total = (items) =>
+    items.reduce((sum, event) => sum + (Number(event.totalTokens) || 0), 0);
+  const rowTotal = rows.reduce((sum, row) => sum + row.totalTokens, 0);
+  const modelTotal = trend.models.reduce((sum, row) => sum + row.tokens, 0);
+  const binTotal = [...actual.totals.values()].reduce((sum, value) => sum + value, 0);
+  assert.equal(total(currentEvents), rowTotal);
+  assert.equal(rowTotal, modelTotal);
+  assert.equal(modelTotal, binTotal);
+  assert.equal(binTotal, cache.totalTokens);
+  assert.equal(total(analysis.currentEvents), total(currentEvents));
+  assert.ok(Math.abs(total(analysis.priorEvents) - (3_000 / 4 + 700)) < 0.01);
+  assert.match(plain, /ACTUAL TOKENS \+ WEEKLY QUOTA/);
+  assert.match(image, /Token Ledger · 7-day trend/);
+  assert.match(cacheImage, /Token Ledger · 7-day cache report/);
+  assert.equal(rawPasses, 1);
+});
+
+test("future quota observations do not alter historical range splits", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+  const event = {
+    timestamp: "2026-08-18T12:00:00.000Z",
+    startAt: "2026-08-14T12:00:00.000Z",
+    endAt: "2026-08-25T12:00:00.000Z",
+    project: "historical",
+    model: "gpt-5.6-luna",
+    totalTokens: 1_000,
+    callCount: 10,
+  };
+  const baseline = buildRangeAnalysis(
+    { events: [event], quotaObservations: [] },
+    bounds,
+    { includeTrend: false },
+  );
+  const withFutureQuota = buildRangeAnalysis(
+    {
+      events: [event],
+      quotaObservations: [{
+        timestamp: "2026-08-23T00:00:00.000Z",
+        usedPercent: 20,
+        windowMinutes: 10_080,
+        resetsAt: Date.parse("2026-08-24T00:00:00.000Z") / 1_000,
+      }],
+    },
+    bounds,
+    { includeTrend: false },
+  );
+
+  assert.equal(withFutureQuota.boundaryCount, baseline.boundaryCount);
+  assert.deepEqual(withFutureQuota.currentEvents, baseline.currentEvents);
+  assert.equal(withFutureQuota.trend, null);
 });
 
 test("trend reports display Terra usage and meter attribution", () => {
