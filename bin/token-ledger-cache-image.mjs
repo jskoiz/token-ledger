@@ -20,6 +20,7 @@ import {
   usageDetailedCallCount,
   usageInputCallCount,
 } from "../lib/token-ledger-usage.mjs";
+import { historyScopeLabel } from "../lib/token-ledger-collection.mjs";
 
 const COLORS = {
   background: "#0e1420",
@@ -656,7 +657,11 @@ export function renderCacheReportImage({
     ...footerItems.map((item) => item.qualifiers.length),
   );
   const headerTitle = "TOKEN LEDGER · CACHE REPORT";
-  const headerMetadata = `${periodLabel(bounds)} · ${bounds.timeZone}`;
+  const headerMetadata = [
+    periodLabel(bounds),
+    bounds.timeZone,
+    historyScopeLabel(snapshot),
+  ].filter(Boolean).join(" · ");
   const headerTitleWidth = textWidth(headerTitle, 27, 800) -
     0.27 * (headerTitle.length - 1);
   const headerMetadataFits = headerTitleWidth + textWidth(headerMetadata, 14) + 24 <=

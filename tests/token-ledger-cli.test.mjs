@@ -93,6 +93,7 @@ test("bare CLI shows the concise quick guide", () => {
   assert.match(result.stdout, /tledger 1d\s+Last 24 hours/);
   assert.match(result.stdout, /tledger report 7d\s+Write the 7-day PNG report/);
   assert.match(result.stdout, /--help-all\s+Show every command and option/);
+  assert.match(result.stdout, /--since <ISO timestamp>/);
   assert.doesNotMatch(result.stdout, /--codex-home|--youplot|npm run/);
 });
 
@@ -105,6 +106,7 @@ test("--help-all shows the complete command reference", () => {
   assert.equal(result.stderr, "");
   assert.match(result.stdout, /Token Ledger command reference/);
   assert.match(result.stdout, /--codex-home <dir>/);
+  assert.match(result.stdout, /--since <ISO timestamp>/);
   assert.match(result.stdout, /--youplot/);
   assert.match(result.stdout, /--image-width <px>/);
 });
@@ -307,6 +309,27 @@ test("parseArgs accepts the day subcommand and date option", () => {
   assert.equal(options.date, "2026-08-01");
   assert.equal(options.top, 5);
   assert.equal(options.rawProjects, true);
+});
+
+test("parseArgs normalizes and validates the collection cutoff", () => {
+  const options = parseArgs([
+    "day",
+    "--date",
+    "2026-08-20",
+    "--since",
+    "2026-08-20T07:00:00-05:00",
+    "--no-archived",
+  ]);
+  assert.equal(options.since.toISOString(), "2026-08-20T12:00:00.000Z");
+  assert.equal(options.includeArchived, false);
+  assert.throws(
+    () => parseArgs(["day", "2026-08-20", "--since"]),
+    /--since requires a value/,
+  );
+  assert.throws(
+    () => parseArgs(["day", "2026-08-20", "--since", "not-a-date"]),
+    /--since requires a valid ISO timestamp/,
+  );
 });
 
 test("parseArgs treats an empty command and help aliases as help", () => {
@@ -786,6 +809,172 @@ test("parseArgs rejects refresh requests that target an explicit snapshot", () =
   );
 });
 
+test("refresh applies the normalized cutoff and records its collection scope", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-since-refresh-"));
+  const codexHome = resolve(root, "codex-home");
+  const sessionDirectory = resolve(codexHome, "sessions", "2026", "08", "20");
+  const outputPath = resolve(root, "snapshot.json");
+  const threadId = "12121212-1212-4121-8121-121212121212";
+  const tokenCount = (timestamp, turnId, total, last) => [
+    {
+      timestamp,
+      type: "event_msg",
+      payload: {
+        type: "task_started",
+        turn_id: turnId,
+        started_at: Date.parse(timestamp) / 1_000,
+      },
+    },
+    {
+      timestamp,
+      type: "turn_context",
+      payload: { turn_id: turnId, model: "gpt-5.6-luna", effort: "medium" },
+    },
+    {
+      timestamp: new Date(Date.parse(timestamp) + 1_000).toISOString(),
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        info: {
+          total_token_usage: {
+            input_tokens: total - 10,
+            cached_input_tokens: 10,
+            output_tokens: 10,
+            total_tokens: total,
+          },
+          last_token_usage: {
+            input_tokens: last - 10,
+            cached_input_tokens: 10,
+            output_tokens: 10,
+            total_tokens: last,
+          },
+          model_context_window: 128_000,
+        },
+      },
+    },
+  ];
+  try {
+    await mkdir(sessionDirectory, { recursive: true });
+    await writeFile(
+      resolve(sessionDirectory, `rollout-${threadId}.jsonl`),
+      [...tokenCount("2026-08-20T10:00:00.000Z", "turn-old", 100, 100),
+        ...tokenCount("2026-08-20T18:00:00.000Z", "turn-new", 200, 100)]
+        .map((row) => JSON.stringify(row))
+        .join("\n") + "\n",
+    );
+
+    const options = parseArgs([
+      "day",
+      "2026-08-20",
+      "--refresh",
+      "--since",
+      "2026-08-20T12:00:00-05:00",
+      "--static",
+      "--plain",
+      "--ascii",
+      "--tz",
+      "UTC",
+    ]);
+    options.input = outputPath;
+    options.codexHome = codexHome;
+    const output = await run(options);
+    const snapshot = JSON.parse(await readFile(outputPath, "utf8"));
+
+    assert.match(output, /100 TOKENS/);
+    assert.equal(snapshot.coverage.observedModelCalls, 1);
+    assert.deepEqual(snapshot.provenance.collection, {
+      since: "2026-08-20T17:00:00.000Z",
+      includeArchived: true,
+    });
+
+    const unfilteredOptions = parseArgs([
+      "day",
+      "2026-08-20",
+      "--static",
+      "--plain",
+      "--ascii",
+      "--tz",
+      "UTC",
+    ]);
+    unfilteredOptions.input = outputPath;
+    unfilteredOptions.codexHome = codexHome;
+    const unfilteredOutput = await run(unfilteredOptions);
+    const rebuilt = JSON.parse(await readFile(outputPath, "utf8"));
+    assert.match(unfilteredOutput, /200 TOKENS/);
+    assert.equal(rebuilt.coverage.observedModelCalls, 2);
+    assert.deepEqual(rebuilt.provenance.collection, {
+      since: null,
+      includeArchived: true,
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("unfiltered reads reject a cache with a filtered collection scope", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-scope-cache-"));
+  const snapshotPath = resolve(root, "filtered-snapshot.json");
+  try {
+    await writePrivateSnapshot(snapshotPath, {
+      schemaVersion: 2,
+      generatedAt: new Date().toISOString(),
+      provenance: {
+        collection: {
+          since: "2026-08-20T12:00:00.000Z",
+          includeArchived: true,
+        },
+      },
+      events: [{
+        timestamp: "2026-08-20T13:00:00.000Z",
+        project: "filtered",
+        threadId: "filtered-1",
+        model: "gpt-5.6-luna",
+        totalTokens: 100,
+        inputTokens: 90,
+        cachedInputTokens: 10,
+        outputTokens: 10,
+        rateCardCredits: 1,
+      }],
+      threads: [{ id: "filtered-1", project: "filtered" }],
+    });
+
+    await assert.rejects(
+      () => run(parseArgs([
+        "day",
+        "2026-08-20",
+        "--input",
+        snapshotPath,
+        "--no-refresh",
+        "--static",
+        "--plain",
+        "--ascii",
+        "--tz",
+        "UTC",
+      ])),
+      /Snapshot collection scope does not match the requested filters/,
+    );
+    await assert.rejects(
+      () => run(parseArgs([
+        "day",
+        "2026-08-20",
+        "--input",
+        snapshotPath,
+        "--no-refresh",
+        "--since",
+        "2026-08-21T00:00:00.000Z",
+        "--static",
+        "--plain",
+        "--ascii",
+        "--tz",
+        "UTC",
+      ])),
+      /Snapshot collection scope does not match the requested filters/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("snapshot freshness follows the newest local source mtime", () => {
   assert.equal(snapshotNeedsRefresh(100, 101), true);
   assert.equal(snapshotNeedsRefresh(100, 100), false);
@@ -1022,6 +1211,112 @@ test("terminal renderer produces the dashboard layout and scaled bars", () => {
   });
   assert.ok(narrowOutput.split("\n").every((line) => line.length <= 64));
   assert.match(narrowOutput, /0\s+1\.25K/);
+});
+
+test("filtered collection scope is visible in terminal and PNG renderers", () => {
+  const snapshot = {
+    generatedAt: "2026-08-20T20:00:00.000Z",
+    provenance: {
+      collection: {
+        since: "2026-08-20T12:00:00.000Z",
+        includeArchived: false,
+      },
+    },
+    events: [{
+      timestamp: "2026-08-20T13:00:00.000Z",
+      project: "scoped",
+      threadId: "scoped-1",
+      model: "gpt-5.6-luna",
+      inputTokens: 90,
+      cachedInputTokens: 10,
+      totalTokens: 100,
+      outputTokens: 10,
+      toolCalls: 0,
+      rateCardCredits: 1,
+    }],
+    threads: [{ id: "scoped-1", project: "scoped" }],
+    quotaObservations: [],
+  };
+  const events = snapshot.events;
+  const rows = aggregateProjects(snapshot, events, { rawProjects: true });
+  const bounds = multiDayBounds("2026-08-20", "UTC", 7);
+  const terminal = renderTerminal({
+    options: { plain: true, ascii: true, width: 120 },
+    snapshot,
+    bounds: dayBounds("2026-08-20", "UTC"),
+    events,
+    rows,
+    allRows: rows,
+  });
+  assert.match(
+    terminal,
+    /TRUNCATED HISTORY · before 2026-08-20T12:00:00\.000Z · archived sessions excluded/,
+  );
+
+  const trend = renderTrendPlain({
+    snapshot,
+    bounds,
+    options: { plain: true, width: 120 },
+  });
+  assert.match(trend, /TRUNCATED HISTORY/);
+
+  const trendSvg = renderTrendImage({
+    snapshot,
+    bounds,
+    options: { imageWidth: 900 },
+    projectRows: rows,
+  });
+  assert.match(trendSvg, /TRUNCATED HISTORY/);
+
+  const cacheSvg = renderCacheReportImage({
+    snapshot,
+    bounds,
+    options: { imageWidth: 900 },
+  });
+  assert.match(cacheSvg, /TRUNCATED HISTORY/);
+});
+
+test("ranges before the cutoff are reported as not collected", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-since-empty-"));
+  const snapshotPath = resolve(root, "scoped-snapshot.json");
+  try {
+    await writePrivateSnapshot(snapshotPath, {
+      schemaVersion: 2,
+      generatedAt: "2026-08-20T20:00:00.000Z",
+      provenance: {
+        collection: {
+          since: "2026-08-20T12:00:00.000Z",
+          includeArchived: true,
+        },
+      },
+      events: [{
+        timestamp: "2026-08-20T13:00:00.000Z",
+        project: "scoped",
+        threadId: "scoped-1",
+        model: "gpt-5.6-luna",
+        totalTokens: 100,
+      }],
+      threads: [{ id: "scoped-1", project: "scoped" }],
+    });
+    const output = await run(parseArgs([
+      "day",
+      "2026-08-19",
+      "--input",
+      snapshotPath,
+      "--no-refresh",
+      "--since",
+      "2026-08-20T12:00:00.000Z",
+      "--static",
+      "--plain",
+      "--ascii",
+      "--tz",
+      "UTC",
+    ]));
+    assert.match(output, /not a verified zero/);
+    assert.match(output, /History: TRUNCATED HISTORY · before 2026-08-20T12:00:00\.000Z/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("terminal renderer moves the selected project cursor", () => {

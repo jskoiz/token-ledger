@@ -36,6 +36,7 @@ The main options are:
 
 - `--static` prints once instead of opening the terminal dashboard.
 - `--refresh` rebuilds the local usage cache.
+- `--since <ISO timestamp>` refreshes only history at or after the cutoff.
 - `--image-output <file>` chooses where to save a PNG.
 - `--no-open` writes a PNG without opening it.
 - `--help-all` shows the complete command and option reference.
@@ -78,15 +79,27 @@ error.
 
 If even the coarsest bounded representation exceeds the hard limit, Token
 Ledger preserves the previous cache and asks you to reduce the source with
-`--no-archived` or the collector's `--since` option. It never replaces the
-production cache with an oversized or partial file. On a normal default-path
-run, a snapshot whose mtime is in the past and less than one hour old skips the
-source walk. An exact-hour or future mtime is not fresh; an older snapshot is
-checked against local source mtimes before it is reused or rebuilt.
+`--since` or `--no-archived`. It never replaces the production cache with an
+oversized or partial file. `--since <ISO timestamp>` excludes model-call events
+and quota observations before the normalized cutoff. `--no-archived` excludes
+`archived_sessions`; either choice is recorded in snapshot provenance, and
+terminal and PNG output label the result `TRUNCATED HISTORY`. A range before a
+`--since` cutoff is reported as not collected, not as a verified zero.
+
+The default-path cache is reused only when its collection scope matches the
+current `--since` and archive policy. An incompatible cache is rebuilt during
+normal operation; `--no-refresh` reports the mismatch instead of silently
+reading it as complete. On a normal default-path run, a snapshot whose mtime is
+in the past and less than one hour old skips the source walk. An exact-hour or
+future mtime is not fresh; an older snapshot is checked against local source
+mtimes before it is reused or rebuilt.
 
 ```bash
 # Force a rebuild from CODEX_HOME or ~/.codex
 tledger week --refresh
+
+# Keep only history from this timestamp onward
+tledger week --refresh --since 2026-08-01T00:00:00Z
 
 # Read the existing default snapshot without a source-freshness check
 tledger week --no-refresh
@@ -96,8 +109,9 @@ tledger week --input /path/to/token-ledger-snapshot-v2.json.gz
 ```
 
 `--refresh` rebuilds the default snapshot and cannot be combined with
-`--input` in this checkout. `--no-archived` excludes `archived_sessions` when a
-refresh occurs. The collector can also be run directly:
+`--input` in this checkout. `--since` and `--no-archived` apply when a refresh
+occurs, and their collection scope must match a reusable cache. The collector
+can also be run directly:
 
 ```bash
 node lib/token-ledger-importer.mjs --output /path/to/token-ledger-snapshot-v2.json.gz

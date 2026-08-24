@@ -687,6 +687,74 @@ test("source labels resolve structured, encoded, and plain thread sources", asyn
   }
 });
 
+test("since filters events and quotas while recording archive scope", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-since-"));
+  const activeThreadId = "abababab-abab-4aba-8aba-abababababab";
+  const archivedThreadId = "cdcdcdcd-cdcd-4cdc-8cdc-cdcdcdcdcdcd";
+  const cutoff = new Date("2026-08-18T12:00:00.000Z");
+  const quotaRecord = (timestamp, usedPercent) => ({
+    timestamp,
+    type: "event_msg",
+    payload: {
+      type: "token_count",
+      rate_limits: {
+        primary: {
+          window_minutes: 10_080,
+          used_percent: usedPercent,
+          resets_at: Date.parse("2026-08-25T00:00:00.000Z") / 1_000,
+        },
+        plan_type: "plus",
+      },
+    },
+  });
+  try {
+    const activeDirectory = resolve(root, "sessions", "2026", "08", "18");
+    const archivedDirectory = resolve(root, "archived_sessions", "2026", "08", "18");
+    await mkdir(activeDirectory, { recursive: true });
+    await mkdir(archivedDirectory, { recursive: true });
+    await writeFile(
+      resolve(activeDirectory, `rollout-${activeThreadId}.jsonl`),
+      serialize([
+        ...turnStart("2026-08-18T10:00:00.000Z", "old-turn"),
+        quotaRecord("2026-08-18T10:00:00.000Z", 10),
+        tokenCount("2026-08-18T10:00:01.000Z", 100, 100),
+        ...turnStart("2026-08-18T13:00:00.000Z", "new-turn"),
+        quotaRecord("2026-08-18T13:00:00.000Z", 20),
+        tokenCount("2026-08-18T13:00:01.000Z", 200, 100),
+      ]),
+    );
+    await writeFile(
+      resolve(archivedDirectory, `rollout-${archivedThreadId}.jsonl`),
+      serialize([
+        ...turnStart("2026-08-18T13:00:00.000Z", "archived-turn"),
+        tokenCount("2026-08-18T13:00:01.000Z", 300, 300),
+      ]),
+    );
+
+    const snapshot = await collectUsage({
+      output: resolve(root, "snapshot.json"),
+      codexHome: root,
+      includeArchived: false,
+      since: cutoff,
+    });
+
+    assert.equal(snapshot.coverage.observedModelCalls, 1);
+    assert.equal(snapshot.events.length, 1);
+    assert.equal(snapshot.events[0].totalTokens, 100);
+    assert.equal(snapshot.threads.length, 1);
+    assert.equal(snapshot.threads[0].eventCount, 1);
+    assert.equal(snapshot.quotaObservations.length, 1);
+    assert.equal(snapshot.quotaObservations[0].timestamp, "2026-08-18T13:00:00.000Z");
+    assert.deepEqual(snapshot.provenance.collection, {
+      since: cutoff.toISOString(),
+      includeArchived: false,
+    });
+    assert.equal(snapshot.coverage.completeSinceWindowStart, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("malformed usage and rate-limit payloads are ignored safely", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
   const threadId = "88888888-8888-4888-8888-888888888888";

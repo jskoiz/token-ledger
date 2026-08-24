@@ -10,6 +10,7 @@ import {
 import { FAST_MODE_MULTIPLIER } from "./token-ledger-rates.mjs";
 import { buildActualTokenBins } from "./token-ledger-trend-terminal.mjs";
 import { buildCacheReportData } from "./token-ledger-cache-image.mjs";
+import { historyScopeLabel } from "../lib/token-ledger-collection.mjs";
 import { usageBucketsInRange } from "../lib/token-ledger-usage.mjs";
 
 const MODEL_ORDER = [
@@ -686,10 +687,15 @@ export function renderTrendImage({
     : xForTimestamp(reportTimeMs);
 
   const yearLabel = bounds.endDateString.slice(0, 4);
+  const history = historyScopeLabel(snapshot);
   const title = percentMode
     ? `TOKEN LEDGER · ${days}-DAY METER DRAIN`
     : `TOKEN LEDGER · ${days}-DAY TREND`;
-  const subtitle = `${localDateLabel(bounds.startDateString, bounds.timeZone)} – ${localDateLabel(bounds.endDateString, bounds.timeZone)}, ${yearLabel} · ${bounds.timeZone}`;
+  const subtitle = [
+    `${localDateLabel(bounds.startDateString, bounds.timeZone)} – ${localDateLabel(bounds.endDateString, bounds.timeZone)}, ${yearLabel}`,
+    bounds.timeZone,
+    history,
+  ].filter(Boolean).join(" · ");
   const description = percentMode
     ? "Dark report card: compact actual-token stat cards beside pace and runway, stacked columns of observed weekly-meter drain with an explicitly estimated per-model split, the OpenAI-reported weekly limit remaining as an amber line, a partial final day ending at report time, a compressed cache-rate-by-period strip, and top projects beside per-model cache rates."
     : "Dark report card: compact model stat cards with week-over-week delta chips beside pace and runway, stacked columns of local token volume by model with fast-mode usage in a darker shade, the OpenAI-reported weekly limit remaining as a smoothed amber line, a partial final day ending at report time, a compressed cache-rate-by-period strip, and top projects beside per-model cache rates.";
