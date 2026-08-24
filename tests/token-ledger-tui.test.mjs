@@ -16,6 +16,7 @@ function createTerminal({
   resumeError = null,
   pauseError = null,
   writeErrorWhen = null,
+  deferWriteCallbacks = false,
 } = {}) {
   const stdin = new EventEmitter();
   const stdout = new EventEmitter();
@@ -26,6 +27,7 @@ function createTerminal({
     resumeCalls: 0,
     pauseCalls: 0,
     writes: [],
+    pendingWriteCallbacks: [],
   };
 
   Object.assign(stdin, {
@@ -58,14 +60,21 @@ function createTerminal({
     isTTY: true,
     columns: 120,
     rows: 32,
-    write(value) {
+    write(value, callback) {
       const text = String(value);
       state.writes.push(text);
       const error = writeErrorWhen?.(text, state.writes.length);
       if (error) throw error;
+      if (callback) {
+        if (deferWriteCallbacks) state.pendingWriteCallbacks.push(callback);
+        else callback();
+      }
       return true;
     },
   });
+  state.flushWriteCallbacks = () => {
+    for (const callback of state.pendingWriteCallbacks.splice(0)) callback();
+  };
 
   return { stdin, stdout, signalTarget, state };
 }
@@ -220,6 +229,26 @@ test("stream errors and supported signals share teardown", async () => {
     assert.equal(terminal.signalTarget.exitCode, signalExitCodes[signal]);
     assertTerminalRestored(terminal);
   }
+});
+
+test("signals re-raise only after terminal restoration flushes", async () => {
+  const terminal = createTerminal({ deferWriteCallbacks: true });
+  const signalOrder = [];
+  terminal.signalTarget.pid = 123;
+  terminal.signalTarget.kill = (_pid, signal) => {
+    signalOrder.push({ signal, writes: terminal.state.writes.length });
+  };
+  const session = start(terminal);
+
+  terminal.signalTarget.emit("SIGTERM");
+  assert.deepEqual(signalOrder, []);
+  assert.ok(terminal.state.writes.at(-1).includes(SHOW_CURSOR));
+
+  terminal.state.flushWriteCallbacks();
+  await session;
+  assert.deepEqual(signalOrder, [{ signal: "SIGTERM", writes: 3 }]);
+  assert.equal(terminal.signalTarget.exitCode, 143);
+  assertListenersRemoved(terminal);
 });
 
 test("cleanup attempts remaining restoration steps after one failure", async () => {

@@ -63,10 +63,20 @@ export function startInteractive(view, {
       }
     };
 
-    function teardown(error = null) {
+    function teardown(error = null, afterRestore = null) {
       if (closed) return;
       closed = true;
       const cleanupErrors = [];
+      let restorationPending = false;
+      let settled = false;
+      const settle = () => {
+        if (settled) return;
+        settled = true;
+        if (afterRestore) afterRestore();
+        if (error !== null) reject(error);
+        else if (cleanupErrors.length > 0) reject(cleanupErrors[0]);
+        else resolve();
+      };
 
       for (const { target, event, handler } of registrations.splice(0)) {
         attemptCleanup(cleanupErrors, () => target.off(event, handler));
@@ -82,13 +92,17 @@ export function startInteractive(view, {
       }
       if (terminalStateTouched) {
         attemptCleanup(cleanupErrors, () => {
-          stdout.write(`${RESET}${SHOW_CURSOR}${EXIT_ALT_SCREEN}`);
+          const restoration = `${RESET}${SHOW_CURSOR}${EXIT_ALT_SCREEN}`;
+          if (afterRestore) {
+            restorationPending = true;
+            stdout.write(restoration, settle);
+          } else {
+            stdout.write(restoration);
+          }
         });
       }
 
-      if (error !== null) reject(error);
-      else if (cleanupErrors.length > 0) reject(cleanupErrors[0]);
-      else resolve();
+      if (!restorationPending) settle();
     }
 
     function draw() {
@@ -114,12 +128,11 @@ export function startInteractive(view, {
     }
 
     function onSignal(signal) {
-      teardown();
       const exitCode = 128 + SIGNAL_EXIT_CODES[signal];
       signalTarget.exitCode = exitCode;
-      if (signalTarget.pid) {
-        signalTarget.kill(signalTarget.pid, signal);
-      }
+      teardown(null, () => {
+        if (signalTarget.pid) signalTarget.kill(signalTarget.pid, signal);
+      });
     }
 
     function onStreamError(streamError) {
