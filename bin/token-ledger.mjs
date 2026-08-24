@@ -28,6 +28,11 @@ import {
 } from "../lib/token-ledger-snapshot.mjs";
 import {
   SNAPSHOT_SCHEMA_VERSION,
+  checkedFiniteAdd,
+  checkedTokenAdd,
+  isNonNegativeFiniteValue,
+  nonNegativeFiniteValue,
+  tokenValue,
   usageBuckets,
   usageBucketsInRange,
   usageCallCount,
@@ -647,6 +652,8 @@ export function aggregateProjects(snapshot, events, options = {}) {
   const grouped = new Map();
 
   for (const event of events) {
+    if (event?.invalidTokenRecord === true) continue;
+    const allowFractional = event?.rangeAllocationEstimated === true;
     const rawProject = cleanLabel(event.project, "Unlabelled activity");
     const project =
       !options.rawProjects && singletonProjects.has(rawProject)
@@ -666,15 +673,36 @@ export function aggregateProjects(snapshot, events, options = {}) {
         knownCreditTokens: 0,
         models: new Map(),
       };
-    row.totalTokens += Number(event.totalTokens) || 0;
-    row.outputTokens += Number(event.outputTokens) || 0;
-    row.reasoningTokens += Number(event.reasoningTokens) || 0;
-    row.toolCalls += Number(event.toolCalls) || 0;
-    row.events += usageCallCount(event);
+    row.totalTokens = checkedTokenAdd(
+      row.totalTokens,
+      tokenValue(event.totalTokens, { allowFractional }),
+      { allowFractional },
+    );
+    row.outputTokens = checkedTokenAdd(
+      row.outputTokens,
+      tokenValue(event.outputTokens, { allowFractional }),
+      { allowFractional },
+    );
+    row.reasoningTokens = checkedTokenAdd(
+      row.reasoningTokens,
+      tokenValue(event.reasoningTokens, { allowFractional }),
+      { allowFractional },
+    );
+    row.toolCalls = checkedTokenAdd(
+      row.toolCalls,
+      tokenValue(event.toolCalls, { allowFractional }),
+      { allowFractional },
+    );
+    row.events = checkedTokenAdd(row.events, usageCallCount(event));
     for (const threadId of usageThreadIds(event)) row.threadIds.add(threadId);
-    if (event.rateCardCredits !== null && Number.isFinite(Number(event.rateCardCredits))) {
-      row.rateCardCredits += Number(event.rateCardCredits);
-      row.knownCreditTokens += Number(event.totalTokens) || 0;
+    const credits = event.rateCardCredits;
+    if (isNonNegativeFiniteValue(credits)) {
+      row.rateCardCredits = checkedFiniteAdd(row.rateCardCredits, credits);
+      row.knownCreditTokens = checkedTokenAdd(
+        row.knownCreditTokens,
+        tokenValue(event.totalTokens, { allowFractional }),
+        { allowFractional },
+      );
     }
 
     const model = modelLabel(event.model);
@@ -684,10 +712,17 @@ export function aggregateProjects(snapshot, events, options = {}) {
       events: 0,
       rateCardCredits: 0,
     };
-    modelRow.totalTokens += Number(event.totalTokens) || 0;
-    modelRow.events += usageCallCount(event);
-    if (event.rateCardCredits !== null && Number.isFinite(Number(event.rateCardCredits))) {
-      modelRow.rateCardCredits += Number(event.rateCardCredits);
+    modelRow.totalTokens = checkedTokenAdd(
+      modelRow.totalTokens,
+      tokenValue(event.totalTokens, { allowFractional }),
+      { allowFractional },
+    );
+    modelRow.events = checkedTokenAdd(modelRow.events, usageCallCount(event));
+    if (isNonNegativeFiniteValue(credits)) {
+      modelRow.rateCardCredits = checkedFiniteAdd(
+        modelRow.rateCardCredits,
+        credits,
+      );
     }
     row.models.set(model, modelRow);
     grouped.set(project, row);
@@ -712,16 +747,38 @@ export function aggregateProjects(snapshot, events, options = {}) {
 function totalSummary(events) {
   return events.reduce(
     (summary, event) => {
-      summary.totalTokens += Number(event.totalTokens) || 0;
-      summary.outputTokens += Number(event.outputTokens) || 0;
-      summary.toolCalls += Number(event.toolCalls) || 0;
-      summary.calls += usageCallCount(event);
+      if (event?.invalidTokenRecord === true) return summary;
+      const allowFractional = event?.rangeAllocationEstimated === true;
+      summary.totalTokens = checkedTokenAdd(
+        summary.totalTokens,
+        tokenValue(event.totalTokens, { allowFractional }),
+        { allowFractional },
+      );
+      summary.outputTokens = checkedTokenAdd(
+        summary.outputTokens,
+        tokenValue(event.outputTokens, { allowFractional }),
+        { allowFractional },
+      );
+      summary.toolCalls = checkedTokenAdd(
+        summary.toolCalls,
+        tokenValue(event.toolCalls, { allowFractional }),
+        { allowFractional },
+      );
+      summary.calls = checkedTokenAdd(summary.calls, usageCallCount(event));
       for (const threadId of usageThreadIds(event)) {
         summary.threadIds.add(threadId);
       }
-      if (event.rateCardCredits !== null && Number.isFinite(Number(event.rateCardCredits))) {
-        summary.rateCardCredits += Number(event.rateCardCredits);
-        summary.knownCreditTokens += Number(event.totalTokens) || 0;
+      const credits = event.rateCardCredits;
+      if (isNonNegativeFiniteValue(credits)) {
+        summary.rateCardCredits = checkedFiniteAdd(
+          summary.rateCardCredits,
+          nonNegativeFiniteValue(credits),
+        );
+        summary.knownCreditTokens = checkedTokenAdd(
+          summary.knownCreditTokens,
+          tokenValue(event.totalTokens, { allowFractional }),
+          { allowFractional },
+        );
       }
       return summary;
     },

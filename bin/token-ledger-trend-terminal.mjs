@@ -1,6 +1,8 @@
 import { buildBurnDayBins, buildUsageTrend, trendModelLabel } from "./token-ledger-trend.mjs";
 import {
+  checkedTokenAdd,
   splitUsageBucketsAtBoundaries,
+  tokenValue,
   usageBuckets,
   usageCallCount,
 } from "../lib/token-ledger-usage.mjs";
@@ -260,13 +262,29 @@ export function buildActualTokenBins(
     const dayIndex = dateIndexByString.get(dateString);
     if (dayIndex === undefined || dayIndex >= days) continue;
     const bin = bins[Math.floor(dayIndex / binSize)];
-    const tokens = Math.max(0, Number(event.totalTokens) || 0);
+    if (event?.invalidTokenRecord === true) continue;
+    const allowFractional = event.rangeAllocationEstimated === true;
+    const tokens = tokenValue(event.totalTokens, { allowFractional });
     const model = trendModelLabel(event.model);
-    bin.totalTokens += tokens;
-    bin.calls += usageCallCount(event);
-    bin.values.set(model, (bin.values.get(model) ?? 0) + tokens);
+    bin.totalTokens = checkedTokenAdd(bin.totalTokens, tokens, {
+      allowFractional,
+    });
+    bin.calls = checkedTokenAdd(bin.calls, usageCallCount(event), {
+      allowFractional,
+    });
+    bin.values.set(
+      model,
+      checkedTokenAdd(bin.values.get(model) ?? 0, tokens, {
+        allowFractional,
+      }),
+    );
     if (event.serviceTier === "priority") {
-      bin.fastValues.set(model, (bin.fastValues.get(model) ?? 0) + tokens);
+      bin.fastValues.set(
+        model,
+        checkedTokenAdd(bin.fastValues.get(model) ?? 0, tokens, {
+          allowFractional,
+        }),
+      );
     }
   }
 
@@ -274,10 +292,17 @@ export function buildActualTokenBins(
   const fastTotals = new Map();
   for (const bin of bins) {
     for (const [model, value] of bin.values) {
-      totals.set(model, (totals.get(model) ?? 0) + value);
+      totals.set(model, checkedTokenAdd(totals.get(model) ?? 0, value, {
+        allowFractional: true,
+      }));
     }
     for (const [model, value] of bin.fastValues) {
-      fastTotals.set(model, (fastTotals.get(model) ?? 0) + value);
+      fastTotals.set(
+        model,
+        checkedTokenAdd(fastTotals.get(model) ?? 0, value, {
+          allowFractional: true,
+        }),
+      );
     }
   }
   return { bins, totals, fastTotals, binSize, binCount };
@@ -610,7 +635,10 @@ export function renderTrendCombo({
   }
   lines.push(`├${"─".repeat(frameWidth - 2)}┤`);
 
-  const totalTokens = [...actual.totals.values()].reduce((sum, value) => sum + value, 0);
+  const totalTokens = [...actual.totals.values()].reduce(
+    (sum, value) => checkedTokenAdd(sum, value, { allowFractional: true }),
+    0,
+  );
   const legendModels = percentMode
     ? [...burn.totals.keys()].sort(modelSort)
     : [...actual.totals.keys()].sort(modelSort);

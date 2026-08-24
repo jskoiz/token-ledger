@@ -1484,6 +1484,103 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
   );
 });
 
+test("malformed snapshots keep terminal, bucket, and image totals bounded", async () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+  const large = 5_000_000_000_000_000;
+  const snapshot = {
+    generatedAt: "2026-08-15T15:00:00.000Z",
+    events: [
+      {
+        timestamp: "2026-08-15T12:00:00.000Z",
+        project: "overflow",
+        model: "gpt-5.6-luna",
+        totalTokens: large,
+        inputTokens: large - 10,
+        cachedInputTokens: large - 20,
+        outputTokens: 10,
+        reasoningTokens: 5,
+        toolCalls: 2,
+        callCount: 1,
+        rateCardCredits: 1,
+        breakdownAvailable: true,
+        threadIds: ["overflow-thread"],
+      },
+      {
+        timestamp: "2026-08-15T13:00:00.000Z",
+        project: "overflow",
+        model: "gpt-5.6-luna",
+        totalTokens: large,
+        inputTokens: "malformed",
+        cachedInputTokens: { bad: true },
+        outputTokens: 10,
+        reasoningTokens: true,
+        toolCalls: [2],
+        callCount: 1,
+        rateCardCredits: null,
+        breakdownAvailable: true,
+        threadIds: ["overflow-thread"],
+      },
+      {
+        timestamp: "2026-08-15T14:00:00.000Z",
+        project: "invalid-total",
+        model: "gpt-5.6-sol",
+        totalTokens: "100",
+        inputTokens: 90,
+        outputTokens: 10,
+      },
+    ],
+    threads: [],
+  };
+  const events = filterDayEvents(snapshot, bounds);
+  const rows = aggregateProjects(snapshot, events, { rawProjects: true });
+  const actual = buildActualTokenBins(snapshot, bounds, 7, 1_100);
+  const cache = buildCacheReportData(snapshot, bounds, 7, 1_100);
+  const trend = buildUsageTrend(snapshot, bounds);
+  const terminal = renderTerminal({
+    options: { plain: true, ascii: true, width: 120 },
+    snapshot,
+    bounds,
+    events,
+    rows,
+    allRows: rows,
+  });
+  const svg = renderTrendImage({
+    snapshot,
+    bounds,
+    trend,
+    days: 7,
+    options: { imageWidth: 1_000 },
+  });
+
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].totalTokens, Number.MAX_SAFE_INTEGER);
+  assert.equal(actual.totals.get("Luna"), Number.MAX_SAFE_INTEGER);
+  assert.equal(actual.bins.at(-1).totalTokens, Number.MAX_SAFE_INTEGER);
+  assert.equal(cache.totalTokens, Number.MAX_SAFE_INTEGER);
+  assert.equal(cache.detailedTokens, large);
+  assert.equal(cache.eventCount, 2);
+  assert.equal(cache.detailedEventCount, 1);
+  assert.equal(
+    cache.measurementCoveragePercent,
+    (large / Number.MAX_SAFE_INTEGER) * 100,
+  );
+  assert.doesNotMatch(terminal, /NaN|Infinity|undefined|null/);
+  assert.doesNotMatch(svg, /NaN|Infinity|undefined|null/);
+
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-bounded-png-"));
+  try {
+    const output = resolve(root, "bounded.png");
+    await writeTrendPng(svg, output);
+    const bytes = await readFile(output);
+    assert.deepEqual(
+      [...bytes.subarray(0, 8)],
+      [137, 80, 78, 71, 13, 10, 26, 10],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("trend meter stops at its last sample and marks report time", () => {
   const bounds = multiDayBounds("2026-08-23", "UTC", 7);
   const observedThrough = "2026-08-23T08:08:57.000Z";
@@ -1783,16 +1880,16 @@ test("cache report contains non-finite snapshot token values", () => {
   assert.doesNotMatch(svg, /NaN|Infinity|undefined/);
 });
 
-test("cache report saturates finite token sums before rendering", () => {
+test("cache report caps safe token sums before rendering", () => {
   const bounds = multiDayBounds("2026-08-15", "UTC", 7);
-  const huge = Number.MAX_VALUE;
+  const huge = Number.MAX_SAFE_INTEGER;
   const eventFor = (model, includeReportedTotal = true) => {
     const event = {
       timestamp: "2026-08-15T12:00:00.000Z",
       model,
       inputTokens: huge,
       cachedInputTokens: huge,
-      outputTokens: huge,
+      outputTokens: 0,
       breakdownAvailable: true,
     };
     if (includeReportedTotal) event.totalTokens = huge;
@@ -1847,19 +1944,20 @@ test("cache report saturates finite token sums before rendering", () => {
   const inferredOverflow = buildCacheReportData({
     events: [{
       timestamp: "2026-08-15T12:00:00.000Z",
-      totalTokens: huge,
+      totalTokens: "1e999",
       inputTokens: huge,
       cachedInputTokens: huge,
-      outputTokens: huge,
+      outputTokens: 0,
     }],
   }, bounds, 7, 1_100);
-  assert.equal(inferredOverflow.detailedEventCount, 1);
+  assert.equal(inferredOverflow.eventCount, 0);
+  assert.equal(inferredOverflow.totalTokens, 0);
 });
 
-test("cache report detects native overflow at a rounded finite ratio", () => {
+test("cache report keeps capped ratios finite", () => {
   const bounds = multiDayBounds("2026-08-15", "UTC", 7);
-  const first = (1 - Number.EPSILON) * Number.MAX_VALUE;
-  const second = 5e292;
+  const first = Number.MAX_SAFE_INTEGER;
+  const second = 100;
   const eventFor = (inputTokens, cachedInputTokens) => ({
     timestamp: "2026-08-15T12:00:00.000Z",
     model: "gpt-5.6-luna",
@@ -1899,7 +1997,7 @@ test("cache report detects native overflow at a rounded finite ratio", () => {
 
 test("cache report preserves proportions when token sums are normalized", () => {
   const bounds = multiDayBounds("2026-08-15", "UTC", 7);
-  const token = 1e308;
+  const token = 1e15;
   const eventFor = (cachedInputTokens, measured = true) => ({
     timestamp: "2026-08-15T12:00:00.000Z",
     model: "gpt-5.6-luna",
@@ -1933,12 +2031,13 @@ test("cache report preserves proportions when token sums are normalized", () => 
   assert.doesNotMatch(svg, /NaN|Infinity|undefined/);
 });
 
-test("cache report coverage includes inferred event totals", () => {
+test("cache report coverage requires valid event totals", () => {
   const bounds = multiDayBounds("2026-08-15", "UTC", 7);
   const snapshot = {
     events: [
       {
         timestamp: "2026-08-15T12:00:00.000Z",
+        totalTokens: 1_000,
         inputTokens: 900,
         cachedInputTokens: 450,
         outputTokens: 100,
@@ -2028,7 +2127,7 @@ test("cache report preserves explicit reconciled zero-token breakdowns", () => {
   assert.match(svg, /1 of 1 calls/);
 });
 
-test("cache report rejects blank explicit zero-token breakdowns", () => {
+test("cache report excludes blank token totals", () => {
   const bounds = multiDayBounds("2026-08-15", "UTC", 7);
   const snapshot = {
     events: [
@@ -2052,15 +2151,16 @@ test("cache report rejects blank explicit zero-token breakdowns", () => {
   };
 
   const data = buildCacheReportData(snapshot, bounds, 7, 1_100);
-  assert.equal(data.eventCount, 2);
+  assert.equal(data.eventCount, 0);
   assert.equal(data.detailedEventCount, 0);
   assert.equal(data.totalTokens, 0);
   assert.equal(data.inputTokens, 0);
-  assert.equal(data.measurementCoveragePercent, 0);
+  assert.equal(data.measurementCoveragePercent, null);
 
   const svg = renderCacheReportImage({ snapshot, bounds, days: 7 });
-  assert.match(svg, /0\.00% of calls/);
-  assert.match(svg, /0 of 2 calls/);
+  assert.match(svg, /unknown/);
+  assert.match(svg, /No measured input/);
+  assert.match(svg, /0 measured input-bearing calls/);
 });
 
 test("cache report contains hostile object-shaped snapshot fields", () => {
@@ -2103,7 +2203,7 @@ test("cache report contains hostile object-shaped snapshot fields", () => {
     data = buildCacheReportData(snapshot, bounds, 7, 1_100);
     svg = renderCacheReportImage({ snapshot, bounds, days: 7 });
   });
-  assert.equal(data.eventCount, 2);
+  assert.equal(data.eventCount, 1);
   assert.equal(data.detailedEventCount, 1);
   assert.equal(data.totalTokens, 1_000);
   assert.equal(data.inputTokens, 900);

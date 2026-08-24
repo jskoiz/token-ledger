@@ -10,7 +10,11 @@ import {
 import { FAST_MODE_MULTIPLIER } from "./token-ledger-rates.mjs";
 import { buildActualTokenBins } from "./token-ledger-trend-terminal.mjs";
 import { buildCacheReportData } from "./token-ledger-cache-image.mjs";
-import { usageBucketsInRange } from "../lib/token-ledger-usage.mjs";
+import {
+  checkedTokenAdd,
+  tokenValue,
+  usageBucketsInRange,
+} from "../lib/token-ledger-usage.mjs";
 
 const MODEL_ORDER = [
   "Luna",
@@ -381,14 +385,21 @@ function fallbackProjectRows(snapshot, bounds) {
   const endMs = bounds.end.getTime();
   const totals = new Map();
   for (const event of usageBucketsInRange(snapshot, startMs, endMs)) {
+    if (event?.invalidTokenRecord === true) continue;
     const timestampMs = new Date(event.timestamp).getTime();
     if (!Number.isFinite(timestampMs)) continue;
-    const tokens = Math.max(0, Number(event.totalTokens) || 0);
+    const allowFractional = event.rangeAllocationEstimated === true;
+    const tokens = tokenValue(event.totalTokens, { allowFractional });
     if (!(tokens > 0)) continue;
     const project = String(event.project || "Unlabelled activity")
       .replace(/[\t\r\n]+/g, " ")
       .trim() || "Unlabelled activity";
-    totals.set(project, (totals.get(project) ?? 0) + tokens);
+    totals.set(
+      project,
+      checkedTokenAdd(totals.get(project) ?? 0, tokens, {
+        allowFractional,
+      }),
+    );
   }
   return [...totals.entries()]
     .map(([project, totalTokens]) => ({
@@ -432,9 +443,12 @@ export function renderTrendImage({
   );
   const hasLine = Boolean(trend.available && (trend.points ?? []).length > 0);
 
-  const totalTokens = [...actual.totals.values()].reduce((sum, value) => sum + value, 0);
+  const totalTokens = [...actual.totals.values()].reduce(
+    (sum, value) => checkedTokenAdd(sum, value, { allowFractional: true }),
+    0,
+  );
   const fastTokens = [...(actual.fastTotals?.values() ?? [])].reduce(
-    (sum, value) => sum + value,
+    (sum, value) => checkedTokenAdd(sum, value, { allowFractional: true }),
     0,
   );
   const hasFast = !percentMode && fastTokens > 0;
@@ -492,9 +506,16 @@ export function renderTrendImage({
     const models = cacheData.models;
     if (models.length <= 4) return models;
     const rest = models.slice(3);
-    const restInput = rest.reduce((sum, model) => sum + model.inputTokens, 0);
+    const restInput = rest.reduce(
+      (sum, model) => checkedTokenAdd(sum, model.inputTokens, {
+        allowFractional: true,
+      }),
+      0,
+    );
     const restCached = rest.reduce(
-      (sum, model) => sum + model.cachedInputTokens,
+      (sum, model) => checkedTokenAdd(sum, model.cachedInputTokens, {
+        allowFractional: true,
+      }),
       0,
     );
     return [...models.slice(0, 3), {
@@ -1821,7 +1842,12 @@ export function renderTrendImage({
   }));
   const topRows = rows.slice(0, 3);
   const restRows = rows.slice(3);
-  const topTokens = topRows.reduce((sum, row) => sum + row.totalTokens, 0);
+  const topTokens = topRows.reduce(
+    (sum, row) => checkedTokenAdd(sum, row.totalTokens, {
+      allowFractional: true,
+    }),
+    0,
+  );
   const topShare = totalTokens > 0
     ? percent((topTokens / totalTokens) * 100)
     : "—";
@@ -1856,7 +1882,12 @@ export function renderTrendImage({
       name: restRows.length === 1
         ? (restRows[0].displayProject ?? restRows[0].project)
         : `${restRows.length} other projects`,
-      tokens: restRows.reduce((sum, row) => sum + row.totalTokens, 0),
+      tokens: restRows.reduce(
+        (sum, row) => checkedTokenAdd(sum, row.totalTokens, {
+          allowFractional: true,
+        }),
+        0,
+      ),
       fill: COLORS.remainderBar,
       muted: true,
     });

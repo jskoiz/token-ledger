@@ -4,7 +4,10 @@ import {
   RATE_CARD_AS_OF,
 } from "./token-ledger-rates.mjs";
 import {
+  checkedFiniteAdd,
+  checkedTokenAdd,
   splitUsageBucketsAtBoundaries,
+  tokenValue,
   usageBuckets,
   usageBucketsInRange,
 } from "../lib/token-ledger-usage.mjs";
@@ -324,7 +327,9 @@ export function eventCredits(event) {
 function eventWeight(event, fallbackCreditsPerToken) {
   const credits = eventCredits(event);
   if (Number.isFinite(credits) && credits > 0) return credits;
-  const tokens = Math.max(0, Number(event.totalTokens) || 0);
+  const tokens = tokenValue(event.totalTokens, {
+    allowFractional: event.rangeAllocationEstimated === true,
+  });
   return fallbackCreditsPerToken > 0 ? tokens * fallbackCreditsPerToken : tokens;
 }
 
@@ -335,11 +340,13 @@ function allocateBurn(delta, events, timeZone) {
   let ratedTokens = 0;
   let hasUnrated = false;
   for (const event of events) {
+    if (event?.invalidTokenRecord === true) continue;
     const credits = eventCredits(event);
-    const tokens = Math.max(0, Number(event.totalTokens) || 0);
+    const allowFractional = event.rangeAllocationEstimated === true;
+    const tokens = tokenValue(event.totalTokens, { allowFractional });
     if (Number.isFinite(credits) && credits > 0) {
-      ratedCredits += credits;
-      ratedTokens += tokens;
+      ratedCredits = checkedFiniteAdd(ratedCredits, credits);
+      ratedTokens = checkedTokenAdd(ratedTokens, tokens, { allowFractional });
     } else if (tokens > 0) {
       hasUnrated = true;
     }
@@ -354,12 +361,12 @@ function allocateBurn(delta, events, timeZone) {
     const weight = eventWeight(event, fallbackCreditsPerToken);
     if (!(weight > 0)) continue;
     const model = trendModelLabel(event.model);
-    weights.set(model, (weights.get(model) ?? 0) + weight);
+    weights.set(model, checkedFiniteAdd(weights.get(model) ?? 0, weight));
     if (timeZone) {
       const day = localDateString(event.timestampMs, timeZone);
-      dayWeights.set(day, (dayWeights.get(day) ?? 0) + weight);
+      dayWeights.set(day, checkedFiniteAdd(dayWeights.get(day) ?? 0, weight));
     }
-    totalWeight += weight;
+    totalWeight = checkedFiniteAdd(totalWeight, weight);
   }
 
   if (!(totalWeight > 0)) {
@@ -414,10 +421,14 @@ function durationDayShares(startMs, endMs, timeZone) {
 function tokenTotalsByModel(events) {
   const totals = new Map();
   for (const event of events) {
-    const tokens = Math.max(0, Number(event.totalTokens) || 0);
+    if (event?.invalidTokenRecord === true) continue;
+    const allowFractional = event.rangeAllocationEstimated === true;
+    const tokens = tokenValue(event.totalTokens, { allowFractional });
     if (!(tokens > 0)) continue;
     const model = trendModelLabel(event.model);
-    totals.set(model, (totals.get(model) ?? 0) + tokens);
+    totals.set(model, checkedTokenAdd(totals.get(model) ?? 0, tokens, {
+      allowFractional,
+    }));
   }
   return totals;
 }
@@ -457,17 +468,26 @@ function buildModelStats(displayedEvents, intervals, bounds) {
   };
 
   for (const event of displayedEvents) {
+    if (event?.invalidTokenRecord === true) continue;
     const model = trendModelLabel(event.model);
     const row = rowFor(model);
-    const tokens = Math.max(0, Number(event.totalTokens) || 0);
+    const allowFractional = event.rangeAllocationEstimated === true;
+    const tokens = tokenValue(event.totalTokens, { allowFractional });
     const credits = eventCredits(event);
-    row.tokens += tokens;
+    row.tokens = checkedTokenAdd(row.tokens, tokens, { allowFractional });
     if (Number.isFinite(credits) && credits >= 0) {
-      row.credits += credits;
-      row.ratedTokens += tokens;
+      row.credits = checkedFiniteAdd(row.credits, credits);
+      row.ratedTokens = checkedTokenAdd(row.ratedTokens, tokens, {
+        allowFractional,
+      });
     }
     const effort = String(event.effort || "unknown").toLowerCase();
-    row.efforts.set(effort, (row.efforts.get(effort) ?? 0) + tokens);
+    row.efforts.set(
+      effort,
+      checkedTokenAdd(row.efforts.get(effort) ?? 0, tokens, {
+        allowFractional,
+      }),
+    );
   }
 
   const startMs = bounds.start.getTime();
@@ -476,8 +496,12 @@ function buildModelStats(displayedEvents, intervals, bounds) {
     if (interval.endMs < startMs || interval.endMs >= endMs) continue;
     for (const [model, burnPoints] of interval.contributions) {
       const row = rowFor(model);
-      row.burnPoints += burnPoints;
-      row.attributedTokens += interval.modelTokens.get(model) ?? 0;
+      row.burnPoints = checkedFiniteAdd(row.burnPoints, burnPoints);
+      row.attributedTokens = checkedTokenAdd(
+        row.attributedTokens,
+        interval.modelTokens.get(model) ?? 0,
+        { allowFractional: true },
+      );
     }
   }
 
@@ -606,7 +630,10 @@ export function buildUsageTrend(snapshot = {}, bounds) {
       methods.add(allocation.method);
     }
     for (const [model, burnPoints] of allocation.contributions) {
-      allocations.set(model, (allocations.get(model) ?? 0) + burnPoints);
+      allocations.set(
+        model,
+        checkedFiniteAdd(allocations.get(model) ?? 0, burnPoints),
+      );
     }
     if (delta > 0) {
       intervals.push({
@@ -787,8 +814,8 @@ export function buildBurnDayBins(trend, bounds, { days, binSize = 1 } = {}) {
       )) {
         const share = burnPoints * fraction;
         if (!(share > 0)) continue;
-        bin.values.set(model, (bin.values.get(model) ?? 0) + share);
-        bin.totalPercent += share;
+        bin.values.set(model, checkedFiniteAdd(bin.values.get(model) ?? 0, share));
+        bin.totalPercent = checkedFiniteAdd(bin.totalPercent, share);
       }
     }
   }
@@ -797,8 +824,8 @@ export function buildBurnDayBins(trend, bounds, { days, binSize = 1 } = {}) {
   let totalPercent = 0;
   for (const bin of bins) {
     for (const [model, value] of bin.values) {
-      totals.set(model, (totals.get(model) ?? 0) + value);
-      totalPercent += value;
+      totals.set(model, checkedFiniteAdd(totals.get(model) ?? 0, value));
+      totalPercent = checkedFiniteAdd(totalPercent, value);
     }
   }
   return { bins, totals, totalPercent, binSize, binCount };

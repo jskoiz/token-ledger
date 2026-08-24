@@ -450,6 +450,74 @@ test("usage buckets preserve additive totals across age tiers", () => {
   );
 });
 
+test("usage buckets cap safe aggregates and exclude invalid totals", () => {
+  const large = 5_000_000_000_000_000;
+  const rows = [
+    {
+      timestamp: "2026-08-22T11:59:58.000Z",
+      project: "bounded-history",
+      model: "gpt-5.6-luna",
+      inputTokens: large - 10,
+      cachedInputTokens: large - 20,
+      outputTokens: 10,
+      reasoningTokens: 5,
+      totalTokens: large,
+      breakdownAvailable: true,
+    },
+    {
+      timestamp: "2026-08-22T11:59:59.000Z",
+      project: "bounded-history",
+      model: "gpt-5.6-luna",
+      inputTokens: large - 10,
+      cachedInputTokens: large - 20,
+      outputTokens: 10,
+      reasoningTokens: 5,
+      totalTokens: large,
+      breakdownAvailable: true,
+    },
+    {
+      timestamp: "2026-08-22T12:00:00.000Z",
+      project: "bounded-history",
+      model: "gpt-5.6-luna",
+      inputTokens: "malformed",
+      outputTokens: 10,
+      totalTokens: 100,
+      breakdownAvailable: true,
+    },
+    {
+      timestamp: "2026-08-22T12:00:01.000Z",
+      project: "bounded-history",
+      model: "gpt-5.6-luna",
+      inputTokens: 90,
+      outputTokens: 10,
+      totalTokens: "100",
+      breakdownAvailable: true,
+    },
+  ];
+
+  const buckets = buildUsageBuckets(rows, {
+    latestTimestampMs: Date.parse("2026-08-22T12:00:01.000Z"),
+    policy: [{ maximumAgeMs: Infinity, resolutionMs: 86_400_000 }],
+  });
+  const detailed = buckets.find((bucket) => bucket.breakdownAvailable === true);
+  const unknown = buckets.find((bucket) => bucket.breakdownAvailable === false);
+  assert.equal(detailed.totalTokens, Number.MAX_SAFE_INTEGER);
+  assert.equal(detailed.inputTokens, Number.MAX_SAFE_INTEGER);
+  assert.equal(detailed.cachedInputTokens, Number.MAX_SAFE_INTEGER);
+  assert.equal(unknown.totalTokens, 100);
+  assert.equal(unknown.inputTokens, 0);
+  assert.equal(usageBucketStats(buckets).callCount, 3);
+  assert.ok(buckets.every((bucket) =>
+    [
+      bucket.inputTokens,
+      bucket.cachedInputTokens,
+      bucket.outputTokens,
+      bucket.reasoningTokens,
+      bucket.totalTokens,
+    ].every(Number.isFinite)),
+  );
+});
+
 test("compacted buckets split proportionally at range boundaries", () => {
   const rows = [
     ["2025-06-01T06:00:00.000Z", 70],
@@ -742,6 +810,101 @@ test("malformed usage and rate-limit payloads are ignored safely", async () => {
     assert.equal(quota.planType, "plus");
     assert.equal(quota.limitName, "weekly");
     assert.equal(snapshot.coverage.parseErrors, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("validates token totals and preserves malformed breakdowns as unknown", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-token-validation-"));
+  const threadId = "91919191-9191-4919-8919-919191919191";
+  const validUsage = {
+    input_tokens: 90,
+    cached_input_tokens: 500,
+    output_tokens: 10,
+    reasoning_output_tokens: 40,
+    total_tokens: 100,
+  };
+  const tokenRecord = (timestamp, usage) => ({
+    timestamp,
+    type: "event_msg",
+    payload: {
+      type: "token_count",
+      info: {
+        total_token_usage: usage,
+        last_token_usage: usage,
+        model_context_window: 128000,
+      },
+    },
+  });
+  const invalidTotals = [
+    -1,
+    100.5,
+    Number.MAX_SAFE_INTEGER + 1,
+    Number.MAX_VALUE,
+    "100",
+    true,
+    [100],
+    { value: 100 },
+  ];
+  const rows = [];
+  for (const [index, total] of invalidTotals.entries()) {
+    const timestamp = new Date(
+      Date.parse("2026-08-18T10:00:00.000Z") + index * 60_000,
+    ).toISOString();
+    rows.push(...turnStart(timestamp, `invalid-${index}`));
+    rows.push(tokenRecord(timestamp, { ...validUsage, total_tokens: total }));
+  }
+  const validTimestamp = "2026-08-18T20:00:00.000Z";
+  rows.push(...turnStart(validTimestamp, "valid-turn"));
+  rows.push(tokenRecord(validTimestamp, validUsage));
+  const malformedBreakdownTimestamp = "2026-08-18T20:01:00.000Z";
+  rows.push(...turnStart(malformedBreakdownTimestamp, "unknown-turn"));
+  rows.push(tokenRecord(malformedBreakdownTimestamp, {
+    ...validUsage,
+    input_tokens: "90",
+  }));
+
+  try {
+    const rolloutDirectory = resolve(root, "sessions", "2026", "08", "18");
+    await mkdir(rolloutDirectory, { recursive: true });
+    await writeFile(
+      resolve(rolloutDirectory, `rollout-${threadId}.jsonl`),
+      serialize(rows),
+    );
+
+    const snapshot = await collectUsage({
+      output: resolve(root, "snapshot.json"),
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+    assert.equal(snapshot.coverage.invalidTokenRecords, invalidTotals.length);
+    assert.equal(snapshot.coverage.observedModelCalls, 2);
+    assert.equal(snapshot.coverage.observedTokens, 200);
+    assert.equal(snapshot.coverage.detailedTokens, 100);
+    assert.equal(snapshot.coverage.unknownBreakdownTokens, 100);
+    assert.equal(snapshot.coverage.detailedPercent, 50);
+    assert.equal(snapshot.events.length, 2);
+
+    const validEvent = snapshot.events.find(
+      (event) => event.breakdownAvailable === true,
+    );
+    const unknownEvent = snapshot.events.find(
+      (event) => event.breakdownAvailable === false,
+    );
+    assert.equal(validEvent.cachedInputTokens, 90);
+    assert.equal(validEvent.reasoningTokens, 10);
+    assert.equal(validEvent.rateCardCredits !== null, true);
+    assert.equal(unknownEvent.totalTokens, 100);
+    assert.equal(unknownEvent.inputTokens, 0);
+    assert.equal(unknownEvent.rateCardCredits, null);
+
+    const [thread] = snapshot.threads;
+    assert.equal(thread.totalTokens, 200);
+    assert.equal(thread.detailedTokens, 100);
+    assert.equal(thread.unknownBreakdownTokens, 100);
+    assert.equal(thread.coverage, "partial");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

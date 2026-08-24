@@ -13,6 +13,8 @@ import {
 } from "./token-ledger-trend-image.mjs";
 import { chooseBinSize } from "./token-ledger-trend-terminal.mjs";
 import {
+  checkedTokenAdd,
+  tokenValue,
   splitUsageBucketsAtBoundaries,
   usageBuckets,
   usageBucketsInRange,
@@ -38,8 +40,6 @@ const COLORS = {
 
 const MIN_BIN_WIDTH = 34;
 const MAX_MODEL_ROWS = 6;
-const MAX_FINITE_NUMBER = Number.MAX_VALUE;
-const SCALE_HEADROOM = 1 - Number.EPSILON;
 
 function percent(value) {
   if (!Number.isFinite(value)) return "—";
@@ -153,15 +153,6 @@ function primitiveString(value) {
   }
 }
 
-function primitiveNumber(value) {
-  try {
-    const number = Number.prototype.valueOf.call(value);
-    return number === value ? number : null;
-  } catch {
-    return null;
-  }
-}
-
 function finiteTimestamp(value) {
   const text = primitiveString(value);
   if (text === null) return null;
@@ -182,132 +173,32 @@ function generatedAtLabel(value, timeZone) {
   }).format(new Date(timestampMs));
 }
 
-function parsedNonNegativeFiniteNumber(value) {
-  const primitive = primitiveNumber(value);
-  const text = primitive === null ? primitiveString(value) : null;
-  const number = primitive ?? (
-    text === null || text.trim() === "" ? NaN : Number(text)
-  );
-  return Number.isFinite(number) && number >= 0 ? number : null;
-}
-
-function scaleToFiniteSum(values) {
-  // Values are non-negative and finite; return one common factor for them.
-  const ratio = values.reduce(
-    (sum, value) => sum + value / MAX_FINITE_NUMBER,
-    0,
-  );
-  const sum = values.reduce((total, value) => total + value, 0);
-  return ratio > 1 || !Number.isFinite(sum)
-    ? SCALE_HEADROOM / Math.max(1, ratio)
-    : 1;
-}
-
-function scaleInputTokens(target, factor) {
-  target.inputTokens *= factor;
-  target.cachedInputTokens *= factor;
-  target.uncachedInputTokens *= factor;
-}
-
-function scaleAggregateTokens(target, factor) {
-  if (Number.isFinite(target.totalTokens)) target.totalTokens *= factor;
-  if (Number.isFinite(target.detailedTokens)) {
-    target.detailedTokens *= factor;
-  }
-  scaleInputTokens(target, factor);
-}
-
-function scaleBreakdown(breakdown, factor) {
-  return {
-    ...breakdown,
-    totalTokens: breakdown.totalTokens * factor,
-    inputTokens: breakdown.inputTokens * factor,
-    cachedInputTokens: breakdown.cachedInputTokens * factor,
-    uncachedInputTokens: breakdown.uncachedInputTokens * factor,
-  };
-}
-
-function tokenAdditionRatio(target, totalContribution, inputContribution) {
-  const totalRatio = Number.isFinite(target.totalTokens)
-    ? target.totalTokens / MAX_FINITE_NUMBER +
-      totalContribution / MAX_FINITE_NUMBER
-    : 0;
-  const inputRatio = target.inputTokens / MAX_FINITE_NUMBER +
-    inputContribution / MAX_FINITE_NUMBER;
-  return Math.max(totalRatio, inputRatio);
-}
-
-function tokenAdditionOverflows(target, totalContribution, inputContribution) {
-  return (
-    (Number.isFinite(target.totalTokens) &&
-      !Number.isFinite(target.totalTokens + totalContribution)) ||
-    !Number.isFinite(target.inputTokens + inputContribution)
-  );
-}
-
 function safeModelLabel(value) {
   const model = primitiveString(value);
   return model === null ? "Unknown" : trendModelLabel(model);
 }
 
 function cacheBreakdown(event) {
-  const parsedReportedTotalTokens = parsedNonNegativeFiniteNumber(
-    event.totalTokens,
-  );
-  const parsedInputTokens = parsedNonNegativeFiniteNumber(event.inputTokens);
-  const parsedCachedInputTokens = parsedNonNegativeFiniteNumber(
-    event.cachedInputTokens,
-  );
-  const parsedOutputTokens = parsedNonNegativeFiniteNumber(event.outputTokens);
-  const reportedTotalTokens = parsedReportedTotalTokens ?? 0;
-  const rawInputTokens = parsedInputTokens ?? 0;
-  const outputTokens = parsedOutputTokens ?? 0;
-  const rawCachedInputTokens = Math.min(
-    rawInputTokens,
-    parsedCachedInputTokens ?? 0,
-  );
-  const componentOverflowed = !Number.isFinite(rawInputTokens + outputTokens);
-  const componentScale = scaleToFiniteSum([rawInputTokens, outputTokens]);
-  const inputTokens = rawInputTokens * componentScale;
-  const componentOutputTokens = outputTokens * componentScale;
+  const allowFractional = event.rangeAllocationEstimated === true;
+  const totalTokens = tokenValue(event.totalTokens, { allowFractional });
+  const inputTokens = tokenValue(event.inputTokens, { allowFractional });
   const cachedInputTokens = Math.min(
     inputTokens,
-    rawCachedInputTokens * componentScale,
-  );
-  const componentTotalTokens = Math.min(
-    MAX_FINITE_NUMBER,
-    inputTokens + componentOutputTokens,
-  );
-  const totalTokens = reportedTotalTokens > 0
-    ? reportedTotalTokens
-    : componentTotalTokens;
-  const hasComponents = inputTokens > 0 || outputTokens > 0;
-  const hasReconciledBreakdown = hasComponents && (
-    reportedTotalTokens === 0 ||
-    componentTotalTokens === reportedTotalTokens ||
-    (componentOverflowed && reportedTotalTokens === MAX_FINITE_NUMBER)
-  );
-  const hasExplicitReconciledZeroBreakdown =
-    event.breakdownAvailable === true &&
-    parsedReportedTotalTokens === 0 &&
-    parsedInputTokens === 0 &&
-    parsedCachedInputTokens === 0 &&
-    parsedOutputTokens === 0;
-  const detailed = event.breakdownAvailable !== false && (
-    hasReconciledBreakdown || hasExplicitReconciledZeroBreakdown
+    tokenValue(event.cachedInputTokens, { allowFractional }),
   );
   return {
     totalTokens,
     inputTokens,
     cachedInputTokens,
     uncachedInputTokens: Math.max(0, inputTokens - cachedInputTokens),
-    detailed,
+    detailed: event.breakdownAvailable === true,
   };
 }
 
 function parseCacheEvent(value) {
   if (value == null) return null;
   try {
+    if (value.invalidTokenRecord === true) return null;
     const timestampMs = finiteTimestamp(value.timestamp);
     if (timestampMs === null) return null;
     return {
@@ -334,16 +225,16 @@ function emptyAggregate() {
 }
 
 function addInput(target, breakdown, inputCallCount) {
-  const factor = scaleToFiniteSum([
+  target.inputTokens = checkedTokenAdd(
     target.inputTokens,
     breakdown.inputTokens,
-  ]);
-  if (factor < 1) {
-    scaleInputTokens(target, factor);
-    breakdown = scaleBreakdown(breakdown, factor);
-  }
-  target.inputTokens += breakdown.inputTokens;
-  target.cachedInputTokens += breakdown.cachedInputTokens;
+    { allowFractional: true },
+  );
+  target.cachedInputTokens = checkedTokenAdd(
+    target.cachedInputTokens,
+    breakdown.cachedInputTokens,
+    { allowFractional: true },
+  );
   target.cachedInputTokens = Math.min(
     target.inputTokens,
     target.cachedInputTokens,
@@ -352,7 +243,11 @@ function addInput(target, breakdown, inputCallCount) {
     0,
     target.inputTokens - target.cachedInputTokens,
   );
-  target.inputEventCount += inputCallCount;
+  target.inputEventCount = checkedTokenAdd(
+    target.inputEventCount,
+    inputCallCount,
+    { allowFractional: true },
+  );
 }
 
 function finalizeAggregate(aggregate) {
@@ -378,8 +273,6 @@ function accumulateRange(snapshot, bounds, bins = null, dateIndexByString = null
   const endMs = bounds.end.getTime();
   const totals = emptyAggregate();
   const modelTotals = new Map();
-  // One shared scale keeps rates, shares, and coverage proportional everywhere.
-  const tokenScale = { value: 1 };
   const dateFormatter = bins === null
     ? null
     : localDateFormatter(bounds.timeZone);
@@ -404,63 +297,56 @@ function accumulateRange(snapshot, bounds, bins = null, dateIndexByString = null
     ) {
       continue;
     }
-    let { breakdown } = parsed;
+    const { breakdown } = parsed;
     const dateString = dateFormatter === null
       ? null
       : localDateString(parsed.timestampMs, dateFormatter);
     const binIndex = dateString === null ? null : dateIndexByString.get(dateString);
     const bin = binIndex === undefined || binIndex === null ? null : bins[binIndex];
-    const existingModelAggregate = breakdown.detailed && breakdown.inputTokens > 0
-      ? modelTotals.get(parsed.model)
-      : null;
-    const targets = [totals];
-    if (bin) targets.push(bin);
-    if (existingModelAggregate) targets.push(existingModelAggregate);
-    const scale = tokenScale.value;
-    const inputContribution = breakdown.detailed ? breakdown.inputTokens : 0;
-    const totalContribution = breakdown.totalTokens * scale;
-    const scaledInputContribution = inputContribution * scale;
-    const overflowRatio = Math.max(
-      ...targets.map((target) =>
-        tokenAdditionRatio(
-          target,
-          totalContribution,
-          scaledInputContribution,
-        )),
-    );
-    const directOverflow = targets.some((target) =>
-      tokenAdditionOverflows(
-        target,
-        totalContribution,
-        scaledInputContribution,
-      ));
-    if (overflowRatio > 1 || directOverflow) {
-      const factor = SCALE_HEADROOM / Math.max(1, overflowRatio);
-      scaleAggregateTokens(totals, factor);
-      for (const bin of bins ?? []) scaleAggregateTokens(bin, factor);
-      for (const model of modelTotals.values()) {
-        scaleAggregateTokens(model, factor);
-      }
-      tokenScale.value *= factor;
-    }
-    breakdown = scaleBreakdown(breakdown, tokenScale.value);
-
     const callCount = usageCallCount(event);
     const detailedCallCount = usageDetailedCallCount(event);
     const inputCallCount = usageInputCallCount(event);
-    totals.eventCount += callCount;
-    totals.totalTokens += breakdown.totalTokens;
+    totals.eventCount = checkedTokenAdd(totals.eventCount, callCount, {
+      allowFractional: true,
+    });
+    totals.totalTokens = checkedTokenAdd(
+      totals.totalTokens,
+      breakdown.totalTokens,
+      { allowFractional: true },
+    );
     if (bin) {
-      bin.eventCount += callCount;
-      bin.totalTokens += breakdown.totalTokens;
+      bin.eventCount = checkedTokenAdd(bin.eventCount, callCount, {
+        allowFractional: true,
+      });
+      bin.totalTokens = checkedTokenAdd(
+        bin.totalTokens,
+        breakdown.totalTokens,
+        { allowFractional: true },
+      );
     }
     if (!breakdown.detailed) continue;
 
-    totals.detailedEventCount += detailedCallCount;
-    totals.detailedTokens += breakdown.totalTokens;
+    totals.detailedEventCount = checkedTokenAdd(
+      totals.detailedEventCount,
+      detailedCallCount,
+      { allowFractional: true },
+    );
+    totals.detailedTokens = checkedTokenAdd(
+      totals.detailedTokens,
+      breakdown.totalTokens,
+      { allowFractional: true },
+    );
     if (bin) {
-      bin.detailedEventCount += detailedCallCount;
-      bin.detailedTokens += breakdown.totalTokens;
+      bin.detailedEventCount = checkedTokenAdd(
+        bin.detailedEventCount,
+        detailedCallCount,
+        { allowFractional: true },
+      );
+      bin.detailedTokens = checkedTokenAdd(
+        bin.detailedTokens,
+        breakdown.totalTokens,
+        { allowFractional: true },
+      );
     }
     if (!(breakdown.inputTokens > 0)) continue;
 
@@ -538,9 +424,19 @@ function combinedModelRows(models) {
   const visible = models.slice(0, MAX_MODEL_ROWS - 1);
   const remainder = models.slice(MAX_MODEL_ROWS - 1).reduce(
     (row, model) => {
-      row.inputTokens += model.inputTokens;
-      row.cachedInputTokens += model.cachedInputTokens;
-      row.inputEventCount += model.inputEventCount;
+      row.inputTokens = checkedTokenAdd(row.inputTokens, model.inputTokens, {
+        allowFractional: true,
+      });
+      row.cachedInputTokens = checkedTokenAdd(
+        row.cachedInputTokens,
+        model.cachedInputTokens,
+        { allowFractional: true },
+      );
+      row.inputEventCount = checkedTokenAdd(
+        row.inputEventCount,
+        model.inputEventCount,
+        { allowFractional: true },
+      );
       row.uncachedInputTokens = Math.max(
         0,
         row.inputTokens - row.cachedInputTokens,

@@ -8,6 +8,9 @@ import {
   INTERACTIVE_HELP,
 } from "./token-ledger-controls.mjs";
 import {
+  checkedFiniteAdd,
+  checkedTokenAdd,
+  tokenValue,
   usageBucketsInRange,
   usageCallCount,
   usageThreadIds,
@@ -179,8 +182,17 @@ function dateLabel(bounds, range = "day", rollingLabel = "1 day") {
 function modelTotals(events) {
   const totals = new Map();
   for (const event of events) {
+    if (event?.invalidTokenRecord === true) continue;
     const model = modelLabel(event.model);
-    totals.set(model, (totals.get(model) ?? 0) + (Number(event.totalTokens) || 0));
+    const allowFractional = event.rangeAllocationEstimated === true;
+    totals.set(
+      model,
+      checkedTokenAdd(
+        totals.get(model) ?? 0,
+        tokenValue(event.totalTokens, { allowFractional }),
+        { allowFractional },
+      ),
+    );
   }
   return [...totals.entries()]
     .map(([model, totalTokens]) => ({ model, totalTokens }))
@@ -190,8 +202,17 @@ function modelTotals(events) {
 function usageTypeTotals(events) {
   const totals = new Map();
   for (const event of events) {
+    if (event?.invalidTokenRecord === true) continue;
     const key = String(event.useType || "unknown").trim().toLowerCase() || "unknown";
-    totals.set(key, (totals.get(key) ?? 0) + (Number(event.totalTokens) || 0));
+    const allowFractional = event.rangeAllocationEstimated === true;
+    totals.set(
+      key,
+      checkedTokenAdd(
+        totals.get(key) ?? 0,
+        tokenValue(event.totalTokens, { allowFractional }),
+        { allowFractional },
+      ),
+    );
   }
   return [...totals.entries()]
     .map(([key, totalTokens]) => ({
@@ -252,12 +273,18 @@ export function quotaCycleSummary(snapshot = {}, displayedEvents = []) {
   const sumUsage = (events) =>
     events.reduce(
       (acc, event) => {
-        const tokens = Number(event.totalTokens) || 0;
-        acc.tokens += tokens;
+        if (event?.invalidTokenRecord === true) return acc;
+        const allowFractional = event.rangeAllocationEstimated === true;
+        const tokens = tokenValue(event.totalTokens, { allowFractional });
+        acc.tokens = checkedTokenAdd(acc.tokens, tokens, { allowFractional });
         const credits = eventCredits(event);
         if (Number.isFinite(credits) && credits >= 0) {
-          acc.credits += credits;
-          acc.ratedTokens += tokens;
+          acc.credits = checkedFiniteAdd(acc.credits, credits);
+          acc.ratedTokens = checkedTokenAdd(
+            acc.ratedTokens,
+            tokens,
+            { allowFractional },
+          );
         }
         return acc;
       },
@@ -304,28 +331,54 @@ export function quotaCycleSummary(snapshot = {}, displayedEvents = []) {
 
 function summary(events) {
   const totalTokens = events.reduce(
-    (sum, event) => sum + (Number(event.totalTokens) || 0),
+    (sum, event) => {
+      if (event?.invalidTokenRecord === true) return sum;
+      const allowFractional = event.rangeAllocationEstimated === true;
+      return checkedTokenAdd(
+        sum,
+        tokenValue(event.totalTokens, { allowFractional }),
+        { allowFractional },
+      );
+    },
     0,
   );
   const calls = events.reduce(
-    (sum, event) => sum + usageCallCount(event),
+    (sum, event) => checkedTokenAdd(sum, usageCallCount(event)),
     0,
   );
   const threadIds = new Set(
     events.flatMap((event) => usageThreadIds(event)),
   );
   const outputTokens = events.reduce(
-    (sum, event) => sum + (Number(event.outputTokens) || 0),
+    (sum, event) => {
+      if (event?.invalidTokenRecord === true) return sum;
+      const allowFractional = event.rangeAllocationEstimated === true;
+      return checkedTokenAdd(
+        sum,
+        tokenValue(event.outputTokens, { allowFractional }),
+        { allowFractional },
+      );
+    },
     0,
   );
   const inputTokens = events.reduce(
-    (sum, event) => sum + (Number(event.inputTokens) || 0),
+    (sum, event) => {
+      if (event?.invalidTokenRecord === true) return sum;
+      const allowFractional = event.rangeAllocationEstimated === true;
+      return checkedTokenAdd(
+        sum,
+        tokenValue(event.inputTokens, { allowFractional }),
+        { allowFractional },
+      );
+    },
     0,
   );
   const cachedInputTokens = events.reduce((sum, event) => {
-    const input = Math.max(0, Number(event.inputTokens) || 0);
-    const cached = Math.max(0, Number(event.cachedInputTokens) || 0);
-    return sum + Math.min(input, cached);
+    if (event?.invalidTokenRecord === true) return sum;
+    const allowFractional = event.rangeAllocationEstimated === true;
+    const input = tokenValue(event.inputTokens, { allowFractional });
+    const cached = tokenValue(event.cachedInputTokens, { allowFractional });
+    return checkedTokenAdd(sum, Math.min(input, cached), { allowFractional });
   }, 0);
   return {
     totalTokens,
@@ -407,7 +460,10 @@ function panelLines(rows, allRows, totalTokens, panelWidth, options, enabled) {
     panelWidth - labelWidth - shareWidth - totalWidth - 1 - rightPadding,
   );
   const maxTokens = allRows[0]?.totalTokens ?? 0;
-  const totalCredits = allRows.reduce((sum, item) => sum + item.rateCardCredits, 0) || 1;
+  const totalCredits = allRows.reduce(
+    (sum, item) => checkedFiniteAdd(sum, item.rateCardCredits),
+    0,
+  ) || 1;
   const selectedIndex = Math.min(
     Math.max(0, Math.trunc(Number(options.selectedIndex) || 0)),
     Math.max(0, rows.length - 1),
@@ -486,7 +542,12 @@ function sidebarLines(stats, panelWidth, enabled, options = {}, quota = null) {
           label: "Other",
           totalTokens: stats.usageTypes
             .slice(4)
-            .reduce((sum, item) => sum + item.totalTokens, 0),
+            .reduce(
+              (sum, item) => checkedTokenAdd(sum, item.totalTokens, {
+                allowFractional: true,
+              }),
+              0,
+            ),
         },
       ]
     : stats.usageTypes;

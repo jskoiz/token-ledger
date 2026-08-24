@@ -1,3 +1,8 @@
+import {
+  isValidTokenValue,
+  tokenValue,
+} from "../lib/token-ledger-usage.mjs";
+
 // Pricing weights are used only for the separate attribution lens. They are
 // never used to scale or relabel the actual-token columns.
 export const RATE_CARD_AS_OF = "2026-08-17";
@@ -39,12 +44,40 @@ export function normalizeModel(model) {
 }
 
 function hasDetailedBreakdown(usage) {
-  const totalTokens = Number(usage.totalTokens) || 0;
-  const inputTokens = Number(usage.inputTokens) || 0;
-  const outputTokens = Number(usage.outputTokens) || 0;
+  const allowFractional = usage.rangeAllocationEstimated === true;
+  const optionalToken = (value) =>
+    value === undefined
+      ? 0
+      : isValidTokenValue(value, { allowFractional })
+        ? value
+        : null;
+  const totalTokens = isValidTokenValue(usage.totalTokens, {
+    allowFractional,
+  })
+    ? usage.totalTokens
+    : null;
+  const inputTokens = optionalToken(usage.inputTokens);
+  const cachedInputTokens = optionalToken(usage.cachedInputTokens);
+  const cacheWriteInputTokens = optionalToken(usage.cacheWriteInputTokens);
+  const outputTokens = optionalToken(usage.outputTokens);
+  const reasoningTokens = optionalToken(usage.reasoningTokens);
+  if (
+    totalTokens === null ||
+    inputTokens === null ||
+    cachedInputTokens === null ||
+    cacheWriteInputTokens === null ||
+    outputTokens === null ||
+    reasoningTokens === null ||
+    usage.breakdownAvailable === false
+  ) {
+    return false;
+  }
   if (totalTokens === 0) return true;
+  const componentTotal = inputTokens + outputTokens;
   return (
-    inputTokens + outputTokens === totalTokens &&
+    Number.isFinite(componentTotal) &&
+    componentTotal <= Number.MAX_SAFE_INTEGER &&
+    componentTotal === totalTokens &&
     (inputTokens > 0 || outputTokens > 0)
   );
 }
@@ -53,13 +86,17 @@ export function creditsForUsage(model, usage) {
   if (!hasDetailedBreakdown(usage)) return null;
   const rate = RATE_CARD[normalizeModel(model)];
   if (!rate) return null;
-  const inputTokens = Math.max(0, Number(usage.inputTokens) || 0);
-  const cachedInputTokens = Math.max(0, Number(usage.cachedInputTokens) || 0);
-  const outputTokens = Math.max(0, Number(usage.outputTokens) || 0);
-  const cached = Math.min(inputTokens, cachedInputTokens);
+  const allowFractional = usage.rangeAllocationEstimated === true;
+  const inputTokens = tokenValue(usage.inputTokens, { allowFractional });
+  const cachedInputCount = tokenValue(usage.cachedInputTokens, {
+    allowFractional,
+  });
+  const outputTokens = tokenValue(usage.outputTokens, { allowFractional });
+  const cached = Math.min(inputTokens, cachedInputCount);
   const uncached = Math.max(0, inputTokens - cached);
-  return (
+  const credits = (
     (uncached * rate.input + cached * rate.cached + outputTokens * rate.output) /
     1_000_000
   );
+  return Number.isFinite(credits) ? credits : null;
 }
