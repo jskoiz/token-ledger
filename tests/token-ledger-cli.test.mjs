@@ -3220,6 +3220,146 @@ test("named limit buckets are not stitched into the account meter", () => {
   );
 });
 
+test("account-scoped weekly observations remain the selected account meter", () => {
+  const resetAt = Date.parse("2026-08-22T00:00:00.000Z") / 1_000;
+  const account = [
+    {
+      timestamp: "2026-08-18T00:00:00.000Z",
+      usedPercent: 10,
+      windowMinutes: 10_080,
+      resetsAt: resetAt,
+      limitKey: "account",
+      scope: "account",
+    },
+    {
+      timestamp: "2026-08-19T00:00:00.000Z",
+      usedPercent: 20,
+      windowMinutes: 10_080,
+      resetsAt: resetAt,
+      limitKey: "account",
+      scope: "account",
+    },
+  ];
+  const named = {
+    timestamp: "2026-08-19T01:00:00.000Z",
+    usedPercent: 90,
+    windowMinutes: 10_080,
+    resetsAt: resetAt,
+    limitKey: "named",
+    limitName: "Luna",
+    scope: "named",
+  };
+  assert.deepEqual(
+    weeklyQuotaObservations({ quotaObservations: [...account, named] })
+      .map((observation) => observation.usedPercent),
+    [10, 20],
+  );
+  assert.deepEqual(
+    weeklyQuotaObservations({ quotaObservations: account })
+      .map((observation) => observation.usedPercent),
+    [10, 20],
+  );
+});
+
+test("named-only weekly pools do not form an account meter", () => {
+  const bounds = multiDayBounds("2026-08-20", "UTC", 7);
+  const resetA = Date.parse("2026-08-22T00:00:00.000Z") / 1_000;
+  const resetB = Date.parse("2026-08-23T00:00:00.000Z") / 1_000;
+  const quotaObservations = [
+    {
+      timestamp: "2026-08-18T00:00:00.000Z",
+      usedPercent: 20,
+      windowMinutes: 10_080,
+      resetsAt: resetA,
+      limitKey: "named-a",
+      limitName: "Luna",
+      scope: "named",
+    },
+    {
+      timestamp: "2026-08-19T00:00:00.000Z",
+      usedPercent: 40,
+      windowMinutes: 10_080,
+      resetsAt: resetA,
+      limitKey: "named-a",
+      limitName: "Luna",
+      scope: "named",
+    },
+    {
+      timestamp: "2026-08-20T00:00:00.000Z",
+      usedPercent: 60,
+      windowMinutes: 10_080,
+      resetsAt: resetA,
+      limitKey: "named-a",
+      limitName: "Luna",
+      scope: "named",
+    },
+    {
+      timestamp: "2026-08-18T01:00:00.000Z",
+      usedPercent: 50,
+      windowMinutes: 10_080,
+      resetsAt: resetB,
+      limitKey: "named-b",
+      limitName: "Sol",
+      scope: "named",
+    },
+  ];
+  const snapshot = {
+    generatedAt: "2026-08-20T12:00:00.000Z",
+    events: [{
+      timestamp: "2026-08-19T12:00:00.000Z",
+      model: "gpt-5.6-luna",
+      totalTokens: 100,
+      inputTokens: 100,
+    }],
+    quotaObservations,
+  };
+  assert.deepEqual(weeklyQuotaObservations(snapshot), []);
+  // The same named-only shape without the explicit field is a legacy snapshot;
+  // it must not revive the old largest-pool fallback.
+  assert.deepEqual(
+    weeklyQuotaObservations({
+      ...snapshot,
+      quotaObservations: quotaObservations.map((observation) => {
+        const legacyObservation = { ...observation };
+        delete legacyObservation.scope;
+        return legacyObservation;
+      }),
+    }),
+    [],
+  );
+
+  const trend = buildUsageTrend(snapshot, bounds);
+  assert.equal(trend.available, false);
+  assert.deepEqual(trend.points, []);
+  const quota = quotaCycleSummary(snapshot, snapshot.events);
+  assert.equal(quota.available, false);
+  assert.equal(quota.usedPercent, null);
+  assert.equal(quota.remainingPercent, null);
+
+  const terminal = renderTrendPlain({
+    snapshot,
+    bounds,
+    trend,
+    days: 7,
+    options: { width: 120 },
+  });
+  assert.match(terminal, /TOKEN LEDGER · ACTUAL TOKENS ·/);
+  assert.match(terminal, /NO ACCOUNT-WIDE WEEKLY METER OBSERVED/);
+  assert.doesNotMatch(terminal, /ACTUAL TOKENS \+ WEEKLY QUOTA/);
+  assert.doesNotMatch(terminal, /RIGHT AXIS|LINE · OBSERVED WEEKLY QUOTA/);
+
+  const image = renderTrendImage({
+    snapshot,
+    bounds,
+    trend,
+    days: 7,
+    options: { imageWidth: 1_000 },
+  });
+  assert.doesNotMatch(image, /WEEKLY LIMIT · OPENAI REPORTED/);
+  assert.doesNotMatch(image, /data-series="weekly-meter"/);
+  assert.doesNotMatch(image, /OpenAI-reported weekly limit/);
+});
+
 test("burn day bins place observed drops on days in meter percent units", () => {
   const bounds = multiDayBounds("2026-08-15", "UTC", 7);
   const resetsAt = Date.parse("2026-08-16T00:00:00.000Z") / 1_000;
