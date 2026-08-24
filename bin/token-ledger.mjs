@@ -17,6 +17,10 @@ import {
 } from "./token-ledger-terminal.mjs";
 import { buildUsageTrend, multiDayBounds } from "./token-ledger-trend.mjs";
 import {
+  buildTrendReportViewModel,
+  resolveEffectiveEnd,
+} from "./token-ledger-report-data.mjs";
+import {
   renderTrendImage,
   writeTrendPng,
 } from "./token-ledger-trend-image.mjs";
@@ -895,9 +899,15 @@ export function snapshotFreshness(snapshot = {}, nowMs = Date.now()) {
   };
 }
 
+// Resolves the snapshot together with how its freshness was established, so
+// report output can distinguish source-verified data from explicit or
+// unchecked snapshots instead of claiming everything is current.
 async function loadSnapshot(options) {
   if (options.refresh) {
-    return refreshSnapshot(options);
+    return {
+      snapshot: await refreshSnapshot(options),
+      sourceStatus: "verified-current",
+    };
   }
   if (!existsSync(options.input)) {
     if (options.inputExplicit || !options.autoRefresh) {
@@ -905,10 +915,22 @@ async function loadSnapshot(options) {
         `Snapshot not found: ${safeDisplayLabel(options.input, "snapshot")}`,
       );
     }
-    return refreshSnapshot(options);
+    return {
+      snapshot: await refreshSnapshot(options),
+      sourceStatus: "verified-current",
+    };
   }
-  if (!options.autoRefresh || options.inputExplicit) {
-    return readSnapshot(options.input);
+  if (options.inputExplicit) {
+    return {
+      snapshot: await readSnapshot(options.input),
+      sourceStatus: "explicit-snapshot",
+    };
+  }
+  if (!options.autoRefresh) {
+    return {
+      snapshot: await readSnapshot(options.input),
+      sourceStatus: "unchecked-cache",
+    };
   }
 
   let snapshotStat;
@@ -920,7 +942,12 @@ async function loadSnapshot(options) {
     );
   }
   if (snapshotCacheIsFresh(snapshotStat.mtimeMs)) {
-    return readSnapshot(options.input);
+    // The recent-mtime shortcut skips the source walk entirely, so the
+    // snapshot's own capture time bounds what the report may claim.
+    return {
+      snapshot: await readSnapshot(options.input),
+      sourceStatus: "unchecked-cache",
+    };
   }
 
   const { latestSourceModifiedAt } = await import("../lib/token-ledger-importer.mjs");
@@ -936,12 +963,18 @@ async function loadSnapshot(options) {
     );
   }
   if (snapshotNeedsRefresh(snapshotStat.mtimeMs, latestSourceMtimeMs)) {
-    return refreshSnapshot(options);
+    return {
+      snapshot: await refreshSnapshot(options),
+      sourceStatus: "verified-current",
+    };
   }
-  return readSnapshot(options.input);
+  return {
+    snapshot: await readSnapshot(options.input),
+    sourceStatus: "verified-current",
+  };
 }
 
-function render(options, snapshot, bounds, events, rows, allRows, freshness) {
+function render(options, snapshot, bounds, events, rows, allRows, freshness, report = {}) {
   if (options.view === "trend") {
     const trend = buildUsageTrend(snapshot, bounds);
     if (options.image) {
@@ -951,7 +984,14 @@ function render(options, snapshot, bounds, events, rows, allRows, freshness) {
         trend,
         days: options.trendDays,
         options,
-        projectRows: allRows,
+        viewModel: buildTrendReportViewModel({
+          snapshot,
+          bounds,
+          days: options.trendDays,
+          reportTimeMs: report.reportTimeMs ?? null,
+          sourceStatus: report.sourceStatus ?? "unchecked-cache",
+          projectRows: allRows,
+        }),
       });
     }
     return renderTrendCombo({
@@ -1046,8 +1086,24 @@ export async function run(options, { nowMs } = {}) {
   const hasInjectedNow = nowMs !== undefined;
   const now = new Date(hasInjectedNow ? nowMs : Date.now());
   const bounds = boundsForOptions(options, now);
-  const snapshot = await loadSnapshot(options);
-  const events = filterDayEvents(snapshot, bounds);
+  const { snapshot, sourceStatus } = await loadSnapshot(options);
+  let events = filterDayEvents(snapshot, bounds);
+  let reportTimeMs = null;
+  if (options.view === "trend" && options.image) {
+    reportTimeMs = hasInjectedNow ? now.getTime() : Date.now();
+    // The PNG report stops at the effective cutoff (wall clock for verified
+    // sources, snapshot capture time otherwise), so every panel is fed from
+    // the same bounded event set.
+    const effectiveEndMs = resolveEffectiveEnd({
+      snapshot,
+      bounds,
+      reportTimeMs,
+      sourceStatus,
+    });
+    events = events.filter(
+      (event) => new Date(event.timestamp).getTime() < effectiveEndMs,
+    );
+  }
   if (events.length === 0) {
     return [
       `No model-call events found for ${rangeDescription(options, bounds)} (${bounds.timeZone}).`,
@@ -1079,6 +1135,7 @@ export async function run(options, { nowMs } = {}) {
       snapshot,
       hasInjectedNow ? now.getTime() : Date.now(),
     ),
+    { sourceStatus, reportTimeMs },
   );
   if (writingImage) {
     await mkdir(dirname(outputPath), { recursive: true });
@@ -1129,7 +1186,7 @@ function shouldUseInteractive(options) {
 
 async function runInteractive(options) {
   const bounds = boundsForOptions(options);
-  const snapshot = await loadSnapshot(options);
+  const { snapshot } = await loadSnapshot(options);
   const events = filterDayEvents(snapshot, bounds);
   if (events.length === 0) {
     process.stdout.write([

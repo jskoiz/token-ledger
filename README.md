@@ -76,21 +76,34 @@ same flags as the trend view (`--drain`, `--date`, `--tz`, `--image-output`,
 
 The terminal trend view is a compact approximation of the image view. For the
 full chart grammar, use `--image`: it writes a single shareable report card as
-a PNG — model stat cards with week-over-week delta chips and share micro-bars,
-calendar-day columns of local token volume stacked by model, the observed
-weekly meter remaining overlaid as a smoothed amber line with dashed reset
-breaks and a few callout pills, a top-projects row with pace and runway
-figures, and a plain-language footnote strip (meter points burned, estimated
-cost, scheduled vs early resets, and data freshness).
+a PNG. The report leads with a total-usage KPI (with a delta against the prior
+equivalent period), input-weighted cache efficiency, the fast-mode share of
+actual tokens, and the active-project count, beside the latest observed
+weekly-limit state. Below that sit a model-mix strip, calendar-day columns of
+local token volume stacked by model, daily cache efficiency with input
+volumes, top projects, a per-model cache table, and a provenance footer.
+
+![Token Ledger 7-day report](docs/token-ledger-report-7-day.png)
+
+The weekly-limit line is drawn from sampled OpenAI observations, never
+continuous telemetry: dots mark real readings, solid runs mark spans confirmed
+by repeated equal readings, dashed runs bridge unobserved gaps, and the line
+never extends past the latest reading. When the report is generated partway
+through the final day, that column is marked `PARTIAL` with the actual cutoff
+time, and the prior-period delta compares an equally long partial window.
+Values allocated from compacted history are marked with `≈`; unmarked values
+come from exact event data. Reports built from an explicit or stale snapshot
+say `Snapshot generated …` (with a `STALE` badge on fallback) instead of
+claiming to be current.
 
 When run from a terminal, the finished PNG opens in the default image viewer
 automatically so the report lands on screen instead of in a file browser.
 Pass `--no-open` to skip that; piped or scripted runs never open a window.
 
-Turns run in fast mode (service tier "priority") are drawn as a darker shade
-within their model's segment, with a legend entry explaining the shade;
-fast-mode turns are weighted 1.5× in the credit estimate because they debit
-the plan limit at a higher rate.
+Turns run in fast mode (service tiers "priority" and "fast") are drawn with a
+diagonal hatch inside their model's segment — fast mode is a property of usage,
+not a separate model, so the hatch never adds bar height and stays legible in
+grayscale.
 
 Pass `--drain` to flip the columns into limit-drain units instead: each column
 becomes the weekly limit percentage the meter dropped, stacked by model using
@@ -114,10 +127,10 @@ choose a width from 900 to 2400 pixels.
 
 Use `trend 14d` for daily columns across two weeks. At 30 days, the terminal
 uses readable multi-day bins: three-day bins at ordinary widths and two-day
-bins on wider terminals. The image view uses the same readable multi-day
-binning at 30 days. The image also reports the separate local rate-card credit
-estimate when token breakdowns are available; that estimate is an absolute
-credit count and never rescales the observed-drain columns.
+bins on wider terminals. The image view keeps daily columns while they stay
+legible and falls back to the same readable multi-day binning for longer
+windows. The footer's rate-card date describes the attribution card used for
+meter-drain weighting; subscription limits are not billed per token.
 
 The CLI automatically checks the local Codex source files before rendering. If
 they are newer than the local cache, it rebuilds the privacy-reduced snapshot.

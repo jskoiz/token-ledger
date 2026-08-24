@@ -1176,30 +1176,36 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
   assert.match(svg, /<title[^>]*>Token Ledger · 7-day trend<\/title>/);
   assert.match(svg, /fill="#3b82f6"/);
   assert.match(svg, /fill="#10a394"/);
-  assert.match(svg, /ACTUAL TOKEN VOLUME/);
-  assert.match(svg, /WEEKLY METER REMAINING/);
-  assert.match(svg, /35\.0 meter points/);
-  assert.match(svg, /ESTIMATED COST/);
+  assert.match(svg, /TOTAL USAGE/);
+  assert.match(svg, /CACHE EFFICIENCY/);
+  assert.match(svg, /FAST MODE USAGE/);
+  assert.match(svg, /PROJECTS/);
+  assert.match(svg, /WEEKLY LIMIT/);
+  assert.match(svg, /MODEL MIX/);
+  assert.match(svg, /DAILY TOKEN VOLUME/);
   assert.match(svg, /stroke="#f6b73c"/);
   assert.match(svg, /Luna/);
   assert.match(svg, /Sol/);
   // The fixture's second window follows a genuine weekly expiry, so the
-  // reset break, its dated footnote, and the plain-language reset count all
-  // appear.
-  assert.match(svg, /RESET 100%/);
-  assert.match(svg, /1 scheduled · 0 early/);
-  assert.match(svg, /was the normal weekly reset/);
-  // The all-fast Sol segment gets the darker fast-mode shade, and the fast
-  // mode stat card explains it.
-  assert.match(svg, /fill="#0a655c"/);
-  assert.match(svg, /FAST MODE/);
-  assert.match(svg, /1\.50× rate/);
-  assert.match(svg, /Darker shade = fast mode/);
-  // The projects and pace row is fed from the events in range.
+  // dashed reset break appears with its callout.
+  assert.match(svg, /RESET \(100%\)/);
+  // Fast mode renders as a hatch overlay inside the model segment, never as
+  // its own pseudo-model, and the KPI reports actual fast tokens.
+  assert.match(svg, /fast-mode-hatch/);
+  assert.match(svg, /url\(#fast-mode-hatch\)/);
+  assert.match(svg, /of total usage/);
+  assert.doesNotMatch(svg, /1\.50× rate/);
+  // The lower panels and provenance footer are always present.
   assert.match(svg, /WHERE IT WENT · TOP PROJECTS/);
-  assert.match(svg, /PACE &amp; RUNWAY/);
-  assert.match(svg, /tokens per meter point/);
+  assert.match(svg, /CACHE EFFICIENCY BY DAY/);
+  assert.match(svg, /CACHE EFFICIENCY BY MODEL/);
+  assert.match(svg, /DATA SOURCES/);
+  assert.match(svg, /COVERAGE/);
+  assert.match(svg, /BREAKDOWN/);
+  assert.match(svg, /HISTORY/);
+  assert.match(svg, /RATE CARD/);
   assert.ok((svg.match(/<rect /g) ?? []).length >= 4);
+  assert.doesNotMatch(svg, /NaN|Infinity|undefined/);
 
   const drainSvg = renderTrendImage({
     snapshot,
@@ -1209,8 +1215,7 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
     options: { imageWidth: 1_000, drain: true },
   });
   assert.match(drainSvg, /OBSERVED LIMIT DRAIN/);
-  assert.match(drainSvg, /Bars = observed meter drops/);
-  assert.match(drainSvg, /35\.0 meter points/);
+  assert.match(drainSvg, /meter percent by model/);
 });
 
 test("PNG image output has a real PNG signature", async () => {

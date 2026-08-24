@@ -2,16 +2,13 @@ import { Buffer } from "node:buffer";
 
 import sharp from "sharp";
 
+import { buildBurnDayBins, buildUsageTrend } from "./token-ledger-trend.mjs";
+import { chooseBinSize } from "./token-ledger-trend-terminal.mjs";
 import {
-  buildBurnDayBins,
-  buildUsageTrend,
-  weeklyQuotaObservations,
-} from "./token-ledger-trend.mjs";
-import {
-  creditsForUsage,
-  FAST_MODE_MULTIPLIER,
-} from "./token-ledger-rates.mjs";
-import { buildActualTokenBins } from "./token-ledger-trend-terminal.mjs";
+  buildTrendReportViewModel,
+  shiftCalendarDate,
+  zonedMidnight,
+} from "./token-ledger-report-data.mjs";
 
 const MODEL_ORDER = [
   "Luna",
@@ -57,12 +54,12 @@ const COLORS = {
   projectTrack: "rgba(255,255,255,.07)",
   line: "#f6b73c",
   meterAxis: "#cf9a37",
-  chipFill: "#151d2c",
   leftAxis: "#7ea2f0",
+  cache: "#22c58f",
+  uncached: "#b0483f",
   deltaUp: "#7fb37a",
-  deltaUpFill: "rgba(127,179,122,.14)",
   deltaDown: "#e08a86",
-  deltaDownFill: "rgba(217,83,79,.16)",
+  warn: "#f0a35e",
   remainderBar: "#475569",
   onFill: "rgba(255,255,255,.82)",
 };
@@ -105,19 +102,59 @@ function compact(value, digits = 2) {
   return Math.round(value).toLocaleString("en-US");
 }
 
-function percent(value) {
-  return `${Number(value).toFixed(value >= 10 ? 1 : 2)}%`;
+function pct(value) {
+  if (!Number.isFinite(value)) return "—";
+  if (value > 0 && value < 0.05) return "<0.1%";
+  return `${value.toFixed(1)}%`;
 }
 
-function meterLabel(value) {
-  return `${Number(value).toFixed(1)}%`;
+// Meter percentages read as whole numbers when they are whole ("0%", "62%").
+function meterPct(value) {
+  if (!Number.isFinite(value)) return "—";
+  const rounded = Math.round(value);
+  if (Math.abs(value - rounded) < 0.05) return `${rounded}%`;
+  return `${value.toFixed(1)}%`;
 }
 
-function niceCeiling(value) {
+// Advance width of a letter-spaced label; SVG letter-spacing adds per glyph.
+function spacedWidth(text, size, weight, spacing) {
+  return textWidth(text, size, weight) + (Number(spacing) || 0) * String(text).length;
+}
+
+function deltaLabel(value) {
+  if (!Number.isFinite(value)) return "—";
+  return `${value >= 0 ? "+" : "−"}${Math.abs(value).toFixed(1)}%`;
+}
+
+function durationLabel(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return "—";
+  const hours = ms / 3_600_000;
+  if (hours >= 36) return `${Math.round(ms / 86_400_000)} days`;
+  if (hours >= 21) return "1 day";
+  return `${Math.max(1, Math.round(hours))} ${Math.max(1, Math.round(hours)) === 1 ? "hour" : "hours"}`;
+}
+
+// Darker step of the same hue; retained for terminal parity and callers that
+// still shade fast-mode swatches (the report itself uses the hatch pattern).
+export function fastShade(hexColor) {
+  const match = /^#([0-9a-f]{6})$/i.exec(String(hexColor));
+  if (!match) return hexColor;
+  const channels = [0, 2, 4].map((offset) =>
+    Math.round(parseInt(match[1].slice(offset, offset + 2), 16) * 0.62),
+  );
+  return `#${channels.map((value) => value.toString(16).padStart(2, "0")).join("")}`;
+}
+
+// Ceiling scale for the daily chart. Tighter than 1–2–5 so a 2.39B peak lands
+// on a 3.00B axis instead of 5.00B.
+const NICE_CEILING_STEPS = [1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10];
+export function reportCeiling(value) {
   if (!(value > 0)) return 1;
-  const magnitude = 10 ** Math.floor(Math.log10(value));
-  const normalized = value / magnitude;
-  const step = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
+  const target = value * 1.12;
+  const magnitude = 10 ** Math.floor(Math.log10(target));
+  const normalized = target / magnitude;
+  const step =
+    NICE_CEILING_STEPS.find((candidate) => normalized <= candidate) ?? 10;
   return step * magnitude;
 }
 
@@ -135,171 +172,8 @@ function styleForModel(model) {
   return TREND_IMAGE_MODEL_COLORS[model] ?? TREND_IMAGE_MODEL_COLORS.Other;
 }
 
-// Darker step of the same hue, used for the fast-mode share of a segment.
-export function fastShade(hexColor) {
-  const match = /^#([0-9a-f]{6})$/i.exec(String(hexColor));
-  if (!match) return hexColor;
-  const channels = [0, 2, 4].map((offset) =>
-    Math.round(parseInt(match[1].slice(offset, offset + 2), 16) * 0.62),
-  );
-  return `#${channels.map((value) => value.toString(16).padStart(2, "0")).join("")}`;
-}
-
-function sortedModelEntries(values) {
-  return [...values.entries()]
-    .filter(([, value]) => value > 0)
-    .sort(([left], [right]) => modelSort(left, right));
-}
-
-function eventRateCardCredits(event) {
-  // Recompute from token components first so the current rate card applies;
-  // snapshots can carry credits stored under an outdated card. Fast-mode
-  // turns (service tier "priority") debit the limit at a higher rate.
-  const computed = creditsForUsage(event.model, event);
-  if (Number.isFinite(computed) && computed >= 0) {
-    return event.serviceTier === "priority"
-      ? computed * FAST_MODE_MULTIPLIER
-      : computed;
-  }
-  // Stored credits from current snapshots already include the fast-mode
-  // multiplier.
-  const stored = Number(event.rateCardCredits);
-  if (
-    event.rateCardCredits !== null &&
-    event.rateCardCredits !== undefined &&
-    Number.isFinite(stored) &&
-    stored >= 0
-  ) {
-    return stored;
-  }
-  return null;
-}
-
-function rateCardSummary(snapshot, bounds) {
-  const startMs = bounds.start.getTime();
-  const endMs = bounds.end.getTime();
-  let totalTokens = 0;
-  let ratedTokens = 0;
-  let credits = 0;
-  let fastCredits = 0;
-  for (const event of snapshot.events ?? []) {
-    const timestampMs = new Date(event.timestamp).getTime();
-    if (!Number.isFinite(timestampMs) || timestampMs < startMs || timestampMs >= endMs) {
-      continue;
-    }
-    const tokens = Math.max(0, Number(event.totalTokens) || 0);
-    totalTokens += tokens;
-    const eventCredits = eventRateCardCredits(event);
-    if (Number.isFinite(eventCredits) && eventCredits >= 0) {
-      ratedTokens += tokens;
-      credits += eventCredits;
-      if (event.serviceTier === "priority") fastCredits += eventCredits;
-    }
-  }
-  return {
-    totalTokens,
-    ratedTokens,
-    credits,
-    fastCredits,
-    coveragePercent: totalTokens > 0 ? (ratedTokens / totalTokens) * 100 : 0,
-  };
-}
-
-function dateParts(dateString) {
-  return dateString.split("-").map(Number);
-}
-
-function dateStringFromParts(year, month, day) {
-  return [year, month, day]
-    .map((value, index) =>
-      index === 0 ? String(value) : String(value).padStart(2, "0"),
-    )
-    .join("-");
-}
-
-function shiftCalendarDate(dateString, amount) {
-  const [year, month, day] = dateParts(dateString);
-  const date = new Date(Date.UTC(year, month - 1, day + amount));
-  return dateStringFromParts(
-    date.getUTCFullYear(),
-    date.getUTCMonth() + 1,
-    date.getUTCDate(),
-  );
-}
-
-function timeZoneOffsetMs(instant, timeZone) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    timeZoneName: "longOffset",
-  }).formatToParts(instant);
-  const value = parts.find((part) => part.type === "timeZoneName")?.value ?? "GMT";
-  if (value === "GMT") return 0;
-  const match = value.match(/^GMT([+-])(\d{2}):?(\d{2})?$/);
-  if (!match) return 0;
-  const minutes = Number(match[2]) * 60 + Number(match[3] || 0);
-  return (match[1] === "+" ? 1 : -1) * minutes * 60 * 1_000;
-}
-
-function zonedMidnight(dateString, timeZone) {
-  const [year, month, day] = dateParts(dateString);
-  const utcGuess = Date.UTC(year, month - 1, day);
-  const first = new Date(utcGuess - timeZoneOffsetMs(new Date(utcGuess), timeZone));
-  return new Date(first.getTime() - timeZoneOffsetMs(first, timeZone));
-}
-
-function localDateLabel(dateString, timeZone) {
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    month: "short",
-    day: "numeric",
-  }).format(zonedMidnight(dateString, timeZone));
-}
-
-function localWeekdayLabel(dateString, timeZone) {
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    weekday: "short",
-  }).format(zonedMidnight(dateString, timeZone));
-}
-
-function localDateTimeLabel(timestampMs, timeZone) {
-  if (!Number.isFinite(timestampMs)) return "unknown time";
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(new Date(timestampMs));
-}
-
-function shortDateTimeLabel(timestampMs, timeZone) {
-  if (!Number.isFinite(timestampMs)) return "unknown time";
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(new Date(timestampMs));
-}
-
-function timestampDateLabel(timestampMs, timeZone) {
-  if (!Number.isFinite(timestampMs)) return "unknown";
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    month: "short",
-    day: "numeric",
-  }).format(new Date(timestampMs));
-}
-
-function binDateLabel(bin, timeZone) {
-  const start = localDateLabel(bin.startDateString, timeZone);
-  const lastDate = shiftCalendarDate(bin.endDateString, -1);
-  if (lastDate === bin.startDateString) return start;
-  return `${start}–${localDateLabel(lastDate, timeZone).replace(/^[A-Za-z]+ /, "")}`;
-}
-
-// Rough sans-serif advance widths in em units, for placing inline runs
-// (value + chip, legend items, pace rows). SVG has no flow layout.
+// Rough sans-serif advance widths in em units, for placing inline runs.
+// SVG has no flow layout.
 function textWidth(text, size, weight = 400) {
   let units = 0;
   for (const character of String(text)) {
@@ -307,10 +181,20 @@ function textWidth(text, size, weight = 400) {
     else if (/[Ijtfr\-()[\] ]/.test(character)) units += 0.37;
     else if (/[mwMW@%]/.test(character)) units += 0.92;
     else if (/[A-Z]/.test(character)) units += 0.7;
-    else if (/[0-9+±×−]/.test(character)) units += 0.58;
+    else if (/[0-9+±×−≈]/.test(character)) units += 0.58;
     else units += 0.55;
   }
   return units * size * (weight >= 700 ? 1.05 : 1);
+}
+
+function truncateToWidth(text, maxWidth, size, weight = 400) {
+  const value = String(text);
+  if (textWidth(value, size, weight) <= maxWidth) return value;
+  let kept = value;
+  while (kept.length > 1 && textWidth(`${kept}…`, size, weight) > maxWidth) {
+    kept = kept.slice(0, -1);
+  }
+  return `${kept.trimEnd()}…`;
 }
 
 function svgText({
@@ -345,50 +229,88 @@ function svgRect(x, y, width, height, attrs = {}) {
   return `<rect ${pieces.join(" ")}/>`;
 }
 
-// Fritsch–Carlson monotone cubic through the points; keeps the meter line
-// smooth without overshooting between observations.
-function monotonePath(points) {
-  const count = points.length;
-  if (count < 2) return "";
-  const round = (value) => Math.round(value * 100) / 100;
-  const dx = [];
-  const slope = [];
-  for (let index = 0; index < count - 1; index += 1) {
-    dx[index] = Math.max(0.01, points[index + 1].x - points[index].x);
-    slope[index] = (points[index + 1].y - points[index].y) / dx[index];
+function svgLine(x1, y1, x2, y2, attrs = {}) {
+  const pieces = [
+    `x1="${Number(x1).toFixed(2)}"`,
+    `y1="${Number(y1).toFixed(2)}"`,
+    `x2="${Number(x2).toFixed(2)}"`,
+    `y2="${Number(y2).toFixed(2)}"`,
+  ];
+  for (const [key, value] of Object.entries(attrs)) {
+    if (value === null || value === undefined) continue;
+    pieces.push(`${key}="${value}"`);
   }
-  const tangent = [slope[0]];
-  for (let index = 1; index < count - 1; index += 1) {
-    tangent.push(
-      slope[index - 1] * slope[index] <= 0
-        ? 0
-        : (slope[index - 1] + slope[index]) / 2,
-    );
-  }
-  tangent.push(slope[count - 2]);
-  for (let index = 0; index < count - 1; index += 1) {
-    if (slope[index] === 0) {
-      tangent[index] = 0;
-      tangent[index + 1] = 0;
-      continue;
-    }
-    const alpha = tangent[index] / slope[index];
-    const beta = tangent[index + 1] / slope[index];
-    const magnitude = alpha * alpha + beta * beta;
-    if (magnitude > 9) {
-      const tau = 3 / Math.sqrt(magnitude);
-      tangent[index] = tau * alpha * slope[index];
-      tangent[index + 1] = tau * beta * slope[index];
-    }
-  }
-  let path = `M ${round(points[0].x)} ${round(points[0].y)}`;
-  for (let index = 0; index < count - 1; index += 1) {
-    const h = dx[index];
-    path += ` C ${round(points[index].x + h / 3)} ${round(points[index].y + (tangent[index] * h) / 3)}` +
-      ` ${round(points[index + 1].x - h / 3)} ${round(points[index + 1].y - (tangent[index + 1] * h) / 3)}` +
-      ` ${round(points[index + 1].x)} ${round(points[index + 1].y)}`;
-  }
-  return path;
+  return `<line ${pieces.join(" ")}/>`;
+}
+
+function chip(x, y, label, { fill, stroke, color, size = 11.5, weight = 700, anchor = "start", mono = false }) {
+  const width = textWidth(label, size, weight) + 14;
+  const left = anchor === "middle" ? x - width / 2 : anchor === "end" ? x - width : x;
+  return {
+    width,
+    markup: [
+      svgRect(left, y - 13, width, 19, {
+        rx: 4,
+        fill: fill ?? "none",
+        stroke: stroke ?? null,
+        "stroke-width": stroke ? 1 : null,
+      }),
+      svgText({ x: left + 7, y: y + 1, value: label, fill: color, size, weight, mono }),
+    ].join("\n"),
+  };
+}
+
+function localDateLabel(dateString, timeZone) {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    month: "short",
+    day: "numeric",
+  }).format(zonedMidnight(dateString, timeZone));
+}
+
+function localWeekdayLabel(dateString, timeZone) {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    weekday: "short",
+  }).format(zonedMidnight(dateString, timeZone));
+}
+
+function shortDateTimeLabel(timestampMs, timeZone) {
+  if (!Number.isFinite(timestampMs)) return "unknown time";
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(timestampMs));
+}
+
+function timeOnlyLabel(timestampMs, timeZone) {
+  if (!Number.isFinite(timestampMs)) return "unknown time";
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(timestampMs));
+}
+
+function rateCardDateLabel(dateString) {
+  const parsed = new Date(`${dateString}T00:00:00Z`);
+  if (!Number.isFinite(parsed.getTime())) return String(dateString ?? "unknown");
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "UTC",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(parsed);
+}
+
+function binDateLabel(bin, timeZone) {
+  const start = localDateLabel(bin.startDateString, timeZone);
+  const lastDate = bin.lastDateString;
+  if (lastDate === bin.startDateString) return start;
+  return `${start}–${localDateLabel(lastDate, timeZone).replace(/^[A-Za-z]+ /, "")}`;
 }
 
 function labelEvery(binCount) {
@@ -397,1024 +319,1643 @@ function labelEvery(binCount) {
   return 3;
 }
 
-function fallbackProjectRows(snapshot, bounds) {
-  const startMs = bounds.start.getTime();
-  const endMs = bounds.end.getTime();
-  const totals = new Map();
-  for (const event of snapshot.events ?? []) {
-    const timestampMs = new Date(event.timestamp).getTime();
-    if (!Number.isFinite(timestampMs) || timestampMs < startMs || timestampMs >= endMs) {
-      continue;
+// Merge the view model's per-day rows into multi-day bins for narrow layouts.
+function binDailyRows(daily, binSize) {
+  const bins = [];
+  for (let index = 0; index < daily.length; index += binSize) {
+    const rows = daily.slice(index, index + binSize);
+    const models = new Map();
+    for (const row of rows) {
+      for (const dayModel of row.models) {
+        const merged = models.get(dayModel.model) ?? {
+          model: dayModel.model,
+          totalTokens: 0,
+          normalTokens: 0,
+          fastTokens: 0,
+        };
+        merged.totalTokens += dayModel.totalTokens;
+        merged.normalTokens += dayModel.normalTokens;
+        merged.fastTokens += dayModel.fastTokens;
+        models.set(dayModel.model, merged);
+      }
     }
-    const tokens = Math.max(0, Number(event.totalTokens) || 0);
-    if (!(tokens > 0)) continue;
-    const project = String(event.project || "Unlabelled activity")
-      .replace(/[\t\r\n]+/g, " ")
-      .trim() || "Unlabelled activity";
-    totals.set(project, (totals.get(project) ?? 0) + tokens);
+    bins.push({
+      startDateString: rows[0].dateString,
+      lastDateString: rows.at(-1).dateString,
+      totalTokens: rows.reduce((sum, row) => sum + row.totalTokens, 0),
+      inputTokens: rows.reduce((sum, row) => sum + row.inputTokens, 0),
+      cachedInputTokens: rows.reduce(
+        (sum, row) => sum + row.cachedInputTokens,
+        0,
+      ),
+      modelCalls: rows.reduce((sum, row) => sum + row.modelCalls, 0),
+      estimated: rows.some((row) => row.estimated),
+      partial: rows.some((row) => row.partial),
+      models: [...models.values()].sort(
+        (left, right) => modelSort(left.model, right.model),
+      ),
+    });
   }
-  return [...totals.entries()]
-    .map(([project, totalTokens]) => ({
-      project,
-      displayProject: project,
-      totalTokens,
-    }))
-    .sort((left, right) => right.totalTokens - left.totalTokens);
+  return bins;
 }
 
 export function renderTrendImage({
   snapshot,
   bounds,
-  trend = buildUsageTrend(snapshot, bounds),
+  trend = null,
   days = bounds.rangeDays ?? 7,
   options = {},
   projectRows = null,
+  viewModel = null,
+  reportTimeMs = null,
+  sourceStatus = "unchecked-cache",
 }) {
   const width = Math.max(900, Math.min(2_400, Number(options.imageWidth) || 1_280));
-  const outer = 32;
-  const plotLeft = 124;
-  const plotRight = width - 126;
-  const plotWidth = plotRight - plotLeft;
+  const outer = 28;
   const contentRight = width - outer;
   const contentWidth = width - outer * 2;
+  const wide = width >= 1_100;
 
-  // Keep daily bars while they fit at the minimum readable width; aggregate
-  // longer windows into multi-day columns so bars and labels never overlap.
-  const actual = buildActualTokenBins(snapshot, bounds, days, plotWidth, {
-    minBinWidth: MIN_BAR_WIDTH,
-    preferDaily: true,
+  const vm = viewModel ?? buildTrendReportViewModel({
+    snapshot,
+    bounds,
+    days,
+    reportTimeMs,
+    sourceStatus,
+    projectRows,
   });
-  const burn = buildBurnDayBins(trend, bounds, { days, binSize: actual.binSize });
-  const meterUsable = Boolean(trend.available && burn.totalPercent > 0);
-  const percentMode = Boolean(options.drain) && meterUsable;
-  const bars = percentMode ? burn.bins : actual.bins;
-  const binCount = actual.binCount;
-  const binTotalOf = (bin) => (percentMode ? bin.totalPercent : bin.totalTokens);
-  const maxBar = niceCeiling(
-    bars.reduce((maximum, bin) => Math.max(maximum, binTotalOf(bin)), 0),
-  );
-  const hasLine = Boolean(trend.available && (trend.points ?? []).length > 1);
+  const { summary, meter, meta } = vm;
+  const timeZone = meta.timeZone;
+  const stale = meta.sourceStatus === "stale-fallback";
+  const verified = meta.sourceStatus === "verified-current";
 
-  const totalTokens = [...actual.totals.values()].reduce((sum, value) => sum + value, 0);
-  const fastTokens = [...(actual.fastTotals?.values() ?? [])].reduce(
-    (sum, value) => sum + value,
-    0,
-  );
-  const hasFast = !percentMode && fastTokens > 0;
+  // Drain mode swaps the main chart to observed meter-drain columns; every
+  // other panel keeps actual-token semantics.
+  const drainTrend = options.drain
+    ? trend ?? buildUsageTrend(snapshot, bounds)
+    : null;
 
-  const modelCards = [...actual.totals.entries()]
-    .filter(([, value]) => value > 0 && totalTokens > 0 && value / totalTokens >= 0.01)
-    .sort((left, right) => right[1] - left[1])
-    .slice(0, 3)
-    .map(([model, value]) => ({ model, tokens: value }));
+  const elements = [];
+  const defs = [
+    "<defs>",
+    // Fast-mode tokens keep the model color and add this hatch so they stay
+    // visible in grayscale without inventing extra bar height.
+    '<pattern id="fast-mode-hatch" patternUnits="userSpaceOnUse" width="7" height="7" patternTransform="rotate(45)">',
+    '<line x1="0" y1="0" x2="0" y2="7" stroke="rgba(255,255,255,.75)" stroke-width="2"/>',
+    "</pattern>",
+    "</defs>",
+  ].join("\n");
 
-  // Prior-period per-model totals feed the delta chips.
-  const priorBounds = {
-    ...bounds,
-    startDateString: shiftCalendarDate(bounds.startDateString, -days),
-    endDateString: shiftCalendarDate(bounds.endDateString, -days),
-    start: zonedMidnight(
-      shiftCalendarDate(bounds.startDateString, -days),
-      bounds.timeZone,
-    ),
-    end: bounds.start,
-  };
-  const priorTotals = buildActualTokenBins(snapshot, priorBounds, days, plotWidth, {
-    minBinWidth: MIN_BAR_WIDTH,
-    preferDaily: true,
-  }).totals;
-
-  const latestQuotaPoint = [...(trend.points ?? [])]
-    .filter((point) => point.timestampMs <= bounds.end.getTime())
-    .at(-1);
-  const rateCard = rateCardSummary(snapshot, bounds);
-  const resetsInRange = trend.resets ?? [];
-  const expiries = resetsInRange.filter((reset) => reset.kind === "weekly-expiry").length;
-  const restarts = resetsInRange.filter(
-    (reset) => reset.kind !== "weekly-expiry" && reset.kind !== "start",
-  ).length;
-  const weeklyObservationsAll = weeklyQuotaObservations(snapshot).filter(
-    (observation) => observation.timestampMs < bounds.end.getTime(),
-  );
-  const latestResetsAtSec = weeklyObservationsAll.at(-1)?.resetsAt ?? null;
-
-  const rows = projectRows ?? fallbackProjectRows(snapshot, bounds);
-
-  // ---- Layout ----
-  const headerBaseline = 53;
-  const cardTop = 82;
-  const cardHeight = 121;
-  const chartBlockTop = cardTop + cardHeight + 18;
-  const plotTop = chartBlockTop + 40;
-  const plotHeight = 430;
-  const plotBottom = plotTop + plotHeight;
-  const chartBlockBottom = plotBottom + 70;
-  const legendBaseline = chartBlockBottom + 25;
-  const projectsRuleY = legendBaseline + 23;
-  const projectsTop = projectsRuleY + 20;
-  const projectRowCount = Math.min(4, rows.length > 3 ? 4 : rows.length);
-  const paceLineCount = hasLine && meterUsable ? 3 : 1;
-  const projectsBlockHeight = Math.max(
-    29 + projectRowCount * 29,
-    29 + paceLineCount * 34 + 44,
-    178,
-  );
-  const footnotesRuleY = projectsTop + projectsBlockHeight + 34;
-  const height = footnotesRuleY + 18 + 53 + 30;
-
-  const yearLabel = bounds.endDateString.slice(0, 4);
-  const title = `TOKEN LEDGER · ${days}-DAY TREND`;
-  const subtitle = `${localDateLabel(bounds.startDateString, bounds.timeZone)} – ${localDateLabel(bounds.endDateString, bounds.timeZone)}, ${yearLabel} · ${bounds.timeZone}`;
-  const description = percentMode
-    ? "Dark report card: model stat cards with share micro-bars, stacked columns of the observed weekly-limit percentage consumed per column split by model via rate-card credit weights, the observed weekly meter remaining as a smoothed amber line with reset breaks and callout pills, top projects with pace and runway, and provenance footnotes."
-    : "Dark report card: model stat cards with week-over-week delta chips and share micro-bars, stacked columns of local token volume by model with fast-mode usage in a darker shade, the observed weekly meter remaining as a smoothed amber line with reset breaks and callout pills, top projects with pace and runway, and provenance footnotes.";
-
-  const elements = [
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="trend-title trend-description">`,
-    `<title id="trend-title">${escapeXml(`Token Ledger · ${days}-day trend`)}</title>`,
-    `<desc id="trend-description">${escapeXml(description)}</desc>`,
-    `<rect width="100%" height="100%" fill="${COLORS.background}"/>`,
-    svgText({
+  // ---------------------------------------------------------------- header
+  function buildHeaderSection() {
+    const yearLabel = meta.endDateString.slice(0, 4);
+    const title = `TOKEN LEDGER · ${meta.rangeDays}-DAY TREND`;
+    const subtitle = `${localDateLabel(meta.startDateString, timeZone)} – ${localDateLabel(meta.endDateString, timeZone)}, ${yearLabel} · ${timeZone}`;
+    elements.push(svgText({
       x: outer,
-      y: headerBaseline,
+      y: 46,
       value: title,
-      size: 27,
+      size: 26,
       weight: 800,
-      spacing: "-0.27",
-    }),
-    svgText({
-      x: contentRight,
-      y: headerBaseline,
+      spacing: "-0.26",
+    }));
+    // The subtitle sits beside the title when the right-hand provenance block
+    // leaves room; otherwise it wraps beneath the title.
+    const subtitleX = outer + textWidth(title, 26, 800) + 18;
+    const subtitleInline =
+      subtitleX + textWidth(subtitle, 13.5) < contentRight - 270;
+    elements.push(svgText({
+      x: subtitleInline ? subtitleX : outer,
+      y: subtitleInline ? 46 : 68,
       value: subtitle,
       fill: COLORS.muted,
-      size: 14,
-      anchor: "end",
-    }),
-  ];
+      size: 13.5,
+    }));
 
-  // ---- KPI cards ----
-  const cards = [];
-  for (const { model, tokens } of modelCards) {
-    const share = totalTokens > 0 ? (tokens / totalTokens) * 100 : 0;
-    const priorValue = priorTotals.get(model) ?? 0;
-    let chip = null;
-    if (priorValue >= 1_000_000) {
-      const ratio = tokens / priorValue;
-      const delta = (ratio - 1) * 100;
-      chip = {
-        text: ratio >= 5
-          ? `${ratio.toFixed(1)}×`
-          : `${delta >= 0 ? "+" : "−"}${Math.abs(delta).toFixed(1)}%`,
-        color: delta >= 0 ? COLORS.deltaUp : COLORS.deltaDown,
-        fill: delta >= 0 ? COLORS.deltaUpFill : COLORS.deltaDownFill,
-      };
+    const generatedLabel = shortDateTimeLabel(
+      vm.provenance.snapshotGeneratedAtMs,
+      timeZone,
+    );
+    const throughLine = verified
+      ? `Report through ${shortDateTimeLabel(meta.reportThroughMs, timeZone)}`
+      : `Snapshot generated ${generatedLabel}`;
+    if (stale) {
+      const badge = chip(contentRight, 32, "STALE", {
+        fill: "rgba(246,183,60,.16)",
+        stroke: COLORS.line,
+        color: COLORS.line,
+        anchor: "end",
+      });
+      elements.push(badge.markup);
+      elements.push(svgText({
+        x: contentRight - badge.width - 8,
+        y: 33,
+        value: throughLine,
+        fill: COLORS.secondary,
+        size: 12.5,
+        anchor: "end",
+      }));
+    } else {
+      elements.push(svgText({
+        x: contentRight,
+        y: 33,
+        value: throughLine,
+        fill: COLORS.secondary,
+        size: 12.5,
+        anchor: "end",
+      }));
     }
-    cards.push({
-      swatch: styleForModel(model),
-      label: model,
-      labelColor: COLORS.muted,
-      value: compact(tokens),
-      valueColor: COLORS.ink,
-      chip,
-      suffix: null,
-      track: COLORS.track,
-      fill: styleForModel(model),
-      barPercent: share,
-      caption: `${percent(share)} of tokens`,
-      panel: COLORS.panel,
-      border: COLORS.panelBorder,
-    });
+    elements.push(svgText({
+      x: contentRight,
+      y: 51,
+      value: meter.lastObservedAtMs !== null
+        ? `Meter last observed ${shortDateTimeLabel(meter.lastObservedAtMs, timeZone)}`
+        : "No weekly meter observation",
+      fill: COLORS.muted,
+      size: 12.5,
+      anchor: "end",
+    }));
+    return subtitleInline ? 68 : 80;
   }
-  if (hasFast) {
-    const fastShare = totalTokens > 0 ? (fastTokens / totalTokens) * 100 : 0;
+
+  // -------------------------------------------------------------- KPI cards
+  function compactCards() {
+    const cards = [];
     cards.push({
-      swatch: FAST_MODE_LABEL_COLOR,
-      label: "Fast mode",
-      labelColor: COLORS.muted,
-      value: `${FAST_MODE_MULTIPLIER.toFixed(2)}× rate`,
-      valueColor: COLORS.ink,
-      chip: null,
-      suffix: null,
-      track: COLORS.track,
-      fill: FAST_MODE_LABEL_COLOR,
-      barPercent: fastShare,
-      caption: `${percent(fastShare)} of tokens · darker bar shade`,
-      panel: COLORS.panel,
-      border: COLORS.panelBorder,
+      accent: COLORS.leftAxis,
+      label: "TOTAL USAGE",
+      value: compact(summary.totalTokens),
+      unit: "tokens",
+      sub: summary.totalDeltaPercent !== null
+        ? {
+            text: deltaLabel(summary.totalDeltaPercent),
+            color: summary.totalDeltaPercent >= 0 ? COLORS.deltaUp : COLORS.deltaDown,
+            weight: 700,
+          }
+        : { text: "no prior-period baseline", color: COLORS.muted },
+      caption: summary.totalDeltaPercent !== null
+        ? "vs prior equivalent period"
+        : null,
+      sparkline: vm.daily.map((row) => row.totalTokens),
     });
-  }
-  if (hasLine && latestQuotaPoint) {
-    const lastReset = resetsInRange.at(-1);
-    const resetCaption = lastReset
-      ? `reset ${timestampDateLabel(lastReset.timestampMs, bounds.timeZone)}`
-      : latestResetsAtSec
-        ? `resets ${timestampDateLabel(latestResetsAtSec * 1_000, bounds.timeZone)}`
-        : "no reset in range";
+    const cacheKnown = summary.inputTokens > 0;
     cards.push({
-      swatch: COLORS.line,
-      label: "Weekly meter",
-      labelColor: COLORS.meterAxis,
-      value: meterLabel(latestQuotaPoint.remainingPercent),
-      valueColor: COLORS.line,
-      chip: null,
-      suffix: "remaining",
-      track: "rgba(246,183,60,.2)",
-      fill: COLORS.line,
-      barPercent: latestQuotaPoint.remainingPercent,
-      caption: `${resetCaption} · read ${timestampDateLabel(latestQuotaPoint.timestampMs, bounds.timeZone)}`,
-      panel: COLORS.meterPanel,
-      border: COLORS.meterPanelBorder,
+      accent: COLORS.cache,
+      label: "CACHE EFFICIENCY",
+      value: cacheKnown ? pct(summary.cacheRatePercent) : "—",
+      unit: cacheKnown ? "input-weighted" : null,
+      sub: cacheKnown
+        ? {
+            text: `${compact(summary.cachedInputTokens)} of ${compact(summary.inputTokens)} input cached`,
+            color: COLORS.secondary,
+          }
+        : { text: "No measured input-token breakdown", color: COLORS.muted },
+      bar: cacheKnown
+        ? { fraction: summary.cacheRatePercent / 100, fill: COLORS.cache }
+        : null,
     });
+    const hasFast = summary.fastTokens > 0;
+    cards.push({
+      accent: FAST_MODE_LABEL_COLOR,
+      label: "FAST MODE USAGE",
+      value: compact(summary.fastTokens),
+      unit: "tokens",
+      sub: hasFast
+        ? {
+            text: `${pct(summary.fastSharePercent)} of total usage`,
+            color: COLORS.secondary,
+          }
+        : { text: "no fast-mode usage in range", color: COLORS.muted },
+      bar: hasFast
+        ? { fraction: summary.fastSharePercent / 100, fill: FAST_MODE_LABEL_COLOR }
+        : null,
+    });
+    cards.push({
+      accent: COLORS.secondary,
+      label: "PROJECTS",
+      value: String(summary.activeProjects),
+      unit: "active",
+      sub: summary.topThreeProjectSharePercent !== null
+        ? {
+            text: `Top ${Math.min(3, vm.projects.length)} = ${pct(summary.topThreeProjectSharePercent)}`,
+            color: COLORS.secondary,
+          }
+        : { text: "no project activity", color: COLORS.muted },
+      histogram: [...vm.projects.map((row) => row.sharePercent),
+        vm.projectRemainder.sharePercent].filter((share) => share > 0),
+    });
+    return cards;
   }
-  if (cards.length) {
-    const gap = 12;
-    const cardWidth = (contentWidth - gap * (cards.length - 1)) / cards.length;
-    cards.forEach((card, index) => {
-      const x = outer + index * (cardWidth + gap);
-      elements.push(svgRect(x, cardTop, cardWidth, cardHeight, {
-        rx: 7,
-        fill: card.panel,
-        stroke: card.border,
-        "stroke-width": 1,
-      }));
-      elements.push(`<circle cx="${(x + 19.5).toFixed(2)}" cy="${cardTop + 21.5}" r="4.5" fill="${card.swatch}"/>`);
+
+  function drawCompactCard(card, x, y, cardWidth, cardHeight) {
+    elements.push(svgRect(x, y, cardWidth, cardHeight, {
+      rx: 8,
+      fill: COLORS.panel,
+      stroke: COLORS.panelBorder,
+      "stroke-width": 1,
+    }));
+    elements.push(svgRect(x, y, 3, cardHeight, { rx: 1.5, fill: card.accent, opacity: 0.85 }));
+    elements.push(svgText({
+      x: x + 16,
+      y: y + 25,
+      value: card.label,
+      fill: card.accent,
+      size: 12,
+      weight: 600,
+      spacing: "1.08",
+    }));
+    const valueBaseline = y + 62;
+    elements.push(svgText({
+      x: x + 16,
+      y: valueBaseline,
+      value: card.value,
+      size: 30,
+      weight: 800,
+      spacing: "-0.6",
+    }));
+    if (card.unit) {
       elements.push(svgText({
-        x: x + 32,
-        y: cardTop + 26,
-        value: card.label.toUpperCase(),
-        fill: card.labelColor,
-        size: 13,
-        spacing: "1.17",
-      }));
-      const valueBaseline = cardTop + 63;
-      elements.push(svgText({
-        x: x + 15,
+        x: x + 16 + textWidth(card.value, 30, 800) + 11,
         y: valueBaseline,
-        value: card.value,
-        fill: card.valueColor,
-        size: 29,
-        weight: 800,
-        spacing: "-0.72",
-      }));
-      const valueWidth = textWidth(card.value, 29, 800);
-      if (card.chip) {
-        const chipTextWidth = textWidth(card.chip.text, 12.5, 700);
-        const chipX = x + 15 + valueWidth + 9;
-        elements.push(svgRect(chipX, valueBaseline - 13, chipTextWidth + 12, 19, {
-          rx: 4,
-          fill: card.chip.fill,
-        }));
-        elements.push(svgText({
-          x: chipX + 6,
-          y: valueBaseline,
-          value: card.chip.text,
-          fill: card.chip.color,
-          size: 12.5,
-          weight: 700,
-        }));
-      } else if (card.suffix) {
-        elements.push(svgText({
-          x: x + 15 + valueWidth + 9,
-          y: valueBaseline,
-          value: card.suffix,
-          fill: COLORS.secondary,
-          size: 12.5,
-        }));
-      }
-      const barY = cardTop + 82;
-      const barWidth = cardWidth - 30;
-      elements.push(svgRect(x + 15, barY, barWidth, 4, { rx: 2, fill: card.track }));
-      const fillWidth = (Math.min(100, Math.max(0, card.barPercent)) / 100) * barWidth;
-      if (fillWidth > 0) {
-        elements.push(svgRect(x + 15, barY, fillWidth, 4, { rx: 2, fill: card.fill }));
-      }
-      elements.push(svgText({
-        x: x + 15,
-        y: cardTop + 103,
-        value: card.caption,
+        value: card.unit,
         fill: COLORS.muted,
         size: 12.5,
       }));
-    });
-  }
-
-  // ---- Chart grid + axes ----
-  for (const fraction of [1, 0.75, 0.5, 0.25, 0]) {
-    const y = plotBottom - fraction * plotHeight;
-    elements.push(`<line x1="${plotLeft}" y1="${y.toFixed(2)}" x2="${plotRight}" y2="${y.toFixed(2)}" stroke="${fraction === 0 ? COLORS.baseline : COLORS.grid}" stroke-width="1"/>`);
-    elements.push(svgText({
-      x: plotLeft - 14,
-      y: y + 4,
-      value: percentMode
-        ? `${Number((maxBar * fraction).toFixed(1))}%`
-        : fraction === 0
-          ? "0"
-          : compact(maxBar * fraction),
-      fill: COLORS.muted,
-      size: 13,
-      anchor: "end",
-      mono: true,
-    }));
-    if (hasLine) {
+    }
+    if (card.sub) {
       elements.push(svgText({
-        x: plotRight + 14,
-        y: y + 4,
-        value: `${Math.round(fraction * 100)}%`,
-        fill: COLORS.meterAxis,
-        size: 13,
-        mono: true,
+        x: x + 16,
+        y: y + 88,
+        value: truncateToWidth(card.sub.text, cardWidth - 32, 12.5, card.sub.weight ?? 400),
+        fill: card.sub.color,
+        size: 12.5,
+        weight: card.sub.weight ?? 400,
       }));
     }
+    if (card.caption) {
+      elements.push(svgText({
+        x: x + 16,
+        y: y + 107,
+        value: truncateToWidth(card.caption, cardWidth - 32, 12),
+        fill: COLORS.muted,
+        size: 12,
+      }));
+    }
+    if (card.bar) {
+      const barY = y + cardHeight - 22;
+      const barWidth = cardWidth - 32;
+      elements.push(svgRect(x + 16, barY, barWidth, 5, { rx: 2.5, fill: COLORS.track }));
+      const fillWidth = Math.max(0, Math.min(1, card.bar.fraction)) * barWidth;
+      if (fillWidth > 0) {
+        elements.push(svgRect(x + 16, barY, fillWidth, 5, { rx: 2.5, fill: card.bar.fill }));
+      }
+    }
+    if (card.sparkline && card.sparkline.length > 1 && card.sparkline.some((value) => value > 0)) {
+      const sparkWidth = Math.min(84, cardWidth * 0.34);
+      const sparkHeight = 26;
+      const sparkLeft = x + cardWidth - sparkWidth - 14;
+      const sparkTop = y + 16;
+      const maxValue = Math.max(...card.sparkline);
+      const points = card.sparkline.map((value, index) => {
+        const px = sparkLeft + (index / (card.sparkline.length - 1)) * sparkWidth;
+        const py = sparkTop + (1 - (maxValue > 0 ? value / maxValue : 0)) * sparkHeight;
+        return `${px.toFixed(1)},${py.toFixed(1)}`;
+      });
+      elements.push(`<polyline points="${points.join(" ")}" fill="none" stroke="${COLORS.leftAxis}" stroke-width="1.6" stroke-linejoin="round"/>`);
+    }
+    if (card.histogram && card.histogram.length) {
+      const shares = card.histogram.slice(0, 7);
+      const maxShare = Math.max(...shares);
+      const histWidth = Math.min(86, cardWidth * 0.34);
+      const slot = histWidth / shares.length;
+      const histBottom = y + cardHeight - 20;
+      shares.forEach((share, index) => {
+        const barHeight = maxShare > 0 ? Math.max(2, (share / maxShare) * 30) : 2;
+        elements.push(svgRect(
+          x + cardWidth - 14 - histWidth + index * slot,
+          histBottom - barHeight,
+          Math.max(2, slot - 3),
+          barHeight,
+          { fill: COLORS.leftAxis, opacity: 0.85, rx: 1 },
+        ));
+      });
+    }
   }
-  const axisTitleY = plotTop + plotHeight / 2;
-  elements.push(svgText({
-    x: outer + 30,
-    y: axisTitleY,
-    value: percentMode ? "OBSERVED LIMIT DRAIN" : "ACTUAL TOKEN VOLUME",
-    fill: COLORS.leftAxis,
-    size: 12,
-    anchor: "middle",
-    spacing: "2",
-  }).replace("<text ", `<text transform="rotate(-90 ${outer + 30} ${axisTitleY})" `));
-  if (hasLine) {
+
+  function drawWeeklyCard(x, y, cardWidth, cardHeight) {
+    elements.push(svgRect(x, y, cardWidth, cardHeight, {
+      rx: 8,
+      fill: COLORS.meterPanel,
+      stroke: COLORS.meterPanelBorder,
+      "stroke-width": 1,
+    }));
+    let labelX = x + 16;
     elements.push(svgText({
-      x: width - outer - 6,
-      y: axisTitleY,
-      value: "WEEKLY METER REMAINING (%)",
+      x: labelX,
+      y: y + 25,
+      value: "WEEKLY LIMIT",
       fill: COLORS.meterAxis,
       size: 12,
-      anchor: "middle",
-      spacing: "2",
-    }).replace("<text ", `<text transform="rotate(90 ${width - outer - 6} ${axisTitleY})" `));
+      weight: 600,
+      spacing: "1.08",
+    }));
+    labelX += textWidth("WEEKLY LIMIT", 12, 600) + 22;
+    if (stale) {
+      elements.push(chip(labelX, y + 21, "STALE SNAPSHOT", {
+        fill: "rgba(246,183,60,.16)",
+        stroke: COLORS.line,
+        color: COLORS.line,
+        size: 10.5,
+      }).markup);
+    }
+
+    const status = meter.status;
+    const valueBaseline = y + 60;
+    const rightX = x + cardWidth - 16;
+
+    if (status === "unavailable") {
+      elements.push(svgText({
+        x: x + 16,
+        y: valueBaseline,
+        value: "NO OBSERVATION",
+        fill: COLORS.line,
+        size: 24,
+        weight: 800,
+        spacing: "-0.24",
+      }));
+      elements.push(svgText({
+        x: x + 16,
+        y: y + 86,
+        value: truncateToWidth(
+          "No account-wide weekly-limit reading was found",
+          cardWidth - 32,
+          12.5,
+        ),
+        fill: COLORS.secondary,
+        size: 12.5,
+      }));
+      return;
+    }
+
+    // Right column: time to the scheduled reset.
+    if (meter.resetInMs !== null) {
+      elements.push(svgText({
+        x: rightX,
+        y: y + 25,
+        value: "RESETS IN",
+        fill: COLORS.meterAxis,
+        size: 11,
+        weight: 600,
+        spacing: "1",
+        anchor: "end",
+      }));
+      elements.push(svgText({
+        x: rightX,
+        y: y + 50,
+        value: durationLabel(meter.resetInMs).toUpperCase(),
+        fill: COLORS.line,
+        size: 21,
+        weight: 800,
+        anchor: "end",
+        spacing: "-0.2",
+      }));
+    }
+
+    let subLine;
+    if (status === "exhausted") {
+      elements.push(svgText({
+        x: x + 16,
+        y: valueBaseline,
+        value: "EXHAUSTED",
+        fill: COLORS.line,
+        size: 26,
+        weight: 800,
+        spacing: "-0.26",
+      }));
+      subLine = meter.firstExhaustedObservedAtMs !== null && meter.resetsAtMs !== null
+        ? `Reached 0% approximately ${durationLabel(meter.resetsAtMs - meter.firstExhaustedObservedAtMs)} before reset`
+        : "Latest reading reports 0% remaining";
+    } else {
+      elements.push(svgText({
+        x: x + 16,
+        y: valueBaseline,
+        value: meterPct(meter.remainingPercent),
+        fill: COLORS.line,
+        size: 26,
+        weight: 800,
+        spacing: "-0.26",
+      }));
+      elements.push(svgText({
+        x: x + 16 + textWidth(meterPct(meter.remainingPercent), 26, 800) + 12,
+        y: valueBaseline,
+        value: "remaining",
+        fill: COLORS.secondary,
+        size: 12.5,
+      }));
+      if (status === "at-risk" && meter.runwayDays !== null && meter.resetInMs !== null) {
+        subLine = `Current pace reaches 0% approximately ${durationLabel(meter.resetInMs - meter.runwayDays * 86_400_000)} before reset`;
+      } else if (meter.runwayDays !== null) {
+        subLine = `${meter.runwayDays.toFixed(1)} days left at this pace`;
+      } else {
+        subLine = "Runway unavailable · no usable meter drain in the active cycle";
+      }
+    }
+    elements.push(svgText({
+      x: x + 16,
+      y: y + 84,
+      value: truncateToWidth(subLine, cardWidth - 32, 12.5),
+      fill: status === "at-risk" ? COLORS.warn : COLORS.secondary,
+      size: 12.5,
+    }));
+
+    const readingY = y + 104;
+    const remainingChip = `${meterPct(meter.remainingPercent)} REMAINING`;
+    const remainingChipWidth = textWidth(remainingChip, 10.5, 700) + 14;
+    const readingWidth = rightX - remainingChipWidth - 12 - (x + 16);
+    const fullReading = `OpenAI reading · ${shortDateTimeLabel(meter.lastObservedAtMs, timeZone)}`;
+    elements.push(svgText({
+      x: x + 16,
+      y: readingY,
+      value: textWidth(fullReading, 12) <= readingWidth
+        ? fullReading
+        : truncateToWidth(
+            `OpenAI reading · ${timeOnlyLabel(meter.lastObservedAtMs, timeZone)}`,
+            readingWidth,
+            12,
+          ),
+      fill: COLORS.muted,
+      size: 12,
+    }));
+    elements.push(chip(rightX, readingY - 3, remainingChip, {
+      fill: "rgba(246,183,60,.12)",
+      stroke: "rgba(246,183,60,.55)",
+      color: COLORS.line,
+      size: 10.5,
+      anchor: "end",
+      mono: true,
+    }).markup);
+
+    const barY = y + cardHeight - 20;
+    const barWidth = cardWidth - 32;
+    elements.push(svgRect(x + 16, barY, barWidth, 5, { rx: 2.5, fill: "rgba(246,183,60,.2)" }));
+    const fillWidth = (Math.max(0, Math.min(100, meter.remainingPercent)) / 100) * barWidth;
+    if (fillWidth > 0) {
+      elements.push(svgRect(x + 16, barY, fillWidth, 5, { rx: 2.5, fill: COLORS.line }));
+    }
   }
 
-  // ---- Bars ----
-  const slotWidth = plotWidth / binCount;
-  const barWidth = Math.min(74, Math.max(MIN_BAR_WIDTH, slotWidth * 0.6));
-  const barGeometry = bars.map((bin, binIndex) => {
-    const centerX = plotLeft + (binIndex + 0.5) * slotWidth;
-    return {
-      bin,
-      centerX,
-      x: centerX - barWidth / 2,
-      topY: plotBottom - (binTotalOf(bin) / maxBar) * plotHeight,
-    };
-  });
+  function buildKpiSection(top) {
+    const cards = compactCards();
+    const cardHeight = 140;
+    const gap = 12;
+    if (wide) {
+      // Weekly card takes ~1.55 compact-card widths on one row.
+      const unit = (contentWidth - gap * 4) / (4 + 1.55);
+      cards.forEach((card, index) => {
+        drawCompactCard(card, outer + index * (unit + gap), top, unit, cardHeight);
+      });
+      drawWeeklyCard(outer + 4 * (unit + gap), top, unit * 1.55, cardHeight);
+      return top + cardHeight;
+    }
+    const half = (contentWidth - gap) / 2;
+    cards.forEach((card, index) => {
+      const row = Math.floor(index / 2);
+      const column = index % 2;
+      drawCompactCard(card, outer + column * (half + gap), top + row * (cardHeight + gap), half, cardHeight);
+    });
+    const weeklyTop = top + 2 * (cardHeight + gap);
+    drawWeeklyCard(outer, weeklyTop, contentWidth, cardHeight);
+    return weeklyTop + cardHeight;
+  }
 
-  const segmentLabels = [];
-  for (const { bin, centerX, x } of barGeometry) {
-    const entries = sortedModelEntries(bin.values);
-    let y = plotBottom;
-    for (const [model, value] of entries) {
-      const segmentHeight = (value / maxBar) * plotHeight;
-      y -= segmentHeight;
-      if (segmentHeight <= 0.4) continue;
-      const baseColor = styleForModel(model);
-      const fastValue = percentMode ? 0 : (bin.fastValues?.get(model) ?? 0);
-      const fastHeight = fastValue > 0 && value > 0
-        ? segmentHeight * Math.min(1, fastValue / value)
-        : 0;
-      elements.push(svgRect(x, y, barWidth, segmentHeight - fastHeight, { fill: baseColor }));
-      if (fastHeight > 0.5) {
-        elements.push(svgRect(x, y + segmentHeight - fastHeight, barWidth, fastHeight, {
-          fill: fastShade(baseColor),
-        }));
+  // ------------------------------------------------------------- model mix
+  function buildModelMixSection(top) {
+    const panelHeight = 46;
+    elements.push(svgRect(outer, top, contentWidth, panelHeight, {
+      rx: 8,
+      fill: COLORS.panel,
+      stroke: COLORS.panelBorder,
+      "stroke-width": 1,
+    }));
+    const labelBaseline = top + panelHeight / 2 + 4;
+    elements.push(svgText({
+      x: outer + 16,
+      y: labelBaseline,
+      value: "MODEL MIX",
+      fill: COLORS.leftAxis,
+      size: 12,
+      weight: 600,
+      spacing: "1.08",
+    }));
+    elements.push(svgText({
+      x: outer + 16 + spacedWidth("MODEL MIX", 12, 600, 1.08) + 8,
+      y: labelBaseline,
+      value: "(by tokens)",
+      fill: COLORS.muted,
+      size: 11.5,
+    }));
+
+    const rows = vm.models.filter((row) => row.totalTokens > 0);
+    if (!rows.length || !(summary.totalTokens > 0)) {
+      elements.push(svgText({
+        x: contentRight - 16,
+        y: labelBaseline,
+        value: "no usage in range",
+        fill: COLORS.muted,
+        size: 12.5,
+        anchor: "end",
+      }));
+      return top + panelHeight;
+    }
+
+    // Segments that are too narrow for an inside label move to an external
+    // caption at the right end of the strip.
+    const barLeft = outer + 170;
+    const external = [];
+    const externalRows = [];
+    let barRight = contentRight - 16;
+    const segmentLabel = (row) =>
+      `${row.model} ${pct(row.sharePercent)} (${compact(row.totalTokens)})`;
+    for (const row of [...rows].reverse()) {
+      const share = row.totalTokens / summary.totalTokens;
+      const estimatedWidth = share * (barRight - barLeft);
+      if (
+        estimatedWidth < textWidth(segmentLabel(row), 12, 600) + 18 &&
+        externalRows.length < 2 &&
+        rows.length > 1
+      ) {
+        externalRows.unshift(row);
+      } else {
+        break;
       }
-      const valueLabel = percentMode ? percent(value) : compact(value);
-      const fits = (text, size) => textWidth(text, size, 700) <= barWidth - 6;
-      if (segmentHeight >= 32 && fits(model, 13) && fits(valueLabel, 15)) {
-        const segmentCenter = y + segmentHeight / 2;
-        segmentLabels.push(svgText({
-          x: centerX,
-          y: segmentCenter - 5,
-          value: model,
-          fill: COLORS.onFill,
-          size: 13,
+    }
+    for (const row of externalRows) external.push(segmentLabel(row));
+    if (external.length) {
+      const caption = external.join(" · ");
+      barRight -= textWidth(caption, 12, 500) + 16;
+      elements.push(svgText({
+        x: contentRight - 16,
+        y: labelBaseline,
+        value: caption,
+        fill: COLORS.secondary,
+        size: 12,
+        weight: 500,
+        anchor: "end",
+      }));
+    }
+    const barY = top + panelHeight / 2 - 10;
+    let cursor = barLeft;
+    const barWidth = Math.max(60, barRight - barLeft);
+    rows.forEach((row, index) => {
+      const share = row.totalTokens / summary.totalTokens;
+      const segmentWidth = share * barWidth;
+      elements.push(svgRect(cursor, barY, segmentWidth, 20, {
+        fill: styleForModel(row.model),
+        rx: index === 0 || index === rows.length - 1 ? 3 : null,
+      }));
+      const label = segmentLabel(row);
+      if (!externalRows.includes(row) && textWidth(label, 12, 600) + 14 <= segmentWidth) {
+        elements.push(svgText({
+          x: cursor + segmentWidth / 2,
+          y: barY + 14,
+          value: label,
+          fill: "#ffffff",
+          size: 12,
+          weight: 600,
           anchor: "middle",
         }));
+      }
+      cursor += segmentWidth;
+    });
+    return top + panelHeight;
+  }
+
+  // ------------------------------------------------------------ daily chart
+  function buildDailyChartSection(top) {
+    const percentMode = Boolean(options.drain) &&
+      Boolean(drainTrend?.available) &&
+      meter.status !== "unavailable";
+
+    const plotWidthEstimate = contentWidth - 70 - 66 - 24;
+    const binSize = chooseBinSize(meta.rangeDays, plotWidthEstimate, {
+      minBinWidth: MIN_BAR_WIDTH,
+      preferDaily: true,
+    });
+    const tokenBins = binDailyRows(vm.daily, binSize);
+    const burn = percentMode
+      ? buildBurnDayBins(drainTrend, bounds, { days: meta.rangeDays, binSize })
+      : null;
+    const bins = percentMode
+      ? burn.bins.map((bin, index) => ({
+          startDateString: bin.startDateString,
+          lastDateString: shiftCalendarDate(bin.endDateString, -1),
+          totalPercent: bin.totalPercent,
+          approximate: bin.approximate,
+          values: bin.values,
+          partial: tokenBins[index]?.partial ?? false,
+          estimated: false,
+        }))
+      : tokenBins;
+    const binCount = bins.length;
+    const binTotalOf = (bin) => (percentMode ? bin.totalPercent : bin.totalTokens);
+    const maxBin = bins.reduce((maximum, bin) => Math.max(maximum, binTotalOf(bin)), 0);
+    const ceiling = reportCeiling(maxBin);
+    const meterVisible = meter.status !== "unavailable" && meter.observations.length > 0;
+
+    const panelTop = top;
+    const headerBaseline = panelTop + 27;
+    const plotLeft = outer + 70;
+    const plotRight = contentRight - (meterVisible ? 66 : 24);
+    const plotWidth = plotRight - plotLeft;
+    const plotTop = panelTop + 64;
+    const plotHeight = wide ? 330 : 300;
+    const plotBottom = plotTop + plotHeight;
+    const partialInRange = bins.some((bin) => bin.partial);
+    const labelBand = 58 + (partialInRange ? 18 : 0);
+    const panelHeight = plotBottom - panelTop + labelBand;
+    elements.push(svgRect(outer, panelTop, contentWidth, panelHeight, {
+      rx: 8,
+      fill: COLORS.panel,
+      stroke: COLORS.panelBorder,
+      "stroke-width": 1,
+    }));
+
+    // Panel header: title + legend + right axis caption.
+    elements.push(svgText({
+      x: outer + 16,
+      y: headerBaseline,
+      value: percentMode ? "OBSERVED LIMIT DRAIN" : "DAILY TOKEN VOLUME",
+      fill: COLORS.leftAxis,
+      size: 12,
+      weight: 600,
+      spacing: "1.08",
+    }));
+    elements.push(svgText({
+      x: outer + 16 +
+        spacedWidth(percentMode ? "OBSERVED LIMIT DRAIN" : "DAILY TOKEN VOLUME", 12, 600, 1.08) + 8,
+      y: headerBaseline,
+      value: percentMode ? "(meter percent by model)" : "(actual)",
+      fill: COLORS.muted,
+      size: 11.5,
+    }));
+    if (meterVisible) {
+      elements.push(svgText({
+        x: contentRight - 16,
+        y: headerBaseline,
+        value: "Meter %",
+        fill: COLORS.meterAxis,
+        size: 12,
+        weight: 600,
+        anchor: "end",
+      }));
+    }
+
+    // Legend, wrapped when narrow.
+    const legendItems = [];
+    const presentModels = vm.models
+      .filter((row) => row.totalTokens > 0)
+      .map((row) => row.model)
+      .sort(modelSort);
+    for (const model of presentModels) {
+      legendItems.push({ kind: "swatch", fill: styleForModel(model), label: model });
+    }
+    if (!percentMode && summary.fastTokens > 0) {
+      legendItems.push({ kind: "hatch", label: "Fast mode" });
+    }
+    if (meterVisible) {
+      legendItems.push({ kind: "dot", label: "OpenAI observation" });
+      legendItems.push({ kind: "solid", label: "Reported interval" });
+      legendItems.push({ kind: "dashed", label: "Unobserved gap" });
+    }
+    let legendX = outer + 16;
+    let legendY = headerBaseline + 21;
+    const legendLimit = contentRight - 16;
+    for (const item of legendItems) {
+      const swatchWidth = item.kind === "swatch" || item.kind === "hatch" ? 13 : 20;
+      const itemWidth = swatchWidth + 7 + textWidth(item.label, 12) + 18;
+      if (legendX + itemWidth > legendLimit && legendX > outer + 16) {
+        legendX = outer + 16;
+        legendY += 18;
+      }
+      if (item.kind === "swatch") {
+        elements.push(svgRect(legendX, legendY - 9, 13, 10, { fill: item.fill, rx: 2 }));
+      } else if (item.kind === "hatch") {
+        elements.push(svgRect(legendX, legendY - 9, 13, 10, { fill: COLORS.leftAxis, rx: 2 }));
+        elements.push(svgRect(legendX, legendY - 9, 13, 10, { fill: "url(#fast-mode-hatch)", rx: 2 }));
+      } else if (item.kind === "dot") {
+        elements.push(`<circle cx="${legendX + 10}" cy="${legendY - 4}" r="3.6" fill="${COLORS.line}"/>`);
+      } else if (item.kind === "solid") {
+        elements.push(svgLine(legendX, legendY - 4, legendX + 20, legendY - 4, {
+          stroke: COLORS.line,
+          "stroke-width": 2.4,
+        }));
+      } else {
+        elements.push(svgLine(legendX, legendY - 4, legendX + 20, legendY - 4, {
+          stroke: COLORS.line,
+          "stroke-width": 2,
+          "stroke-dasharray": "4 4",
+        }));
+      }
+      elements.push(svgText({
+        x: legendX + swatchWidth + 7,
+        y: legendY,
+        value: item.label,
+        fill: COLORS.secondary,
+        size: 12,
+      }));
+      legendX += itemWidth;
+    }
+
+    // Meter pixel geometry is needed both by the overlay and by bar-total
+    // placement (totals step above the line when it crosses their band).
+    const spanMs = meta.requestedEndMs - meta.startMs;
+    const xForTs = (timestampMs) =>
+      plotLeft +
+      Math.max(0, Math.min(1, spanMs > 0 ? (timestampMs - meta.startMs) / spanMs : 0)) *
+        plotWidth;
+    const yForRemaining = (value) =>
+      plotTop + (1 - Math.max(0, Math.min(100, value)) / 100) * plotHeight;
+    const pixelSegments = meterVisible
+      ? meter.segments.map((segment) => ({
+          x0: xForTs(segment.fromMs),
+          y0: yForRemaining(segment.fromPercent),
+          x1: xForTs(segment.toMs),
+          y1: yForRemaining(segment.toPercent),
+        }))
+      : [];
+    const lineTopWithin = (x0, x1, bandTop, bandBottom) => {
+      let top = Infinity;
+      for (const segment of pixelSegments) {
+        if (segment.x1 < x0 || segment.x0 > x1) continue;
+        const clip0 = Math.max(x0, segment.x0);
+        const clip1 = Math.min(x1, segment.x1);
+        if (clip1 < clip0) continue;
+        const yAt = (x) =>
+          segment.y0 +
+          (segment.x1 === segment.x0
+            ? 0
+            : ((x - segment.x0) / (segment.x1 - segment.x0)) * (segment.y1 - segment.y0));
+        const yLow = Math.min(yAt(clip0), yAt(clip1));
+        const yHigh = Math.max(yAt(clip0), yAt(clip1));
+        if (yLow <= bandBottom && yHigh >= bandTop) top = Math.min(top, yLow);
+      }
+      return Number.isFinite(top) ? top : null;
+    };
+
+    // Grid and axes.
+    for (const fraction of [1, 0.75, 0.5, 0.25, 0]) {
+      const y = plotBottom - fraction * plotHeight;
+      elements.push(svgLine(plotLeft, y, plotRight, y, {
+        stroke: fraction === 0 ? COLORS.baseline : COLORS.grid,
+        "stroke-width": 1,
+      }));
+      elements.push(svgText({
+        x: plotLeft - 12,
+        y: y + 4,
+        value: percentMode
+          ? `${Number((ceiling * fraction).toFixed(1))}%`
+          : fraction === 0
+            ? "0"
+            : compact(ceiling * fraction),
+        fill: COLORS.muted,
+        size: 12,
+        anchor: "end",
+        mono: true,
+      }));
+      if (meterVisible) {
+        elements.push(svgText({
+          x: plotRight + 12,
+          y: y + 4,
+          value: `${Math.round(fraction * 100)}%`,
+          fill: COLORS.meterAxis,
+          size: 12,
+          mono: true,
+        }));
+      }
+    }
+
+    // Bars.
+    const slotWidth = plotWidth / binCount;
+    const barWidth = Math.min(86, Math.max(MIN_BAR_WIDTH, slotWidth * 0.62));
+    const labelStep = labelEvery(binCount);
+    const isLabeledColumn = (index) => index % labelStep === 0 || index === binCount - 1;
+    const segmentLabels = [];
+
+    bins.forEach((bin, binIndex) => {
+      const centerX = plotLeft + (binIndex + 0.5) * slotWidth;
+      const x = centerX - barWidth / 2;
+      if (bin.partial) {
+        elements.push(svgRect(centerX - slotWidth / 2 + 2, plotTop, slotWidth - 4, plotHeight, {
+          fill: "rgba(255,255,255,.03)",
+        }));
+      }
+      const entries = percentMode
+        ? [...bin.values.entries()]
+            .filter(([, value]) => value > 0)
+            .sort(([left], [right]) => modelSort(left, right))
+            .map(([model, value]) => ({ model, totalTokens: value, fastTokens: 0 }))
+        : [...bin.models].sort((left, right) => modelSort(left.model, right.model));
+      let y = plotBottom;
+      for (const entry of entries) {
+        const value = entry.totalTokens;
+        const segmentHeight = (value / ceiling) * plotHeight;
+        y -= segmentHeight;
+        if (segmentHeight <= 0.4) continue;
+        const baseColor = styleForModel(entry.model);
+        elements.push(svgRect(x, y, barWidth, segmentHeight, { fill: baseColor }));
+        // Fast-mode tokens are a subset of the segment: same color, hatched,
+        // never extra height.
+        const fastFraction = value > 0 ? Math.min(1, entry.fastTokens / value) : 0;
+        const fastHeight = segmentHeight * fastFraction;
+        if (fastHeight > 0.5) {
+          elements.push(svgRect(x, y, barWidth, fastHeight, {
+            fill: "url(#fast-mode-hatch)",
+          }));
+        }
+        const valueLabel = percentMode ? pct(value) : compact(value);
+        const fits = (text, size) => textWidth(text, size, 700) <= barWidth - 6;
+        if (segmentHeight >= 34 && fits(entry.model, 12.5) && fits(valueLabel, 14)) {
+          const segmentCenter = y + segmentHeight / 2;
+          segmentLabels.push(svgText({
+            x: centerX,
+            y: segmentCenter - 4,
+            value: entry.model,
+            fill: COLORS.onFill,
+            size: 12.5,
+            anchor: "middle",
+          }));
+          segmentLabels.push(svgText({
+            x: centerX,
+            y: segmentCenter + 13,
+            value: valueLabel,
+            fill: "#ffffff",
+            size: 14,
+            weight: 700,
+            anchor: "middle",
+          }));
+        }
+      }
+      const total = binTotalOf(bin);
+      if (total > 0 && isLabeledColumn(binIndex)) {
+        const estimatedPrefix = (percentMode ? bin.approximate : bin.estimated) ? "≈" : "";
+        let labelTop = y;
+        const clearance = lineTopWithin(
+          centerX - barWidth / 2 - 8,
+          centerX + barWidth / 2 + 8,
+          labelTop - 28,
+          labelTop + 8,
+        );
+        if (clearance !== null) labelTop = Math.min(labelTop, clearance);
         segmentLabels.push(svgText({
           x: centerX,
-          y: segmentCenter + 13,
-          value: valueLabel,
-          fill: "#ffffff",
+          y: Math.max(plotTop + 12, labelTop - 9),
+          value: percentMode
+            ? `${estimatedPrefix}${pct(total)}`
+            : `${estimatedPrefix}${compact(total)}`,
           size: 15,
           weight: 700,
           anchor: "middle",
         }));
       }
-    }
-  }
-
-  // ---- Meter line: per-cycle smoothed segments with reset breaks ----
-  const yForRemaining = (value) =>
-    plotTop + (1 - Math.max(0, Math.min(100, value)) / 100) * plotHeight;
-  const xForTimestamp = (timestampMs) => {
-    const span = bounds.end.getTime() - bounds.start.getTime();
-    const ratio = span > 0 ? (timestampMs - bounds.start.getTime()) / span : 0;
-    return plotLeft + Math.max(0, Math.min(1, ratio)) * plotWidth;
-  };
-
-  let resetMarks = [];
-  let binDots = [];
-  let pills = [];
-  const lineSegments = [];
-  if (hasLine) {
-    const cycles = new Map();
-    for (const point of trend.points ?? []) {
-      const cycle = cycles.get(point.cycle) ?? [];
-      cycle.push(point);
-      cycles.set(point.cycle, cycle);
-    }
-    const orderedCycles = [...cycles.values()].sort(
-      (left, right) => left[0].timestampMs - right[0].timestampMs,
-    );
-
-    resetMarks = resetsInRange
-      .filter((reset) => reset.kind !== "start")
-      .map((reset) => {
-        // Nudge a reset that lands inside a column into the gutter to its
-        // right, so the dashed break never crosses the bar or its total.
-        let x = xForTimestamp(Math.max(bounds.start.getTime(), reset.timestampMs));
-        const binIndex = Math.floor((x - plotLeft) / slotWidth);
-        const barRight = plotLeft + (binIndex + 0.5) * slotWidth + barWidth / 2;
-        if (x >= barRight - barWidth && x <= barRight) {
-          x = Math.min(barRight + 14, plotRight - 4);
+      // Day labels.
+      if (isLabeledColumn(binIndex)) {
+        const weekday = binSize === 1 && bin.lastDateString === bin.startDateString
+          ? localWeekdayLabel(bin.startDateString, timeZone).toUpperCase()
+          : "";
+        if (bin.partial) {
+          elements.push(chip(centerX, plotBottom + 21, "PARTIAL", {
+            fill: "rgba(255,255,255,.06)",
+            stroke: COLORS.baseline,
+            color: COLORS.secondary,
+            size: 10.5,
+            anchor: "middle",
+          }).markup);
+        } else if (weekday) {
+          elements.push(svgText({
+            x: centerX,
+            y: plotBottom + 25,
+            value: weekday,
+            fill: COLORS.muted,
+            size: 12,
+            anchor: "middle",
+            spacing: "1.44",
+          }));
         }
-        return {
-          x,
-          label: reset.kind === "weekly-expiry" ? "RESET 100%" : "RESTART 100%",
-        };
-      });
-
-    for (const [cycleIndex, cyclePoints] of orderedCycles.entries()) {
-      // Thin to at most one point per 2px so the path stays light while the
-      // spline still follows every meaningful movement.
-      const thinned = [];
-      for (const point of cyclePoints) {
-        const x = xForTimestamp(point.timestampMs);
-        const y = yForRemaining(point.remainingPercent);
-        const previous = thinned.at(-1);
-        if (previous && x - previous.x < 2) {
-          previous.y = y;
-          previous.remainingPercent = point.remainingPercent;
-          previous.timestampMs = point.timestampMs;
-        } else {
-          thinned.push({
-            x,
-            y,
-            remainingPercent: point.remainingPercent,
-            timestampMs: point.timestampMs,
-          });
-        }
-      }
-      if (cycleIndex > 0 && thinned.length) {
-        const reset = resetMarks[cycleIndex - 1];
-        if (reset) {
-          // Observations between the true reset moment and the nudged break
-          // would draw left of the dashed line; drop them when enough of the
-          // cycle remains to its right.
-          const beyond = thinned.filter((point) => point.x > reset.x + 1);
-          if (beyond.length >= 2) thinned.splice(0, thinned.length - beyond.length);
-          if (reset.x < thinned[0].x - 1) {
-            thinned.unshift({
-              x: reset.x,
-              y: yForRemaining(100),
-              synthetic: true,
-            });
-          }
-        }
-      }
-      const path = monotonePath(thinned);
-      if (path) {
-        elements.push(`<path d="${path}" fill="none" stroke="${COLORS.line}" stroke-width="3" stroke-linecap="round"/>`);
-        lineSegments.push(thinned);
-      }
-    }
-
-    // One dot per labeled column: the last observation inside that column.
-    const observed = (trend.points ?? []).filter((point) => point.observed);
-    const step = labelEvery(binCount);
-    const resetBinIndexes = new Set(resetMarks.map((reset) =>
-      Math.max(0, Math.min(binCount - 1, Math.floor((reset.x - plotLeft) / slotWidth)))));
-    for (let binIndex = 0; binIndex < binCount; binIndex += 1) {
-      if (binIndex % step !== 0 && binIndex !== binCount - 1) continue;
-      if (resetBinIndexes.has(binIndex)) continue;
-      const binEndMs = zonedMidnight(
-        bars[binIndex].endDateString,
-        bounds.timeZone,
-      ).getTime();
-      const binStartMs = zonedMidnight(
-        bars[binIndex].startDateString,
-        bounds.timeZone,
-      ).getTime();
-      const point = observed.findLast(
-        (candidate) =>
-          candidate.timestampMs >= binStartMs && candidate.timestampMs < binEndMs,
-      );
-      if (!point) continue;
-      binDots.push({
-        binIndex,
-        x: xForTimestamp(point.timestampMs),
-        y: yForRemaining(point.remainingPercent),
-        remainingPercent: point.remainingPercent,
-      });
-    }
-    for (const dot of binDots) {
-      elements.push(`<circle cx="${dot.x.toFixed(2)}" cy="${dot.y.toFixed(2)}" r="4" fill="${COLORS.line}"/>`);
-    }
-
-    // Stagger dense reset labels across lanes: a label joins the first lane
-    // whose previous label sits far enough to its left.
-    const laneRight = [];
-    for (const reset of resetMarks) {
-      elements.push(`<line x1="${reset.x.toFixed(2)}" y1="${plotTop}" x2="${reset.x.toFixed(2)}" y2="${plotBottom}" stroke="rgba(246,183,60,.5)" stroke-width="2" stroke-dasharray="5 6"/>`);
-      let lane = laneRight.findIndex((right) => reset.x - right >= 112);
-      if (lane < 0) {
-        lane = laneRight.length < 3
-          ? laneRight.length
-          : laneRight.indexOf(Math.min(...laneRight));
-      }
-      laneRight[lane] = reset.x;
-      elements.push(svgText({
-        x: reset.x,
-        y: chartBlockTop + 26 - lane * 16,
-        value: reset.label,
-        fill: COLORS.line,
-        size: 13,
-        anchor: "middle",
-        mono: true,
-      }));
-    }
-
-    // Callout pills: at most four, spread across the observed dots; the last
-    // one sits under its own point so it never covers a post-reset stroke.
-    const pillSources = binDots;
-    let picked = pillSources;
-    if (pillSources.length > 4) {
-      const lastIndex = pillSources.length - 1;
-      const indexes = [...new Set([
-        0,
-        Math.round(lastIndex / 3),
-        Math.round((2 * lastIndex) / 3),
-        lastIndex,
-      ])];
-      picked = indexes.map((index) => pillSources[index]);
-    }
-    pills = picked.map((dot, pickIndex) => {
-      const label = meterLabel(dot.remainingPercent);
-      const pillWidth = label.length * 8.4 + 18;
-      const below = pickIndex === picked.length - 1;
-      let x = below ? dot.x - pillWidth / 2 : dot.x + barWidth / 2 + 10;
-      if (x + pillWidth > plotRight + 30) x = dot.x - pillWidth - barWidth / 2 - 10;
-      const centerY = below
-        ? Math.min(plotBottom - 14, dot.y + 26)
-        : Math.max(plotTop + 14, dot.y - 24);
-      return { x, y: centerY - 13, w: pillWidth, h: 26, tx: x + pillWidth / 2, ty: centerY + 5, label };
-    });
-  }
-
-  // ---- Bar totals and day labels (drawn over the line like the labels) ----
-  elements.push(...segmentLabels);
-  // Where the line passes through a horizontal span at band height, from the
-  // thinned polylines; keeps each column total clear of the amber stroke.
-  const lineTopIfCrossing = (x0, x1, bandTop, bandBottom) => {
-    let top = Infinity;
-    for (const segment of lineSegments) {
-      for (let index = 0; index < segment.length - 1; index += 1) {
-        const from = segment[index];
-        const to = segment[index + 1];
-        if (to.x < x0 || from.x > x1) continue;
-        const clip0 = Math.max(x0, from.x);
-        const clip1 = Math.min(x1, to.x);
-        if (clip1 < clip0) continue;
-        const yAt = (x) =>
-          from.y + (to.x === from.x ? 0 : ((x - from.x) / (to.x - from.x)) * (to.y - from.y));
-        const yLow = Math.min(yAt(clip0), yAt(clip1));
-        const yHigh = Math.max(yAt(clip0), yAt(clip1));
-        if (yLow <= bandBottom && yHigh >= bandTop) top = Math.min(top, yLow);
-      }
-    }
-    return top;
-  };
-  const labelStep = labelEvery(binCount);
-  const isLabeledColumn = (binIndex) =>
-    binIndex % labelStep === 0 || binIndex === binCount - 1;
-  for (const [binIndex, { bin, centerX, topY }] of barGeometry.entries()) {
-    const binTotal = binTotalOf(bin);
-    // Dense windows only caption the columns that carry date labels; a total
-    // on all 30 daily columns would overlap its neighbours.
-    if (binTotal > 0 && isLabeledColumn(binIndex)) {
-      // The total label sits in the band just above the stack; step it above
-      // the line only when the line actually crosses that band.
-      const lineTop = lineTopIfCrossing(
-        centerX - barWidth / 2 - 6,
-        centerX + barWidth / 2 + 6,
-        topY - 32,
-        topY + 8,
-      );
-      const clearedTop = Number.isFinite(lineTop) ? Math.min(topY, lineTop) : topY;
-      elements.push(svgText({
-        x: centerX,
-        y: clearedTop - 13,
-        value: percentMode
-          ? `${bin.approximate ? "≈" : ""}${percent(binTotal)}`
-          : compact(binTotal),
-        fill: COLORS.ink,
-        size: 16,
-        weight: 700,
-        anchor: "middle",
-      }));
-    }
-    if (isLabeledColumn(binIndex)) {
-      const weekday = actual.binSize === 1
-        ? localWeekdayLabel(bin.startDateString, bounds.timeZone).toUpperCase()
-        : "";
-      if (weekday) {
         elements.push(svgText({
           x: centerX,
-          y: plotBottom + 32,
-          value: weekday,
-          fill: COLORS.muted,
-          size: 13,
+          y: plotBottom + (weekday || bin.partial ? 45 : 34),
+          value: binDateLabel(bin, timeZone),
+          fill: COLORS.secondary,
+          size: 14,
           anchor: "middle",
-          spacing: "1.56",
         }));
+        if (bin.partial && meta.partialFinalDay) {
+          elements.push(svgText({
+            x: centerX,
+            y: plotBottom + 62,
+            value: `THROUGH ${timeOnlyLabel(meta.effectiveEndMs, timeZone).toUpperCase()}`,
+            fill: COLORS.muted,
+            size: 10.5,
+            anchor: "middle",
+            spacing: "0.63",
+          }));
+        }
       }
-      elements.push(svgText({
-        x: centerX,
-        y: plotBottom + (weekday ? 54 : 40),
-        value: binDateLabel(bin, bounds.timeZone),
-        fill: COLORS.secondary,
-        size: 15,
-        anchor: "middle",
-      }));
-    }
-  }
-  for (const pill of pills) {
-    elements.push(svgRect(pill.x, pill.y, pill.w, pill.h, {
-      rx: 6,
-      fill: COLORS.background,
-      stroke: COLORS.line,
-      "stroke-width": 1.2,
-    }));
-    elements.push(svgText({
-      x: pill.tx,
-      y: pill.ty,
-      value: pill.label,
-      fill: COLORS.line,
-      size: 13,
-      anchor: "middle",
-      mono: true,
-    }));
-  }
-
-  // ---- Legend row ----
-  const legendModels = sortedModelEntries(
-    percentMode ? burn.totals : actual.totals,
-  ).map(([model]) => model);
-  let legendX = outer;
-  const legendItem = (swatchMarkup, swatchWidth, label) => {
-    elements.push(swatchMarkup);
-    elements.push(svgText({
-      x: legendX + swatchWidth + 9,
-      y: legendBaseline,
-      value: label,
-      fill: COLORS.secondary,
-      size: 13.5,
-    }));
-    legendX += swatchWidth + 9 + textWidth(label, 13.5) + 24;
-  };
-  for (const model of legendModels) {
-    legendItem(
-      svgRect(legendX, legendBaseline - 10, 13, 11, { fill: styleForModel(model) }),
-      13,
-      model,
-    );
-  }
-  if (hasFast && legendModels.length) {
-    legendItem(
-      svgRect(legendX, legendBaseline - 10, 13, 11, {
-        fill: fastShade(styleForModel(legendModels[0])),
-      }),
-      13,
-      "Darker shade = fast mode",
-    );
-  }
-  if (hasLine) {
-    legendItem(
-      svgRect(legendX, legendBaseline - 6, 20, 3, { fill: COLORS.line }),
-      20,
-      percentMode
-        ? "Bars = observed meter drops · line = weekly meter remaining (%)"
-        : "Observed weekly meter remaining (%)",
-    );
-  }
-
-  // ---- Projects + pace ----
-  elements.push(`<line x1="${outer}" y1="${projectsRuleY}" x2="${contentRight}" y2="${projectsRuleY}" stroke="${COLORS.rule}" stroke-width="1"/>`);
-  const sectionBaseline = projectsTop + 10;
-  const columnGap = 28;
-  const leftColumnWidth = ((contentWidth - columnGap) * 1.55) / 2.55;
-  const leftColumnRight = outer + leftColumnWidth;
-  const dividerX = leftColumnRight + columnGap;
-  const paceX = dividerX + 28;
-
-  elements.push(svgText({
-    x: outer,
-    y: sectionBaseline,
-    value: "WHERE IT WENT · TOP PROJECTS",
-    fill: COLORS.muted,
-    size: 12,
-    spacing: "1.32",
-  }));
-  const topRows = rows.slice(0, 3);
-  const restRows = rows.slice(3);
-  const topTokens = topRows.reduce((sum, row) => sum + row.totalTokens, 0);
-  elements.push(svgText({
-    x: leftColumnRight,
-    y: sectionBaseline,
-    value: `${rows.length} ${rows.length === 1 ? "project" : "projects"} active · top ${topRows.length} = ${totalTokens > 0 ? percent((topTokens / totalTokens) * 100) : "—"} of tokens`,
-    fill: COLORS.muted,
-    size: 12.5,
-    anchor: "end",
-  }));
-
-  const displayRows = topRows.map((row, index) => ({
-    rank: String(index + 1).padStart(2, "0"),
-    name: row.displayProject ?? row.project,
-    tokens: row.totalTokens,
-    fill: COLORS.leftAxis,
-    muted: false,
-  }));
-  if (restRows.length) {
-    displayRows.push({
-      rank: null,
-      name: restRows.length === 1
-        ? (restRows[0].displayProject ?? restRows[0].project)
-        : `${restRows.length} other projects`,
-      tokens: restRows.reduce((sum, row) => sum + row.totalTokens, 0),
-      fill: COLORS.remainderBar,
-      muted: true,
     });
+
+    // Meter overlay: sampled observations only. Dots mark real readings,
+    // solid runs mark spans confirmed by repeated equal readings, dashed runs
+    // bridge unobserved gaps. The line never extends past the last reading.
+    if (meterVisible) {
+      for (const reset of meter.resets) {
+        const x = xForTs(reset.timestampMs);
+        elements.push(svgLine(x, plotTop, x, plotBottom, {
+          stroke: "rgba(246,183,60,.5)",
+          "stroke-width": 2,
+          "stroke-dasharray": reset.inferred ? "5 6" : null,
+        }));
+        elements.push(chip(
+          Math.max(plotLeft + 46, Math.min(plotRight - 46, x)),
+          plotTop + 13,
+          reset.kind === "weekly-expiry" ? "RESET (100%)" : "RESTART (100%)",
+          {
+            fill: COLORS.background,
+            stroke: COLORS.line,
+            color: COLORS.line,
+            size: 10.5,
+            anchor: "middle",
+            mono: true,
+          },
+        ).markup);
+      }
+
+      for (const segment of meter.segments) {
+        elements.push(svgLine(
+          xForTs(segment.fromMs),
+          yForRemaining(segment.fromPercent),
+          xForTs(segment.toMs),
+          yForRemaining(segment.toPercent),
+          {
+            stroke: COLORS.line,
+            "stroke-width": segment.kind === "confirmed" ? 2.6 : 2,
+            "stroke-dasharray": segment.kind === "confirmed" ? null : "5 5",
+            "stroke-linecap": "round",
+          },
+        ));
+      }
+      for (const point of meter.observations) {
+        if (!point.observed) continue;
+        elements.push(`<circle cx="${xForTs(point.timestampMs).toFixed(2)}" cy="${yForRemaining(point.remainingPercent).toFixed(2)}" r="3.8" fill="${COLORS.line}"/>`);
+      }
+      const latest = meter.observations.at(-1);
+      if (latest) {
+        const label = `${Math.round(latest.remainingPercent)}%`;
+        const px = xForTs(latest.timestampMs);
+        const py = yForRemaining(latest.remainingPercent);
+        const anchorEnd = px > plotRight - 70;
+        elements.push(chip(
+          anchorEnd ? px - 10 : px + 10,
+          Math.max(plotTop + 14, Math.min(plotBottom - 6, py + 1)),
+          label,
+          {
+            fill: COLORS.background,
+            stroke: COLORS.line,
+            color: COLORS.line,
+            size: 11,
+            anchor: anchorEnd ? "end" : "start",
+            mono: true,
+          },
+        ).markup);
+      }
+    }
+
+    elements.push(...segmentLabels);
+    return panelTop + panelHeight;
   }
-  const rowGap = 12;
-  const rankX = outer;
-  const nameX = rankX + 22 + rowGap;
-  const projectBarX = nameX + 190 + rowGap;
-  const tokensRight = leftColumnRight - 62 - rowGap;
-  const projectBarWidth = tokensRight - (86 + rowGap) - projectBarX;
-  displayRows.forEach((row, index) => {
-    const centerY = projectsTop + 29 + index * 29 + 9;
-    if (row.rank) {
+
+  // ------------------------------------------------------------ lower panels
+  function panelFrame(x, y, panelWidth, panelHeight, title, suffix = null) {
+    elements.push(svgRect(x, y, panelWidth, panelHeight, {
+      rx: 8,
+      fill: COLORS.panel,
+      stroke: COLORS.panelBorder,
+      "stroke-width": 1,
+    }));
+    elements.push(svgText({
+      x: x + 16,
+      y: y + 25,
+      value: title,
+      fill: COLORS.leftAxis,
+      size: 12,
+      weight: 600,
+      spacing: "1.08",
+    }));
+    if (suffix) {
       elements.push(svgText({
-        x: rankX,
-        y: centerY + 5,
-        value: row.rank,
+        x: x + 16 + spacedWidth(title, 12, 600, 1.08) + 8,
+        y: y + 25,
+        value: suffix,
         fill: COLORS.muted,
-        size: 13,
-        mono: true,
+        size: 11.5,
       }));
     }
-    elements.push(svgText({
-      x: nameX,
-      y: centerY + 5,
-      value: row.name,
-      fill: row.muted ? COLORS.muted : COLORS.ink,
-      size: 15,
-      weight: row.muted ? 400 : 700,
-    }));
-    elements.push(svgRect(projectBarX, centerY - 5, projectBarWidth, 10, {
-      rx: 2,
-      fill: COLORS.projectTrack,
-    }));
-    const share = totalTokens > 0 ? (row.tokens / totalTokens) * 100 : 0;
-    const fillWidth = (Math.min(100, share) / 100) * projectBarWidth;
-    if (fillWidth > 0) {
-      elements.push(svgRect(projectBarX, centerY - 5, fillWidth, 10, {
-        rx: 2,
-        fill: row.fill,
-      }));
-    }
-    elements.push(svgText({
-      x: tokensRight,
-      y: centerY + 5,
-      value: compact(row.tokens),
-      fill: row.muted ? COLORS.secondary : COLORS.ink,
-      size: 15,
-      weight: 700,
-      anchor: "end",
-    }));
-    elements.push(svgText({
-      x: leftColumnRight,
-      y: centerY + 5,
-      value: percent(share),
-      fill: COLORS.muted,
-      size: 13.5,
-      anchor: "end",
-    }));
-  });
-
-  elements.push(`<line x1="${dividerX}" y1="${projectsTop}" x2="${dividerX}" y2="${projectsTop + projectsBlockHeight}" stroke="${COLORS.rule}" stroke-width="1"/>`);
-  elements.push(svgText({
-    x: paceX,
-    y: sectionBaseline,
-    value: "PACE & RUNWAY",
-    fill: COLORS.muted,
-    size: 12,
-    spacing: "1.32",
-  }));
-
-  const generatedAtMs = new Date(snapshot.generatedAt).getTime();
-  const paceLines = [];
-  let paceNote = null;
-  const dailyAverage = totalTokens / Math.max(1, days);
-  if (hasLine && meterUsable && latestQuotaPoint && totalTokens > 0) {
-    const tokensPerPercent = totalTokens / burn.totalPercent;
-    const burnPerDay = dailyAverage / tokensPerPercent;
-    const runwayDays = burnPerDay > 0
-      ? latestQuotaPoint.remainingPercent / burnPerDay
-      : null;
-    if (runwayDays !== null) {
-      paceLines.push({
-        value: `${runwayDays.toFixed(1)} days`,
-        size: 24,
-        weight: 800,
-        color: COLORS.line,
-        detail: "of meter left at this pace",
-      });
-    }
-    paceLines.push({
-      value: `${compact(dailyAverage)} / day`,
-      size: 18,
-      weight: 700,
-      color: COLORS.ink,
-      detail: `${days}-day average · ${burnPerDay.toFixed(1)}% of meter`,
-    });
-    paceLines.push({
-      value: `${compact(tokensPerPercent)} / 1%`,
-      size: 18,
-      weight: 700,
-      color: COLORS.ink,
-      detail: "tokens per meter point",
-    });
-    const daysToReset = latestResetsAtSec !== null && Number.isFinite(generatedAtMs)
-      ? (latestResetsAtSec * 1_000 - generatedAtMs) / 86_400_000
-      : null;
-    if (runwayDays !== null && daysToReset !== null && daysToReset > 0) {
-      const resetIn = Math.max(1, Math.round(daysToReset));
-      const resetInLabel = `${resetIn} ${resetIn === 1 ? "day" : "days"}`;
-      const gap = runwayDays - daysToReset;
-      if (Math.abs(gap) <= 1.5) {
-        paceNote = `Next weekly reset in ${resetInLabel} — the current pace lands within ~${Math.max(1, Math.round(Math.abs(gap)))} day of it.`;
-      } else if (gap > 0) {
-        paceNote = `Next weekly reset in ${resetInLabel} — the current pace leaves ~${Math.round(gap)} days of headroom past it.`;
-      } else {
-        paceNote = `Next weekly reset in ${resetInLabel} — the current pace runs the meter out ~${Math.round(-gap)} days before it.`;
-      }
-    }
-  } else {
-    paceLines.push({
-      value: `${compact(dailyAverage)} / day`,
-      size: 18,
-      weight: 700,
-      color: COLORS.ink,
-      detail: `${days}-day average`,
-    });
-    paceNote = "No usable weekly meter drain in this range, so runway cannot be estimated.";
   }
-  let paceBaseline = projectsTop + 48;
-  for (const line of paceLines) {
-    elements.push(svgText({
-      x: paceX,
-      y: paceBaseline,
-      value: line.value,
-      fill: line.color,
-      size: line.size,
-      weight: line.weight,
-      spacing: line.size >= 24 ? "-0.48" : null,
-    }));
-    elements.push(svgText({
-      x: paceX + textWidth(line.value, line.size, line.weight) + 10,
-      y: paceBaseline,
-      value: line.detail,
-      fill: COLORS.muted,
-      size: 13,
-    }));
-    paceBaseline += 34;
-  }
-  if (paceNote) {
-    const noteWidth = contentRight - paceX;
-    const words = paceNote.split(" ");
-    const noteLines = [];
-    let current = "";
-    for (const word of words) {
-      const candidate = current ? `${current} ${word}` : word;
-      if (textWidth(candidate, 12.5) > noteWidth && current) {
-        noteLines.push(current);
-        current = word;
-      } else {
-        current = candidate;
-      }
-    }
-    if (current) noteLines.push(current);
-    let noteBaseline = paceBaseline - 6;
-    for (const line of noteLines) {
+
+  function buildCacheByDayPanel(x, y, panelWidth, panelHeight) {
+    panelFrame(x, y, panelWidth, panelHeight, "CACHE EFFICIENCY BY DAY", "(input-weighted)");
+    const inner = panelWidth - 32;
+    const left = x + 16;
+
+    const binSize = chooseBinSize(meta.rangeDays, inner, {
+      minBinWidth: 18,
+      preferDaily: true,
+    });
+    const cacheBins = binDailyRows(vm.daily, binSize);
+    const rated = cacheBins.filter((bin) => bin.inputTokens > 0);
+    if (!rated.length) {
       elements.push(svgText({
-        x: paceX,
-        y: noteBaseline,
-        value: line,
+        x: left,
+        y: y + 60,
+        value: "No measured input-token breakdown in this range",
         fill: COLORS.muted,
         size: 12.5,
       }));
-      noteBaseline += 19;
+      return;
+    }
+
+    const rates = rated.map((bin) => (bin.cachedInputTokens / bin.inputTokens) * 100);
+    const minRate = Math.min(...rates);
+    // Zoomed axis: at least a 20-point span, floor snapped to tens, 0–80.
+    let floor = Math.max(0, Math.min(80, Math.floor((minRate - 5) / 10) * 10));
+    floor = Math.min(floor, 80);
+    if (floor > 0) {
+      elements.push(chip(x + panelWidth - 16, y + 21, "ZOOMED SCALE", {
+        fill: "rgba(255,255,255,.06)",
+        stroke: COLORS.baseline,
+        color: COLORS.muted,
+        size: 9.5,
+        anchor: "end",
+      }).markup);
+    }
+
+    const lineTop = y + 52;
+    const lineHeight = 64;
+    const lineBottom = lineTop + lineHeight;
+    const axisLabels = [
+      { value: 100, y: lineTop },
+      { value: (100 + floor) / 2, y: lineTop + lineHeight / 2 },
+      { value: floor, y: lineBottom },
+    ];
+    const axisWidth = 34;
+    for (const label of axisLabels) {
+      elements.push(svgText({
+        x: left + axisWidth - 6,
+        y: label.y + 4,
+        value: `${Math.round(label.value)}%`,
+        fill: COLORS.muted,
+        size: 10.5,
+        anchor: "end",
+        mono: true,
+      }));
+      elements.push(svgLine(left + axisWidth, label.y, x + panelWidth - 16, label.y, {
+        stroke: COLORS.grid,
+        "stroke-width": 1,
+      }));
+    }
+    const chartLeft = left + axisWidth + 6;
+    const chartWidth = x + panelWidth - 16 - chartLeft;
+    const slot = chartWidth / cacheBins.length;
+    const yForRate = (rate) =>
+      lineBottom - ((Math.max(floor, Math.min(100, rate)) - floor) / (100 - floor)) * lineHeight;
+
+    const linePoints = [];
+    cacheBins.forEach((bin, index) => {
+      if (!(bin.inputTokens > 0)) {
+        linePoints.push(null);
+        return;
+      }
+      linePoints.push({
+        x: chartLeft + (index + 0.5) * slot,
+        y: yForRate((bin.cachedInputTokens / bin.inputTokens) * 100),
+        rate: (bin.cachedInputTokens / bin.inputTokens) * 100,
+      });
+    });
+    for (let index = 0; index < linePoints.length - 1; index += 1) {
+      const from = linePoints[index];
+      const to = linePoints[index + 1];
+      if (!from || !to) continue;
+      elements.push(svgLine(from.x, from.y, to.x, to.y, {
+        stroke: COLORS.cache,
+        "stroke-width": 2,
+        "stroke-linecap": "round",
+      }));
+    }
+    const rateLabelStep = cacheBins.length <= 8 ? 1 : Math.ceil(cacheBins.length / 8);
+    linePoints.forEach((point, index) => {
+      if (!point) return;
+      elements.push(`<circle cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="3.2" fill="${COLORS.cache}"/>`);
+      if (index % rateLabelStep === 0 || index === linePoints.length - 1) {
+        elements.push(svgText({
+          x: point.x,
+          y: point.y - 8,
+          value: pct(point.rate),
+          fill: COLORS.secondary,
+          size: 10.5,
+          anchor: "middle",
+        }));
+      }
+    });
+
+    // Input-volume columns beneath the rate line.
+    const columnsTop = lineBottom + 26;
+    const columnsHeight = 44;
+    const columnsBottom = columnsTop + columnsHeight;
+    const maxInput = Math.max(...cacheBins.map((bin) => bin.inputTokens), 1);
+    elements.push(svgText({
+      x: left + axisWidth - 6,
+      y: columnsBottom - columnsHeight / 2 + 4,
+      value: "Input",
+      fill: COLORS.muted,
+      size: 10.5,
+      anchor: "end",
+    }));
+    cacheBins.forEach((bin, index) => {
+      const centerX = chartLeft + (index + 0.5) * slot;
+      const columnWidth = Math.min(30, Math.max(8, slot * 0.5));
+      const columnHeight = (bin.inputTokens / maxInput) * columnsHeight;
+      if (columnHeight > 0.4) {
+        elements.push(svgRect(centerX - columnWidth / 2, columnsBottom - columnHeight, columnWidth, columnHeight, {
+          fill: COLORS.cache,
+          opacity: 0.85,
+          rx: 1.5,
+        }));
+      }
+      if (index % rateLabelStep === 0 || index === cacheBins.length - 1) {
+        if (bin.inputTokens > 0) {
+          elements.push(svgText({
+            x: centerX,
+            y: columnsBottom - columnHeight - 5,
+            value: compact(bin.inputTokens),
+            fill: COLORS.muted,
+            size: 10,
+            anchor: "middle",
+          }));
+        }
+        elements.push(svgText({
+          x: centerX,
+          y: columnsBottom + 15,
+          value: binDateLabel(bin, timeZone),
+          fill: COLORS.muted,
+          size: 10,
+          anchor: "middle",
+        }));
+      }
+    });
+
+    // Summary strip.
+    const stripY = y + panelHeight - 32;
+    elements.push(svgRect(left, stripY, inner, 22, {
+      rx: 5,
+      fill: "rgba(34,197,143,.08)",
+      stroke: "rgba(34,197,143,.35)",
+      "stroke-width": 1,
+    }));
+    const approxUncached = vm.models.filter((row) => row.uncachedInputTokens > 0).length > 1;
+    elements.push(svgText({
+      x: left + 10,
+      y: stripY + 15,
+      value: truncateToWidth(
+        `${pct(summary.cacheRatePercent)} input-weighted · ${compact(summary.cachedInputTokens)} of ${compact(summary.inputTokens)} input cached · ${approxUncached ? "≈" : ""}${compact(summary.uncachedInputTokens)} uncached`,
+        inner - 20,
+        11,
+      ),
+      fill: COLORS.cache,
+      size: 11,
+    }));
+  }
+
+  function buildProjectsPanel(x, y, panelWidth, panelHeight) {
+    panelFrame(x, y, panelWidth, panelHeight, "WHERE IT WENT · TOP PROJECTS");
+    elements.push(svgText({
+      x: x + panelWidth - 16,
+      y: y + 25,
+      value: `${summary.activeProjects} ${summary.activeProjects === 1 ? "project" : "projects"} active`,
+      fill: COLORS.muted,
+      size: 11.5,
+      anchor: "end",
+    }));
+
+    const rows = vm.projects.map((row, index) => ({
+      rank: String(index + 1).padStart(2, "0"),
+      name: row.displayProject,
+      tokens: row.totalTokens,
+      share: row.sharePercent,
+      muted: false,
+    }));
+    if (vm.projectRemainder.count > 0) {
+      rows.push({
+        rank: String(rows.length + 1).padStart(2, "0"),
+        name: vm.projectRemainder.count === 1
+          ? "1 other project"
+          : `${vm.projectRemainder.count} other projects`,
+        tokens: vm.projectRemainder.totalTokens,
+        share: vm.projectRemainder.sharePercent,
+        muted: true,
+      });
+    }
+    if (!rows.length) {
+      elements.push(svgText({
+        x: x + 16,
+        y: y + 60,
+        value: "No project activity in range",
+        fill: COLORS.muted,
+        size: 12.5,
+      }));
+      return;
+    }
+
+    const rowTop = y + 44;
+    const rowGap = 33;
+    const rankX = x + 16;
+    const nameX = rankX + 26;
+    const pctRight = x + panelWidth - 16;
+    const tokensRight = pctRight - 52;
+    const barWidth = Math.max(56, panelWidth * 0.2);
+    const barX = tokensRight - 66 - barWidth;
+    const nameWidth = barX - nameX - 12;
+    rows.forEach((row, index) => {
+      const centerY = rowTop + index * rowGap + 8;
+      elements.push(svgText({
+        x: rankX,
+        y: centerY + 4,
+        value: row.rank,
+        fill: COLORS.muted,
+        size: 12,
+        mono: true,
+      }));
+      elements.push(svgText({
+        x: nameX,
+        y: centerY + 4,
+        value: truncateToWidth(row.name, nameWidth, 13.5, row.muted ? 400 : 700),
+        fill: row.muted ? COLORS.muted : COLORS.ink,
+        size: 13.5,
+        weight: row.muted ? 400 : 700,
+      }));
+      elements.push(svgRect(barX, centerY - 4, barWidth, 9, {
+        rx: 2,
+        fill: COLORS.projectTrack,
+      }));
+      const fillWidth = (Math.max(0, Math.min(100, row.share)) / 100) * barWidth;
+      if (fillWidth > 0) {
+        elements.push(svgRect(barX, centerY - 4, fillWidth, 9, {
+          rx: 2,
+          fill: row.muted ? COLORS.remainderBar : COLORS.leftAxis,
+        }));
+      }
+      elements.push(svgText({
+        x: tokensRight,
+        y: centerY + 4,
+        value: compact(row.tokens),
+        fill: row.muted ? COLORS.secondary : COLORS.ink,
+        size: 13.5,
+        weight: 700,
+        anchor: "end",
+      }));
+      elements.push(svgText({
+        x: pctRight,
+        y: centerY + 4,
+        value: pct(row.share),
+        fill: COLORS.muted,
+        size: 12,
+        anchor: "end",
+      }));
+    });
+
+    if (summary.topThreeProjectSharePercent !== null && vm.projects.length) {
+      const stripY = y + panelHeight - 32;
+      elements.push(svgRect(x + 16, stripY, panelWidth - 32, 22, {
+        rx: 5,
+        fill: "rgba(126,162,240,.08)",
+        stroke: "rgba(126,162,240,.35)",
+        "stroke-width": 1,
+      }));
+      elements.push(svgText({
+        x: x + panelWidth / 2,
+        y: stripY + 15,
+        value: `Top ${Math.min(3, vm.projects.length)} projects = ${pct(summary.topThreeProjectSharePercent)} of tokens`,
+        fill: COLORS.leftAxis,
+        size: 11.5,
+        anchor: "middle",
+      }));
     }
   }
 
-  // ---- Footnote strip ----
-  elements.push(`<line x1="${outer}" y1="${footnotesRuleY}" x2="${contentRight}" y2="${footnotesRuleY}" stroke="${COLORS.rule}" stroke-width="1"/>`);
-  const totalResets = expiries + restarts;
-  let resetsValue = "no meter reads in range";
-  let resetsQualifier = "resets refill the meter to 100%";
-  if (hasLine && totalResets === 0) {
-    resetsValue = "none in this window";
-    resetsQualifier = latestResetsAtSec
-      ? `next scheduled reset ${timestampDateLabel(latestResetsAtSec * 1_000, bounds.timeZone)}`
-      : "resets refill the meter to 100%";
-  } else if (hasLine && restarts === 0) {
-    resetsValue = `${totalResets} scheduled · 0 early`;
-    const lastReset = resetsInRange.at(-1);
-    resetsQualifier = totalResets === 1 && lastReset
-      ? `${timestampDateLabel(lastReset.timestampMs, bounds.timeZone)} was the normal weekly reset`
-      : "all were normal weekly resets";
-  } else if (hasLine) {
-    resetsValue = `${totalResets} total · ${restarts} early`;
-    resetsQualifier = "early resets are provider-initiated";
-  }
-  const footnotes = [
-    {
-      label: "Meter burned this range",
-      value: meterUsable
-        ? `${burn.totalPercent.toFixed(1)} meter points`
-        : "no usable meter drain",
-      qualifier: "total fall of the amber line, across resets",
-    },
-    {
-      label: "Estimated cost",
-      value: rateCard.credits > 0
-        ? `≈${compact(rateCard.credits)} credits`
-        : "no rated tokens in range",
-      qualifier: `priced at published rates${rateCard.fastCredits > 0 ? ` · fast mode ×${FAST_MODE_MULTIPLIER}` : ""}`,
-    },
-    {
-      label: "Weekly resets",
-      value: resetsValue,
-      qualifier: resetsQualifier,
-    },
-    {
-      label: "Data as of",
-      value: Number.isFinite(generatedAtMs)
-        ? localDateTimeLabel(generatedAtMs, bounds.timeZone)
-        : "unknown",
-      qualifier: latestQuotaPoint
-        ? `meter last read ${shortDateTimeLabel(latestQuotaPoint.timestampMs, bounds.timeZone)}`
-        : "no weekly meter reads in range",
-    },
-  ];
-  const footnoteTop = footnotesRuleY + 18;
-  const footnoteColumnWidth = contentWidth / 4;
-  footnotes.forEach((note, index) => {
-    const columnX = outer + index * footnoteColumnWidth;
-    const x = index === 0 ? columnX : columnX + 22;
-    if (index > 0) {
-      elements.push(`<line x1="${columnX.toFixed(2)}" y1="${footnoteTop}" x2="${columnX.toFixed(2)}" y2="${footnoteTop + 53}" stroke="${COLORS.rule}" stroke-width="1"/>`);
-    }
-    elements.push(svgText({
-      x,
-      y: footnoteTop + 10,
-      value: note.label.toUpperCase(),
-      fill: COLORS.muted,
-      size: 12,
-      spacing: "1.32",
-    }));
-    elements.push(svgText({
-      x,
-      y: footnoteTop + 31,
-      value: note.value,
-      fill: COLORS.ink,
-      size: 16,
-      weight: 700,
-    }));
-    elements.push(svgText({
-      x,
-      y: footnoteTop + 48,
-      value: note.qualifier,
-      fill: COLORS.muted,
-      size: 12.5,
-    }));
-  });
+  function buildModelCachePanel(x, y, panelWidth, panelHeight) {
+    panelFrame(x, y, panelWidth, panelHeight, "CACHE EFFICIENCY BY MODEL", "(input-weighted)");
 
-  elements.push("</svg>");
-  return elements.join("\n");
+    // Combine minor models past the fourth row so the table always fits.
+    const source = vm.models.filter((row) => row.totalTokens > 0);
+    const rows = source.slice(0, 4).map((row) => ({ ...row }));
+    const overflow = source.slice(4);
+    if (overflow.length) {
+      const merged = overflow.reduce(
+        (sum, row) => {
+          sum.cacheInputTokens += row.cacheInputTokens;
+          sum.cachedInputTokens += row.cachedInputTokens;
+          return sum;
+        },
+        { model: `${overflow.length} other models`, cacheInputTokens: 0, cachedInputTokens: 0 },
+      );
+      merged.uncachedInputTokens = Math.max(
+        0,
+        merged.cacheInputTokens - merged.cachedInputTokens,
+      );
+      merged.cacheRatePercent = merged.cacheInputTokens > 0
+        ? (merged.cachedInputTokens / merged.cacheInputTokens) * 100
+        : null;
+      merged.combined = true;
+      rows.push(merged);
+    }
+    if (!rows.length) {
+      elements.push(svgText({
+        x: x + 16,
+        y: y + 60,
+        value: "No measured input-token breakdown in this range",
+        fill: COLORS.muted,
+        size: 12.5,
+      }));
+      return;
+    }
+
+    const inputRight = x + panelWidth - 104;
+    const uncachedRight = x + panelWidth - 16;
+    elements.push(svgText({
+      x: inputRight,
+      y: y + 47,
+      value: "INPUT",
+      fill: COLORS.muted,
+      size: 10.5,
+      spacing: "0.84",
+      anchor: "end",
+    }));
+    elements.push(svgText({
+      x: uncachedRight,
+      y: y + 47,
+      value: "UNCACHED",
+      fill: COLORS.muted,
+      size: 10.5,
+      spacing: "0.84",
+      anchor: "end",
+    }));
+
+    const rowTop = y + 64;
+    const rowGap = 33;
+    const nameX = x + 30;
+    const rateX = x + Math.min(150, panelWidth * 0.34);
+    const barX = rateX + 52;
+    const barWidth = Math.max(44, inputRight - 66 - barX);
+    rows.forEach((row, index) => {
+      const centerY = rowTop + index * rowGap;
+      if (!row.combined) {
+        elements.push(`<circle cx="${x + 19}" cy="${centerY - 4}" r="4" fill="${styleForModel(row.model)}"/>`);
+      }
+      elements.push(svgText({
+        x: nameX,
+        y: centerY,
+        value: truncateToWidth(row.model, rateX - nameX - 8, 13, row.combined ? 400 : 600),
+        fill: row.combined ? COLORS.muted : COLORS.ink,
+        size: 13,
+        weight: row.combined ? 400 : 600,
+      }));
+      const hasComponents = row.cacheRatePercent !== null;
+      elements.push(svgText({
+        x: rateX + 44,
+        y: centerY,
+        value: hasComponents ? pct(row.cacheRatePercent) : "—",
+        fill: COLORS.ink,
+        size: 13,
+        weight: 700,
+        anchor: "end",
+        mono: true,
+      }));
+      if (hasComponents && barWidth > 30) {
+        elements.push(svgRect(barX, centerY - 8, barWidth, 8, {
+          rx: 2,
+          fill: COLORS.track,
+        }));
+        const cachedWidth = (row.cacheRatePercent / 100) * barWidth;
+        if (cachedWidth > 0) {
+          elements.push(svgRect(barX, centerY - 8, cachedWidth, 8, {
+            rx: 2,
+            fill: COLORS.cache,
+          }));
+        }
+        if (barWidth - cachedWidth > 0.5) {
+          elements.push(svgRect(barX + cachedWidth, centerY - 8, barWidth - cachedWidth, 8, {
+            fill: COLORS.uncached,
+            rx: 2,
+          }));
+        }
+      }
+      elements.push(svgText({
+        x: inputRight,
+        y: centerY,
+        value: hasComponents ? compact(row.cacheInputTokens) : "—",
+        fill: COLORS.secondary,
+        size: 12.5,
+        anchor: "end",
+        mono: true,
+      }));
+      elements.push(svgText({
+        x: uncachedRight,
+        y: centerY,
+        value: hasComponents ? compact(row.uncachedInputTokens) : "—",
+        fill: COLORS.secondary,
+        size: 12.5,
+        anchor: "end",
+        mono: true,
+      }));
+    });
+
+    elements.push(svgText({
+      x: x + 16,
+      y: y + panelHeight - 15,
+      value: "Uncached = input not served from cache (input-weighted)",
+      fill: COLORS.muted,
+      size: 11,
+    }));
+  }
+
+  function buildLowerSection(top) {
+    const gap = 14;
+    const projectRowCount = Math.min(4, vm.projects.length) +
+      (vm.projectRemainder.count > 0 ? 1 : 0);
+    const modelRowCount = Math.min(5, vm.models.filter((r) => r.totalTokens > 0).length || 1);
+    const cacheHeight = 258;
+    const projectsHeight = Math.max(150, 44 + projectRowCount * 33 + 46);
+    const modelHeight = Math.max(150, 64 + modelRowCount * 33 + 30);
+    if (wide) {
+      const height = Math.max(cacheHeight, projectsHeight, modelHeight);
+      const cacheWidth = contentWidth * 0.36;
+      const projectsWidth = contentWidth * 0.31 - gap;
+      const modelWidth = contentWidth - cacheWidth - projectsWidth - gap * 2;
+      buildCacheByDayPanel(outer, top, cacheWidth, height);
+      buildProjectsPanel(outer + cacheWidth + gap, top, projectsWidth, height);
+      buildModelCachePanel(outer + cacheWidth + projectsWidth + gap * 2, top, modelWidth, height);
+      return top + height;
+    }
+    buildCacheByDayPanel(outer, top, contentWidth, cacheHeight);
+    const rowTop = top + cacheHeight + gap;
+    const half = (contentWidth - gap) / 2;
+    const rowHeight = Math.max(projectsHeight, modelHeight);
+    buildProjectsPanel(outer, rowTop, half, rowHeight);
+    buildModelCachePanel(outer + half + gap, rowTop, half, rowHeight);
+    return rowTop + rowHeight;
+  }
+
+  // ---------------------------------------------------------------- footer
+  function buildFooterSection(top) {
+    elements.push(svgLine(outer, top, contentRight, top, {
+      stroke: COLORS.rule,
+      "stroke-width": 1,
+    }));
+    const coverage = vm.coverage;
+    const componentsComplete = coverage.componentCoveragePercent >= 99.95;
+    const breakdownLine = componentsComplete
+      ? `${compact(summary.totalTokens)} total · ${compact(summary.inputTokens)} input · ${compact(summary.outputTokens)} output`
+      : `${compact(summary.totalTokens)} total · ${compact(summary.inputTokens)} measured input · ${compact(summary.outputTokens)} measured output`;
+    const rateCardLines = vm.provenance.snapshotRateCardAsOf &&
+      vm.provenance.snapshotRateCardAsOf !== vm.provenance.rateCardAsOf
+      ? [
+          `Current attribution card · ${rateCardDateLabel(vm.provenance.rateCardAsOf)}`,
+          `Snapshot originally rated · ${rateCardDateLabel(vm.provenance.snapshotRateCardAsOf)}`,
+        ]
+      : [`Attribution rates · ${rateCardDateLabel(vm.provenance.rateCardAsOf)}`];
+    const columns = [
+      {
+        label: "DATA SOURCES",
+        lines: [
+          {
+            text: vm.provenance.localOnly ? "Codex local data only" : "External snapshot input",
+          },
+        ],
+      },
+      {
+        label: "COVERAGE",
+        // Resolved to one or two lines below, once the column width is known.
+        coverageParts: [
+          `${coverage.modelCalls.toLocaleString("en-US")} model calls`,
+          `${meterPct(coverage.componentCoveragePercent)} component coverage`,
+        ],
+        parseLine: coverage.parseErrors > 0
+          ? {
+              text: `${coverage.parseErrors.toLocaleString("en-US")} source ${coverage.parseErrors === 1 ? "record" : "records"} could not be parsed`,
+              color: COLORS.warn,
+            }
+          : { text: "0 parse errors", color: COLORS.muted },
+        lines: [],
+      },
+      {
+        label: "BREAKDOWN",
+        lines: [
+          { text: breakdownLine },
+          componentsComplete
+            ? null
+            : { text: "component coverage incomplete", color: COLORS.muted },
+        ].filter(Boolean),
+      },
+      {
+        label: "HISTORY",
+        lines: coverage.estimated
+          ? [
+              { text: "≈ proportional allocation from compacted history" },
+              coverage.maximumResolutionSeconds
+                ? {
+                    text: `Maximum source resolution: ${durationLabel(coverage.maximumResolutionSeconds * 1_000)}`,
+                    color: COLORS.muted,
+                  }
+                : null,
+            ].filter(Boolean)
+          : [{ text: "Exact event data in selected range" }],
+      },
+      {
+        label: "RATE CARD",
+        lines: rateCardLines.map((text, index) => ({
+          text,
+          color: index === 0 ? undefined : COLORS.muted,
+        })),
+      },
+    ];
+
+    const perRow = wide ? columns.length : 3;
+    const rowCount = Math.ceil(columns.length / perRow);
+    const rowHeight = 62;
+    const wideWeights = [0.14, 0.24, 0.21, 0.19, 0.22];
+    columns.forEach((column, index) => {
+      const row = Math.floor(index / perRow);
+      const inRow = Math.min(perRow, columns.length - row * perRow);
+      const rowWidth = row === rowCount - 1 ? contentWidth / inRow : contentWidth / perRow;
+      const columnWidth = wide ? contentWidth * wideWeights[index] : rowWidth;
+      const columnX = wide
+        ? outer + wideWeights.slice(0, index).reduce((sum, weight) => sum + weight * contentWidth, 0)
+        : outer + (index - row * perRow) * rowWidth;
+      const baseY = top + 24 + row * rowHeight;
+      if (index % perRow > 0) {
+        elements.push(svgLine(columnX - 12, baseY - 12, columnX - 12, baseY + 34, {
+          stroke: COLORS.rule,
+          "stroke-width": 1,
+        }));
+      }
+      elements.push(svgText({
+        x: columnX,
+        y: baseY,
+        value: column.label,
+        fill: COLORS.muted,
+        size: 11,
+        spacing: "1.1",
+      }));
+      if (column.coverageParts) {
+        const combined = column.coverageParts.join(" · ");
+        column.lines = textWidth(combined, 12, 600) <= columnWidth - 24
+          ? [{ text: combined }, column.parseLine]
+          : [...column.coverageParts.map((text) => ({ text })), column.parseLine];
+      }
+      column.lines.forEach((line, lineIndex) => {
+        elements.push(svgText({
+          x: columnX,
+          y: baseY + 18 + lineIndex * 16,
+          value: truncateToWidth(line.text, columnWidth - 24, 12, lineIndex === 0 ? 600 : 400),
+          fill: line.color ?? COLORS.secondary,
+          size: 12,
+          weight: lineIndex === 0 ? 600 : 400,
+        }));
+      });
+    });
+    return top + 24 + rowCount * rowHeight;
+  }
+
+  // ---------------------------------------------------------------- compose
+  const body = [];
+  const headerBottom = buildHeaderSection();
+  const kpiBottom = buildKpiSection(headerBottom + 10);
+  const mixBottom = buildModelMixSection(kpiBottom + 14);
+  const chartBottom = buildDailyChartSection(mixBottom + 14);
+  const lowerBottom = buildLowerSection(chartBottom + 14);
+  const footerBottom = buildFooterSection(lowerBottom + 16);
+  const height = Math.ceil(footerBottom + 14);
+
+  const description =
+    "Dark report card: total usage, input-weighted cache efficiency, fast-mode share, and active-project KPI cards beside the sampled weekly-limit state; a model-mix strip; stacked daily token columns by model with hatched fast-mode overlays and the sampled weekly meter drawn as observation dots, confirmed intervals, and dashed unobserved gaps; daily cache efficiency, top projects, and per-model cache tables; and a provenance footer.";
+  body.push(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="trend-title trend-description">`,
+    `<title id="trend-title">${escapeXml(`Token Ledger · ${meta.rangeDays}-day trend`)}</title>`,
+    `<desc id="trend-description">${escapeXml(description)}</desc>`,
+    defs,
+    `<rect width="100%" height="100%" fill="${COLORS.background}"/>`,
+    ...elements,
+    "</svg>",
+  );
+  return body.join("\n");
 }
 
 export async function writeTrendPng(svg, outputPath) {
