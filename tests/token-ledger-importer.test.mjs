@@ -854,6 +854,39 @@ test("cold scans conservatively skip irrelevant JSONL lines", async () => {
   }
 });
 
+test("cold scans pass escaped top-level type keys to the full parser", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
+  const threadId = "abababab-abab-4bab-8bab-abababababab";
+  try {
+    const rolloutDirectory = resolve(root, "sessions", "2026", "08", "23");
+    await mkdir(rolloutDirectory, { recursive: true });
+    const timestamp = "2026-08-23T10:00:00.000Z";
+    const escapedTypeKey = JSON.stringify(
+      tokenCount("2026-08-23T10:00:01.000Z", 100, 100),
+    ).replace(
+      '"type":"event_msg"',
+      '"t\\u0079pe":"event_msg"',
+    );
+    await writeFile(
+      resolve(rolloutDirectory, `rollout-${threadId}.jsonl`),
+      `${turnStart(timestamp, "turn-1").map((row) => JSON.stringify(row)).join("\n")}\n${escapedTypeKey}\n`,
+    );
+
+    const snapshot = await collectUsageSequential({
+      output: resolve(root, "snapshot.json"),
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+
+    assert.equal(snapshot.coverage.parseErrors, 0);
+    assert.equal(snapshot.coverage.observedModelCalls, 1);
+    assert.equal(snapshot.events.length, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("bounded scans match the sequential reference across collector fixtures", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
   const threadId = "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd";
