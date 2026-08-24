@@ -2678,6 +2678,27 @@ test("cache report moves long timezone header metadata below the title", () => {
     /<text x="868" y="77"[^>]*>Aug 9 – Aug 15, 2026 · UTC<\/text>/,
   );
 
+  const filteredLongZoneSvg = renderCacheReportImage({
+    snapshot: {
+      events: [],
+      provenance: {
+        collection: {
+          since: "2026-08-01T00:00:00.000Z",
+          includeArchived: false,
+        },
+      },
+    },
+    bounds: multiDayBounds("2026-08-15", "America/Argentina/Buenos_Aires", 7),
+    days: 7,
+    options: { imageWidth: 900 },
+  });
+  const filteredMetadata = filteredLongZoneSvg.match(
+    /<text x="868" y="77"[^>]*>([^<]+)<\/text>/,
+  )?.[1];
+  assert.ok(filteredMetadata);
+  assert.ok(textWidth(filteredMetadata, 14) <= 836);
+  assert.match(filteredMetadata, /…$/);
+
   const wideSvg = renderCacheReportImage({
     snapshot: { events: [] },
     bounds,

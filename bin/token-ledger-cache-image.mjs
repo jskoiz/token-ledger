@@ -9,6 +9,7 @@ import {
   svgRect,
   svgText,
   textWidth,
+  truncateText,
   TREND_IMAGE_MODEL_COLORS,
 } from "./token-ledger-trend-image.mjs";
 import { chooseBinSize } from "./token-ledger-trend-terminal.mjs";
@@ -666,6 +667,9 @@ export function renderCacheReportImage({
     0.27 * (headerTitle.length - 1);
   const headerMetadataFits = headerTitleWidth + textWidth(headerMetadata, 14) + 24 <=
     contentRight - outer;
+  const renderedHeaderMetadata = headerMetadataFits
+    ? headerMetadata
+    : truncateText(headerMetadata, contentRight - outer, 14);
 
   const ratePlotTop = 320;
   const ratePlotHeight = 270;
@@ -700,7 +704,7 @@ export function renderCacheReportImage({
     svgText({
       x: contentRight,
       y: headerMetadataFits ? 53 : 77,
-      value: headerMetadata,
+      value: renderedHeaderMetadata,
       fill: COLORS.muted,
       size: 14,
       anchor: "end",
