@@ -583,6 +583,32 @@ test("estimated token components tolerate floating-point reconciliation", () => 
   assert.equal(normalized.breakdownAvailable, true);
 });
 
+test("usage buckets omit invalid token rows before metadata consumers see them", () => {
+  const rows = usageBuckets({
+    events: [
+      {
+        timestamp: "2026-08-22T12:00:00.000Z",
+        project: "malformed-project",
+        threadId: "malformed-thread",
+        totalTokens: "not-a-token-count",
+      },
+      {
+        timestamp: "2026-08-22T12:01:00.000Z",
+        project: "valid-project",
+        threadId: "valid-thread",
+        totalTokens: 10,
+        inputTokens: 10,
+        outputTokens: 0,
+      },
+    ],
+  });
+
+  assert.deepEqual(
+    rows.map(({ project, threadId }) => ({ project, threadId })),
+    [{ project: "valid-project", threadId: "valid-thread" }],
+  );
+});
+
 test("dense recent usage compacts during collection before memory grows unbounded", () => {
   const latestTimestampMs = Date.parse("2026-08-22T12:00:00.000Z");
   const rows = Array.from({ length: 50_100 }, (_, index) => ({

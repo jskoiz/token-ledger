@@ -1,6 +1,7 @@
 import {
   isValidTokenValue,
   tokenValue,
+  tokenTotalsReconcile,
 } from "../lib/token-ledger-usage.mjs";
 
 // Pricing weights are used only for the separate attribution lens. They are
@@ -73,11 +74,13 @@ function hasDetailedBreakdown(usage) {
     return false;
   }
   if (totalTokens === 0) return true;
-  const componentTotal = inputTokens + outputTokens;
   return (
-    Number.isFinite(componentTotal) &&
-    componentTotal <= Number.MAX_SAFE_INTEGER &&
-    componentTotal === totalTokens &&
+    tokenTotalsReconcile(
+      totalTokens,
+      inputTokens,
+      outputTokens,
+      allowFractional,
+    ) &&
     (inputTokens > 0 || outputTokens > 0)
   );
 }

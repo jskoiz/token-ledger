@@ -220,6 +220,7 @@ function emptyAggregate() {
     inputEventCount: 0,
     totalTokens: 0,
     detailedTokens: 0,
+    unknownBreakdownTokens: 0,
     inputTokens: 0,
     cachedInputTokens: 0,
     uncachedInputTokens: 0,
@@ -289,7 +290,9 @@ function finalizeAggregate(aggregate) {
     aggregate.inputTokens - aggregate.cachedInputTokens,
   );
   const measurementCoveragePercent = aggregate.totalTokens > 0
-    ? (aggregate.detailedTokens / aggregate.totalTokens) * 100
+    ? (aggregate.detailedTokens /
+        (aggregate.detailedTokens + aggregate.unknownBreakdownTokens)) *
+      100
     : aggregate.eventCount > 0
       ? (aggregate.detailedEventCount / aggregate.eventCount) * 100
       : null;
@@ -359,7 +362,21 @@ function accumulateRange(snapshot, bounds, bins = null, dateIndexByString = null
         { allowFractional: true },
       );
     }
-    if (!breakdown.detailed) continue;
+    if (!breakdown.detailed) {
+      totals.unknownBreakdownTokens = checkedTokenAdd(
+        totals.unknownBreakdownTokens,
+        breakdown.totalTokens,
+        { allowFractional: true },
+      );
+      if (bin) {
+        bin.unknownBreakdownTokens = checkedTokenAdd(
+          bin.unknownBreakdownTokens,
+          breakdown.totalTokens,
+          { allowFractional: true },
+        );
+      }
+      continue;
+    }
 
     totals.detailedEventCount = checkedTokenAdd(
       totals.detailedEventCount,

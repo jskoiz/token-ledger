@@ -165,8 +165,20 @@ test("filterDayEvents keeps the start and excludes the end boundary", () => {
       null,
       { id: "hostile", timestamp: { toString: null, valueOf: null } },
       { id: "before", timestamp: "2026-08-01T09:59:59.999Z" },
-      { id: "start", timestamp: "2026-08-01T10:00:00.000Z" },
-      { id: "inside", timestamp: "2026-08-01T20:00:00.000Z" },
+      {
+        id: "start",
+        timestamp: "2026-08-01T10:00:00.000Z",
+        totalTokens: 1,
+        inputTokens: 1,
+        outputTokens: 0,
+      },
+      {
+        id: "inside",
+        timestamp: "2026-08-01T20:00:00.000Z",
+        totalTokens: 1,
+        inputTokens: 1,
+        outputTokens: 0,
+      },
       { id: "end", timestamp: "2026-08-02T10:00:00.000Z" },
     ],
   };
@@ -1588,11 +1600,12 @@ test("malformed snapshots keep terminal, bucket, and image totals bounded", asyn
   assert.equal(actual.bins.at(-1).totalTokens, Number.MAX_SAFE_INTEGER);
   assert.equal(cache.totalTokens, Number.MAX_SAFE_INTEGER);
   assert.equal(cache.detailedTokens, large);
+  assert.equal(cache.unknownBreakdownTokens, large);
   assert.equal(cache.eventCount, 2);
   assert.equal(cache.detailedEventCount, 1);
   assert.equal(
     cache.measurementCoveragePercent,
-    (large / Number.MAX_SAFE_INTEGER) * 100,
+    50,
   );
   assert.doesNotMatch(terminal, /NaN|Infinity|undefined|null/);
   assert.doesNotMatch(svg, /NaN|Infinity|undefined|null/);
@@ -2027,6 +2040,37 @@ test("cache report preserves ratios across capped input totals", () => {
   const svg = renderCacheReportImage({ snapshot, bounds, days: 7 });
   assert.match(svg, />50\.0% cached</);
   assert.doesNotMatch(svg, /NaN|Infinity|undefined/);
+});
+
+test("cache report preserves unknown coverage when token sums saturate", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+  const huge = Number.MAX_SAFE_INTEGER;
+  const snapshot = {
+    events: [
+      {
+        timestamp: "2026-08-15T12:00:00.000Z",
+        model: "gpt-5.6-luna",
+        totalTokens: huge,
+        inputTokens: huge,
+        cachedInputTokens: huge,
+        outputTokens: 0,
+        breakdownAvailable: true,
+      },
+      {
+        timestamp: "2026-08-15T13:00:00.000Z",
+        model: "gpt-5.6-luna",
+        totalTokens: huge,
+        breakdownAvailable: false,
+      },
+    ],
+  };
+
+  const data = buildCacheReportData(snapshot, bounds, 7, 1_100);
+  assert.equal(data.totalTokens, huge);
+  assert.equal(data.detailedTokens, huge);
+  assert.equal(data.unknownBreakdownTokens, huge);
+  assert.equal(data.measurementCoveragePercent, 50);
+  assert.equal(data.bins.at(-1).measurementCoveragePercent, 50);
 });
 
 test("trend bars partition capped model segments", () => {
@@ -3251,6 +3295,20 @@ test("rate card prices Luna at the current published credit rates", () => {
     outputTokens: 1_000_000,
   });
   assert.equal(credits, 35);
+});
+
+test("rate card tolerates estimated floating-point component drift", () => {
+  const credits = creditsForUsage("gpt-5.6-luna", {
+    totalTokens: 2,
+    inputTokens: 1 / 3,
+    cachedInputTokens: 0,
+    outputTokens: 5 / 3,
+    rangeAllocationEstimated: true,
+    breakdownAvailable: true,
+  });
+
+  assert.ok(credits !== null);
+  assert.ok(Math.abs(credits - ((1 / 3 * 5 + 5 / 3 * 30) / 1_000_000)) < 1e-12);
 });
 
 test("fast-mode turns weigh 1.5x in the burn allocation", () => {
