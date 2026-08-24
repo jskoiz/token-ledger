@@ -1102,6 +1102,42 @@ test("terminal renderer produces the dashboard layout and scaled bars", () => {
   assert.match(narrowOutput, /0\s+1\.25K/);
 });
 
+test("terminal shares preserve model and cache proportions when totals saturate", () => {
+  const huge = Number.MAX_SAFE_INTEGER;
+  const events = [
+    {
+      project: "alpha",
+      model: "gpt-5.6-luna",
+      totalTokens: huge,
+      inputTokens: huge,
+      cachedInputTokens: huge,
+      outputTokens: 0,
+    },
+    {
+      project: "beta",
+      model: "gpt-5.6-sol",
+      totalTokens: huge,
+      inputTokens: huge,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+    },
+  ];
+  const rows = aggregateProjects({ events, threads: [] }, events, {
+    rawProjects: true,
+  });
+  const output = renderTerminal({
+    options: { plain: true, ascii: true, width: 80 },
+    bounds: dayBounds("2026-08-01", "Pacific/Honolulu"),
+    events,
+    rows,
+    allRows: rows,
+  });
+  assert.match(output, /Luna\s+50\.0%/);
+  assert.match(output, /Sol\s+50\.0%/);
+  assert.match(output, /Cached\s+50\.0%/);
+  assert.match(output, /Uncached\s+50\.0%/);
+});
+
 test("terminal renderer moves the selected project cursor", () => {
   const events = [
     {
@@ -2221,6 +2257,41 @@ test("cache model shares use the summary overflow scale", () => {
   assert.ok(Math.abs((data.models[0].inputTokens / total) * 100 - 66.6666667) < 0.0001);
   assert.ok(Math.abs((data.models[1].inputTokens / total) * 100 - 33.3333333) < 0.0001);
   assert.ok(data.models[0].inputTokens > data.models[1].inputTokens);
+});
+
+test("cache report bins use the summary overflow scale", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 3);
+  const huge = Number.MAX_SAFE_INTEGER;
+  const eventFor = (timestamp) => ({
+    timestamp,
+    model: "gpt-5.6-luna",
+    totalTokens: huge,
+    inputTokens: huge,
+    cachedInputTokens: 0,
+    outputTokens: 0,
+    breakdownAvailable: true,
+  });
+  const data = buildCacheReportData(
+    {
+      events: [
+        eventFor("2026-08-13T01:00:00.000Z"),
+        eventFor("2026-08-13T02:00:00.000Z"),
+        eventFor("2026-08-14T01:00:00.000Z"),
+      ],
+    },
+    bounds,
+    3,
+    1_100,
+    1,
+  );
+  const firstDay = data.bins[0].inputTokens;
+  const secondDay = data.bins[1].inputTokens;
+  assert.ok(firstDay > secondDay);
+  assert.ok(Math.abs(firstDay / secondDay - 2) < 1e-12);
+  assert.ok(
+    Math.abs(firstDay + secondDay - data.inputTokens) <=
+      Number.EPSILON * huge * 8,
+  );
 });
 
 test("cache report preserves unknown coverage when token sums saturate", () => {

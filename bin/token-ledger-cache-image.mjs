@@ -419,10 +419,14 @@ function accumulateRange(snapshot, bounds, bins = null, dateIndexByString = null
   const commonScale = Math.max(
     inputScale(totals),
     ...[...modelTotals.values()].map(inputScale),
+    ...(bins ?? []).map(inputScale),
   );
   alignInputScale(totals, commonScale);
   for (const model of modelTotals.values()) {
     alignInputScale(model, commonScale);
+  }
+  for (const bin of bins ?? []) {
+    alignInputScale(bin, commonScale);
   }
 
   const summary = finalizeAggregate(totals);

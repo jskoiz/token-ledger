@@ -8,6 +8,7 @@ import {
   INTERACTIVE_HELP,
 } from "./token-ledger-controls.mjs";
 import {
+  MAX_SAFE_TOKEN_COUNT,
   checkedFiniteAdd,
   checkedTokenAdd,
   tokenValue,
@@ -181,18 +182,26 @@ function dateLabel(bounds, range = "day", rollingLabel = "1 day") {
 
 function modelTotals(events) {
   const totals = new Map();
+  let scale = 1;
+  let totalTokens = 0;
   for (const event of events) {
     if (event?.invalidTokenRecord === true) continue;
     const model = modelLabel(event.model);
     const allowFractional = event.rangeAllocationEstimated === true;
+    const tokens = tokenValue(event.totalTokens, { allowFractional });
+    const scaledTokens = tokens / scale;
+    totalTokens += scaledTokens;
     totals.set(
       model,
-      checkedTokenAdd(
-        totals.get(model) ?? 0,
-        tokenValue(event.totalTokens, { allowFractional }),
-        { allowFractional },
-      ),
+      (totals.get(model) ?? 0) + scaledTokens,
     );
+    const scaleFactor = Math.max(1, totalTokens / MAX_SAFE_TOKEN_COUNT);
+    if (scaleFactor === 1) continue;
+    for (const [modelName, value] of totals) {
+      totals.set(modelName, value / scaleFactor);
+    }
+    totalTokens = MAX_SAFE_TOKEN_COUNT;
+    scale *= scaleFactor;
   }
   return [...totals.entries()]
     .map(([model, totalTokens]) => ({ model, totalTokens }))
@@ -221,6 +230,19 @@ function usageTypeTotals(events) {
       totalTokens,
     }))
     .sort((left, right) => right.totalTokens - left.totalTokens);
+}
+
+function addCacheTotals(state, inputTokens, cachedInputTokens) {
+  const nextInput = state.inputTokens + inputTokens / state.scale;
+  const nextCached = state.cachedInputTokens + cachedInputTokens / state.scale;
+  const scaleFactor = Math.max(
+    1,
+    nextInput / MAX_SAFE_TOKEN_COUNT,
+    nextCached / MAX_SAFE_TOKEN_COUNT,
+  );
+  state.inputTokens = nextInput / scaleFactor;
+  state.cachedInputTokens = nextCached / scaleFactor;
+  state.scale *= scaleFactor;
 }
 
 function latestWeeklyQuotaObservation(snapshot) {
@@ -361,33 +383,28 @@ function summary(events, projectRows) {
     },
     0,
   );
-  const inputTokens = events.reduce(
-    (sum, event) => {
-      if (event?.invalidTokenRecord === true) return sum;
-      const allowFractional = event.rangeAllocationEstimated === true;
-      return checkedTokenAdd(
-        sum,
-        tokenValue(event.inputTokens, { allowFractional }),
-        { allowFractional },
-      );
-    },
-    0,
-  );
-  const cachedInputTokens = events.reduce((sum, event) => {
-    if (event?.invalidTokenRecord === true) return sum;
+  const cacheTotals = { inputTokens: 0, cachedInputTokens: 0, scale: 1 };
+  for (const event of events) {
+    if (event?.invalidTokenRecord === true) continue;
     const allowFractional = event.rangeAllocationEstimated === true;
     const input = tokenValue(event.inputTokens, { allowFractional });
-    const cached = tokenValue(event.cachedInputTokens, { allowFractional });
-    return checkedTokenAdd(sum, Math.min(input, cached), { allowFractional });
-  }, 0);
+    const cached = Math.min(
+      input,
+      tokenValue(event.cachedInputTokens, { allowFractional }),
+    );
+    addCacheTotals(cacheTotals, input, cached);
+  }
   return {
     totalTokens,
     calls,
     threads: threadIds.size,
     outputTokens,
-    inputTokens,
-    cachedInputTokens,
-    uncachedInputTokens: Math.max(0, inputTokens - cachedInputTokens),
+    inputTokens: cacheTotals.inputTokens,
+    cachedInputTokens: cacheTotals.cachedInputTokens,
+    uncachedInputTokens: Math.max(
+      0,
+      cacheTotals.inputTokens - cacheTotals.cachedInputTokens,
+    ),
     models: modelTotals(events),
     usageTypes: usageTypeTotals(events),
   };
