@@ -8,10 +8,17 @@ import {
   INTERACTIVE_HELP,
 } from "./token-ledger-controls.mjs";
 import {
+  MAX_SAFE_TOKEN_COUNT,
+  checkedFiniteAdd,
+  checkedTokenAdd,
+  tokenValue,
   usageBucketsInRange,
   usageCallCount,
   usageThreadIds,
 } from "../lib/token-ledger-usage.mjs";
+import { calendarDateParts } from "../lib/token-ledger-calendar.mjs";
+import { sanitizeTerminalText } from "../lib/token-ledger-terminal-text.mjs";
+import { historyScopeLabel } from "../lib/token-ledger-collection.mjs";
 
 const RESET = "\u001b[0m";
 const PRIMARY_STYLE = [38, 2, 255, 255, 255];
@@ -41,7 +48,7 @@ function colorize(value, code, enabled) {
 }
 
 function stripAnsi(value) {
-  return String(value).replace(/\u001b\[[0-9;]*m/g, "");
+  return sanitizeTerminalText(value);
 }
 
 function visibleLength(value) {
@@ -124,7 +131,7 @@ function modelColor(model) {
 }
 
 function usageTypeLabel(value) {
-  const words = String(value || "unknown")
+  const words = sanitizeTerminalText(value || "unknown")
     .trim()
     .replace(/[_-]+/g, " ")
     .split(/\s+/)
@@ -140,7 +147,12 @@ function usageTypeLabel(value) {
 }
 
 function displayProject(row) {
-  return row.displayProject || row.project || "Unlabelled activity";
+  const label = sanitizeTerminalText(
+    row.displayProject || row.project || "Unlabelled activity",
+  )
+    .replace(/\s+/g, " ")
+    .trim();
+  return label || "Unlabelled activity";
 }
 
 function isRollingRange(range) {
@@ -161,26 +173,37 @@ function dateLabel(bounds, range = "day", rollingLabel = "1 day") {
     const end = `${monthNames[endParts[1] - 1]} ${String(endParts[2]).padStart(2, "0")}`;
     return `${start} – ${end} ${endParts[0]}`;
   }
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: bounds.timeZone,
+  const values = calendarDateParts(bounds.dateString, {
     weekday: "short",
     day: "2-digit",
     month: "short",
     year: "numeric",
-  }).formatToParts(bounds.start);
-  const values = Object.fromEntries(
-    parts
-      .filter((part) => part.type !== "literal")
-      .map((part) => [part.type, part.value]),
-  );
+  });
   return `${values.weekday} ${values.day} ${values.month} ${values.year}`.toUpperCase();
 }
 
 function modelTotals(events) {
   const totals = new Map();
+  let scale = 1;
+  let totalTokens = 0;
   for (const event of events) {
+    if (event?.invalidTokenRecord === true) continue;
     const model = modelLabel(event.model);
-    totals.set(model, (totals.get(model) ?? 0) + (Number(event.totalTokens) || 0));
+    const allowFractional = event.rangeAllocationEstimated === true;
+    const tokens = tokenValue(event.totalTokens, { allowFractional });
+    const scaledTokens = tokens / scale;
+    totalTokens += scaledTokens;
+    totals.set(
+      model,
+      (totals.get(model) ?? 0) + scaledTokens,
+    );
+    const scaleFactor = Math.max(1, totalTokens / MAX_SAFE_TOKEN_COUNT);
+    if (scaleFactor === 1) continue;
+    for (const [modelName, value] of totals) {
+      totals.set(modelName, value / scaleFactor);
+    }
+    totalTokens = MAX_SAFE_TOKEN_COUNT;
+    scale *= scaleFactor;
   }
   return [...totals.entries()]
     .map(([model, totalTokens]) => ({ model, totalTokens }))
@@ -189,9 +212,28 @@ function modelTotals(events) {
 
 function usageTypeTotals(events) {
   const totals = new Map();
+  let scale = 1;
+  let totalTokens = 0;
   for (const event of events) {
-    const key = String(event.useType || "unknown").trim().toLowerCase() || "unknown";
-    totals.set(key, (totals.get(key) ?? 0) + (Number(event.totalTokens) || 0));
+    if (event?.invalidTokenRecord === true) continue;
+    const key = sanitizeTerminalText(event.useType || "unknown")
+      .trim()
+      .toLowerCase() || "unknown";
+    const allowFractional = event.rangeAllocationEstimated === true;
+    const tokens = tokenValue(event.totalTokens, { allowFractional });
+    const scaledTokens = tokens / scale;
+    totalTokens += scaledTokens;
+    totals.set(
+      key,
+      (totals.get(key) ?? 0) + scaledTokens,
+    );
+    const scaleFactor = Math.max(1, totalTokens / MAX_SAFE_TOKEN_COUNT);
+    if (scaleFactor === 1) continue;
+    for (const [usageType, value] of totals) {
+      totals.set(usageType, value / scaleFactor);
+    }
+    totalTokens = MAX_SAFE_TOKEN_COUNT;
+    scale *= scaleFactor;
   }
   return [...totals.entries()]
     .map(([key, totalTokens]) => ({
@@ -200,6 +242,19 @@ function usageTypeTotals(events) {
       totalTokens,
     }))
     .sort((left, right) => right.totalTokens - left.totalTokens);
+}
+
+function addCacheTotals(state, inputTokens, cachedInputTokens) {
+  const nextInput = state.inputTokens + inputTokens / state.scale;
+  const nextCached = state.cachedInputTokens + cachedInputTokens / state.scale;
+  const scaleFactor = Math.max(
+    1,
+    nextInput / MAX_SAFE_TOKEN_COUNT,
+    nextCached / MAX_SAFE_TOKEN_COUNT,
+  );
+  state.inputTokens = nextInput / scaleFactor;
+  state.cachedInputTokens = nextCached / scaleFactor;
+  state.scale *= scaleFactor;
 }
 
 function latestWeeklyQuotaObservation(snapshot) {
@@ -249,20 +304,43 @@ export function quotaCycleSummary(snapshot = {}, displayedEvents = []) {
     };
   }
 
-  const sumUsage = (events) =>
-    events.reduce(
-      (acc, event) => {
-        const tokens = Number(event.totalTokens) || 0;
-        acc.tokens += tokens;
-        const credits = eventCredits(event);
-        if (Number.isFinite(credits) && credits >= 0) {
-          acc.credits += credits;
-          acc.ratedTokens += tokens;
-        }
-        return acc;
-      },
-      { tokens: 0, credits: 0, ratedTokens: 0 },
-    );
+  const sumUsage = (events, initialScale = 1) => {
+    const acc = {
+      tokens: 0,
+      credits: 0,
+      ratedTokens: 0,
+      hasUnrated: false,
+      scale: Number.isFinite(initialScale) && initialScale >= 1
+        ? initialScale
+        : 1,
+    };
+    for (const event of events) {
+      if (event?.invalidTokenRecord === true) continue;
+      const allowFractional = event.rangeAllocationEstimated === true;
+      const tokens = tokenValue(event.totalTokens, { allowFractional });
+      const contribution = tokens / acc.scale;
+      const nextTokens = acc.tokens + contribution;
+      const scaleFactor = Math.max(
+        1,
+        nextTokens / MAX_SAFE_TOKEN_COUNT,
+      );
+      if (scaleFactor > 1) {
+        acc.tokens /= scaleFactor;
+        acc.ratedTokens /= scaleFactor;
+        acc.scale *= scaleFactor;
+      }
+      const scaledContribution = contribution / scaleFactor;
+      acc.tokens += scaledContribution;
+      const credits = eventCredits(event);
+      if (Number.isFinite(credits) && credits >= 0) {
+        acc.credits = checkedFiniteAdd(acc.credits, credits);
+        acc.ratedTokens += scaledContribution;
+      } else if (tokens > 0) {
+        acc.hasUnrated = true;
+      }
+    }
+    return acc;
+  };
   const cycleEndMs = observedThroughMs + 1;
   const cycle = sumUsage(
     usageBucketsInRange(snapshot, windowStartMs, cycleEndMs),
@@ -273,6 +351,7 @@ export function quotaCycleSummary(snapshot = {}, displayedEvents = []) {
       windowStartMs,
       cycleEndMs,
     ),
+    cycle.scale,
   );
   const usedPercent = Math.min(100, Math.max(0, Number(observation.usedPercent) || 0));
   // The weekly meter weights usage by model, token type, and fast mode;
@@ -280,7 +359,10 @@ export function quotaCycleSummary(snapshot = {}, displayedEvents = []) {
   // when every event in the cycle is rated, and fall back to raw token
   // share otherwise.
   const creditsUsable =
-    cycle.tokens > 0 && cycle.ratedTokens === cycle.tokens && cycle.credits > 0;
+    !cycle.hasUnrated &&
+    cycle.tokens > 0 &&
+    cycle.ratedTokens === cycle.tokens &&
+    cycle.credits > 0;
   const displayedSharePercent = creditsUsable
     ? (displayed.credits / cycle.credits) * 100
     : cycle.tokens
@@ -302,39 +384,55 @@ export function quotaCycleSummary(snapshot = {}, displayedEvents = []) {
   };
 }
 
-function summary(events) {
-  const totalTokens = events.reduce(
-    (sum, event) => sum + (Number(event.totalTokens) || 0),
+function summary(events, projectRows) {
+  const totalTokens = projectRows.reduce(
+    (sum, row) => sum + row.totalTokens,
     0,
   );
   const calls = events.reduce(
-    (sum, event) => sum + usageCallCount(event),
+    (sum, event) => {
+      const allowFractional = event?.rangeAllocationEstimated === true;
+      return checkedTokenAdd(sum, usageCallCount(event), { allowFractional });
+    },
     0,
   );
   const threadIds = new Set(
     events.flatMap((event) => usageThreadIds(event)),
   );
   const outputTokens = events.reduce(
-    (sum, event) => sum + (Number(event.outputTokens) || 0),
+    (sum, event) => {
+      if (event?.invalidTokenRecord === true) return sum;
+      const allowFractional = event.rangeAllocationEstimated === true;
+      return checkedTokenAdd(
+        sum,
+        tokenValue(event.outputTokens, { allowFractional }),
+        { allowFractional },
+      );
+    },
     0,
   );
-  const inputTokens = events.reduce(
-    (sum, event) => sum + (Number(event.inputTokens) || 0),
-    0,
-  );
-  const cachedInputTokens = events.reduce((sum, event) => {
-    const input = Math.max(0, Number(event.inputTokens) || 0);
-    const cached = Math.max(0, Number(event.cachedInputTokens) || 0);
-    return sum + Math.min(input, cached);
-  }, 0);
+  const cacheTotals = { inputTokens: 0, cachedInputTokens: 0, scale: 1 };
+  for (const event of events) {
+    if (event?.invalidTokenRecord === true) continue;
+    const allowFractional = event.rangeAllocationEstimated === true;
+    const input = tokenValue(event.inputTokens, { allowFractional });
+    const cached = Math.min(
+      input,
+      tokenValue(event.cachedInputTokens, { allowFractional }),
+    );
+    addCacheTotals(cacheTotals, input, cached);
+  }
   return {
     totalTokens,
     calls,
     threads: threadIds.size,
     outputTokens,
-    inputTokens,
-    cachedInputTokens,
-    uncachedInputTokens: Math.max(0, inputTokens - cachedInputTokens),
+    inputTokens: cacheTotals.inputTokens,
+    cachedInputTokens: cacheTotals.cachedInputTokens,
+    uncachedInputTokens: Math.max(
+      0,
+      cacheTotals.inputTokens - cacheTotals.cachedInputTokens,
+    ),
     models: modelTotals(events),
     usageTypes: usageTypeTotals(events),
   };
@@ -407,7 +505,10 @@ function panelLines(rows, allRows, totalTokens, panelWidth, options, enabled) {
     panelWidth - labelWidth - shareWidth - totalWidth - 1 - rightPadding,
   );
   const maxTokens = allRows[0]?.totalTokens ?? 0;
-  const totalCredits = allRows.reduce((sum, item) => sum + item.rateCardCredits, 0) || 1;
+  const totalCredits = allRows.reduce(
+    (sum, item) => checkedFiniteAdd(sum, item.rateCardCredits),
+    0,
+  ) || 1;
   const selectedIndex = Math.min(
     Math.max(0, Math.trunc(Number(options.selectedIndex) || 0)),
     Math.max(0, rows.length - 1),
@@ -486,7 +587,12 @@ function sidebarLines(stats, panelWidth, enabled, options = {}, quota = null) {
           label: "Other",
           totalTokens: stats.usageTypes
             .slice(4)
-            .reduce((sum, item) => sum + item.totalTokens, 0),
+            .reduce(
+              (sum, item) => checkedTokenAdd(sum, item.totalTokens, {
+                allowFractional: true,
+              }),
+              0,
+            ),
         },
       ]
     : stats.usageTypes;
@@ -552,7 +658,7 @@ function snapshotLine(freshness, enabled) {
   return `${colorize("SNAPSHOT", ACCENT_STYLE, enabled)} ${colorize("·", SECONDARY_STYLE, enabled)} ${colorize(detail, SECONDARY_STYLE, enabled)}`;
 }
 
-function headerLines(stats, bounds, frameWidth, options, enabled, freshness) {
+function headerLines(stats, bounds, frameWidth, options, enabled, freshness, snapshot) {
   const left = colorize("TOKEN LEDGER", TITLE_STYLE, enabled);
   const date = colorize(
     dateLabel(bounds, options.range, options.rollingLabel),
@@ -572,6 +678,10 @@ function headerLines(stats, bounds, frameWidth, options, enabled, freshness) {
   const separator = colorize("·", SECONDARY_STYLE, enabled);
   const join = ` ${separator} `;
   const alignHeader = (line) => fit(` ${line}`, frameWidth);
+  const history = historyScopeLabel(snapshot);
+  const appendHistory = (lines) => history
+    ? [...lines, alignHeader(colorize(history, SECONDARY_STYLE, enabled))]
+    : lines;
   const fullLine = [
     left,
     date,
@@ -584,7 +694,7 @@ function headerLines(stats, bounds, frameWidth, options, enabled, freshness) {
   if (visibleLength(fullLine) < frameWidth) {
     const lines = [alignHeader(fullLine)];
     if (isRollingRange(options.range)) lines.push(alignHeader(snapshotLine(freshness, enabled)));
-    return lines;
+    return appendHistory(lines);
   }
 
   const compactDate = dateLabel(bounds, options.range, options.rollingLabel)
@@ -609,7 +719,7 @@ function headerLines(stats, bounds, frameWidth, options, enabled, freshness) {
   if (visibleLength(compactLine) < frameWidth) {
     const lines = [alignHeader(compactLine)];
     if (isRollingRange(options.range)) lines.push(alignHeader(snapshotLine(freshness, enabled)));
-    return lines;
+    return appendHistory(lines);
   }
 
   const minimalTitle = colorize(frameWidth >= 45 ? "LEDGER" : "L", TITLE_STYLE, enabled);
@@ -624,7 +734,7 @@ function headerLines(stats, bounds, frameWidth, options, enabled, freshness) {
   ].join(" ");
   const lines = [alignHeader(minimalLine)];
   if (isRollingRange(options.range)) lines.push(alignHeader(snapshotLine(freshness, enabled)));
-  return lines;
+  return appendHistory(lines);
 }
 
 export function renderTerminal({
@@ -637,7 +747,7 @@ export function renderTerminal({
   allRows,
 }) {
   const enabled = colorsEnabled(options);
-  const stats = summary(events);
+  const stats = summary(events, allRows);
   const quota = quotaCycleSummary(snapshot, events);
   stats.projectCount = allRows.length;
   const columns = options.width ?? (Number(process.stdout.columns) || 120);
@@ -648,7 +758,7 @@ export function renderTerminal({
   const left = panelLines(rows, allRows, stats.totalTokens, leftWidth, options, enabled);
   const right = sideBySide ? sidebarLines(stats, sideWidth, enabled, options, quota) : null;
   const lines = [
-    ...headerLines(stats, bounds, frameWidth, options, enabled, snapshotFreshness),
+    ...headerLines(stats, bounds, frameWidth, options, enabled, snapshotFreshness, snapshot),
     ...panel(left, right, leftWidth, sideWidth, enabled, options.ascii),
   ];
   if (!sideBySide) {

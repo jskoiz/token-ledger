@@ -3,10 +3,19 @@ import {
   CODEX_CREDIT_RATE_CARD_AS_OF,
 } from "../lib/token-ledger-rates.mjs";
 import {
-  splitUsageBucketsAtBoundaries,
-  usageBuckets,
-  usageBucketsInRange,
+  MAX_SAFE_TOKEN_COUNT,
+  checkedFiniteAdd,
+  checkedTokenAdd,
+  tokenValue,
 } from "../lib/token-ledger-usage.mjs";
+import {
+  createTimeZoneFormatter,
+  localDateBoundary,
+  localDateString,
+  shiftCalendarDate,
+  todayInTimeZone,
+} from "../lib/token-ledger-calendar.mjs";
+import { buildRangeAnalysis as buildIndexedRangeAnalysis } from "../lib/token-ledger-range-analysis.mjs";
 
 const WEEK_MINUTES = 10_080;
 const RESET_JITTER_SECONDS = 5 * 60;
@@ -33,79 +42,20 @@ function finiteTimestamp(value) {
   return Number.isFinite(timestamp) ? timestamp : null;
 }
 
-function dateStringFromParts(parts) {
-  return [parts.year, parts.month, parts.day]
-    .map((value, index) =>
-      index === 0 ? String(value) : String(value).padStart(2, "0"),
-    )
-    .join("-");
-}
-
-function shiftCalendarDate(dateString, amount) {
-  const [year, month, day] = dateString.split("-").map(Number);
-  const date = new Date(Date.UTC(year, month - 1, day + amount));
-  return dateStringFromParts({
-    year: date.getUTCFullYear(),
-    month: date.getUTCMonth() + 1,
-    day: date.getUTCDate(),
-  });
-}
-
-function offsetAt(instant, timeZone) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    timeZoneName: "longOffset",
-  }).formatToParts(instant);
-  const value = parts.find((part) => part.type === "timeZoneName")?.value ?? "GMT";
-  if (value === "GMT") return 0;
-  const match = value.match(/^GMT([+-])(\d{2}):?(\d{2})?$/);
-  if (!match) return 0;
-  const minutes = Number(match[2]) * 60 + Number(match[3] || 0);
-  return (match[1] === "+" ? 1 : -1) * minutes * 60 * 1_000;
-}
-
-function zonedMidnight(dateString, timeZone) {
-  const [year, month, day] = dateString.split("-").map(Number);
-  const utcGuess = Date.UTC(year, month - 1, day);
-  let instant = new Date(utcGuess - offsetAt(new Date(utcGuess), timeZone));
-  instant = new Date(utcGuess - offsetAt(instant, timeZone));
-  return instant;
-}
-
-function localDateString(timestampMs, timeZone) {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date(timestampMs));
-}
-
-function todayInTimeZone(timeZone) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(new Date());
-  const values = Object.fromEntries(
-    parts
-      .filter((part) => part.type !== "literal")
-      .map((part) => [part.type, Number(part.value)]),
-  );
-  return dateStringFromParts(values);
-}
-
 export function multiDayBounds(value, timeZone, rangeDays) {
   const days = Number(rangeDays);
   if (!Number.isSafeInteger(days) || days < 1 || days > MAX_TREND_DAYS) {
     throw new Error(`Trend range must be between 1 and ${MAX_TREND_DAYS} days.`);
   }
+  const formatter = createTimeZoneFormatter(timeZone);
   let endDateString = value;
   if (!endDateString || endDateString === "today") {
-    endDateString = todayInTimeZone(timeZone);
+    endDateString = todayInTimeZone(timeZone, formatter);
   } else if (endDateString === "yesterday") {
-    endDateString = shiftCalendarDate(todayInTimeZone(timeZone), -1);
+    endDateString = shiftCalendarDate(
+      todayInTimeZone(timeZone, formatter),
+      -1,
+    );
   }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(endDateString)) {
     throw new Error("Trend end date must be YYYY-MM-DD, today, or yesterday.");
@@ -124,11 +74,23 @@ export function multiDayBounds(value, timeZone, rangeDays) {
     dateString: endDateString,
     startDateString,
     endDateString,
-    start: zonedMidnight(startDateString, timeZone),
-    end: zonedMidnight(shiftCalendarDate(endDateString, 1), timeZone),
+    start: localDateBoundary(startDateString, timeZone, formatter),
+    end: localDateBoundary(
+      shiftCalendarDate(endDateString, 1),
+      timeZone,
+      formatter,
+    ),
     timeZone,
     rangeDays: days,
   };
+}
+
+export function priorPeriodBounds(bounds, days = bounds.rangeDays) {
+  return multiDayBounds(
+    shiftCalendarDate(bounds.startDateString, -1),
+    bounds.timeZone,
+    days,
+  );
 }
 
 function clampPercent(value) {
@@ -187,6 +149,13 @@ export function weeklyQuotaObservations(snapshot = {}) {
   );
   if (accountScoped.length) {
     observations = accountScoped;
+  } else if (
+    observations.some(
+      (observation) => observation.scope === "named",
+    )
+  ) {
+    // Explicitly named-only input has no account-wide meter to report.
+    observations = [];
   } else if (observations.some((observation) => observation.limitKey)) {
     const groups = new Map();
     for (const observation of observations) {
@@ -198,8 +167,9 @@ export function weeklyQuotaObservations(snapshot = {}) {
     const accountWide = [...groups.values()].filter((group) =>
       group.every((observation) => !observation.limitName),
     );
-    const pool = accountWide.length ? accountWide : [...groups.values()];
-    observations = pool.sort((left, right) => right.length - left.length)[0];
+    observations = accountWide.length
+      ? accountWide.sort((left, right) => right.length - left.length)[0]
+      : [];
   } else {
     const accountWide = observations.filter(
       (observation) => !observation.limitName,
@@ -316,27 +286,41 @@ export function eventCredits(event) {
 function eventWeight(event, fallbackCreditsPerToken) {
   const credits = eventCredits(event);
   if (Number.isFinite(credits) && credits > 0) return credits;
-  const tokens = Math.max(0, Number(event.totalTokens) || 0);
+  const tokens = tokenValue(event.totalTokens, {
+    allowFractional: event.rangeAllocationEstimated === true,
+  });
   return fallbackCreditsPerToken > 0 ? tokens * fallbackCreditsPerToken : tokens;
+}
+
+function addRatedTotals(totals, credits, tokens) {
+  const scaledTokens = tokens / totals.scale;
+  const scaledCredits = credits / totals.scale;
+  const nextTokens = totals.tokens + scaledTokens;
+  const nextCredits = checkedFiniteAdd(totals.credits, scaledCredits);
+  const scaleFactor = Math.max(1, nextTokens / MAX_SAFE_TOKEN_COUNT);
+  totals.tokens = nextTokens / scaleFactor;
+  totals.credits = nextCredits / scaleFactor;
+  totals.scale *= scaleFactor;
 }
 
 function allocateBurn(delta, events, timeZone) {
   if (!(delta > 0)) return { contributions: new Map(), method: "none" };
 
-  let ratedCredits = 0;
-  let ratedTokens = 0;
+  const ratedTotals = { credits: 0, tokens: 0, scale: 1 };
   let hasUnrated = false;
   for (const event of events) {
+    if (event?.invalidTokenRecord === true) continue;
     const credits = eventCredits(event);
-    const tokens = Math.max(0, Number(event.totalTokens) || 0);
+    const allowFractional = event.rangeAllocationEstimated === true;
+    const tokens = tokenValue(event.totalTokens, { allowFractional });
     if (Number.isFinite(credits) && credits > 0) {
-      ratedCredits += credits;
-      ratedTokens += tokens;
+      addRatedTotals(ratedTotals, credits, tokens);
     } else if (tokens > 0) {
       hasUnrated = true;
     }
   }
 
+  const { credits: ratedCredits, tokens: ratedTokens } = ratedTotals;
   const fallbackCreditsPerToken =
     ratedCredits > 0 && ratedTokens > 0 ? ratedCredits / ratedTokens : 0;
   const weights = new Map();
@@ -346,12 +330,12 @@ function allocateBurn(delta, events, timeZone) {
     const weight = eventWeight(event, fallbackCreditsPerToken);
     if (!(weight > 0)) continue;
     const model = trendModelLabel(event.model);
-    weights.set(model, (weights.get(model) ?? 0) + weight);
+    weights.set(model, checkedFiniteAdd(weights.get(model) ?? 0, weight));
     if (timeZone) {
       const day = localDateString(event.timestampMs, timeZone);
-      dayWeights.set(day, (dayWeights.get(day) ?? 0) + weight);
+      dayWeights.set(day, checkedFiniteAdd(dayWeights.get(day) ?? 0, weight));
     }
-    totalWeight += weight;
+    totalWeight = checkedFiniteAdd(totalWeight, weight);
   }
 
   if (!(totalWeight > 0)) {
@@ -383,19 +367,24 @@ function allocateBurn(delta, events, timeZone) {
 }
 
 // Fractions of the span [startMs, endMs) falling on each local calendar day.
-function durationDayShares(startMs, endMs, timeZone) {
+export function durationDayShares(startMs, endMs, timeZone) {
+  const formatter = createTimeZoneFormatter(timeZone);
   if (!(endMs > startMs)) {
-    return new Map([[localDateString(endMs, timeZone), 1]]);
+    return new Map([[localDateString(endMs, timeZone, formatter), 1]]);
   }
   const shares = new Map();
   let cursor = startMs;
   while (cursor < endMs) {
-    const day = localDateString(cursor, timeZone);
-    const nextMidnightMs = zonedMidnight(
+    const day = localDateString(cursor, timeZone, formatter);
+    const nextBoundaryMs = localDateBoundary(
       shiftCalendarDate(day, 1),
       timeZone,
+      formatter,
     ).getTime();
-    const sliceEnd = Math.min(endMs, Math.max(nextMidnightMs, cursor + 1));
+    if (!(nextBoundaryMs > cursor)) {
+      throw new Error(`Local calendar boundary did not advance after ${day}.`);
+    }
+    const sliceEnd = Math.min(endMs, nextBoundaryMs);
     shares.set(day, (shares.get(day) ?? 0) + (sliceEnd - cursor));
     cursor = sliceEnd;
   }
@@ -405,11 +394,27 @@ function durationDayShares(startMs, endMs, timeZone) {
 
 function tokenTotalsByModel(events) {
   const totals = new Map();
+  let scale = 1;
+  let totalTokens = 0;
   for (const event of events) {
-    const tokens = Math.max(0, Number(event.totalTokens) || 0);
+    if (event?.invalidTokenRecord === true) continue;
+    const allowFractional = event.rangeAllocationEstimated === true;
+    const tokens = tokenValue(event.totalTokens, { allowFractional });
     if (!(tokens > 0)) continue;
     const model = trendModelLabel(event.model);
-    totals.set(model, (totals.get(model) ?? 0) + tokens);
+    const contribution = tokens / scale;
+    const nextTotal = totalTokens + contribution;
+    const scaleFactor = Math.max(1, nextTotal / MAX_SAFE_TOKEN_COUNT);
+    if (scaleFactor > 1) {
+      for (const [modelName, value] of totals) {
+        totals.set(modelName, value / scaleFactor);
+      }
+      totalTokens /= scaleFactor;
+      scale *= scaleFactor;
+    }
+    const scaledContribution = contribution / scaleFactor;
+    totals.set(model, (totals.get(model) ?? 0) + scaledContribution);
+    totalTokens += scaledContribution;
   }
   return totals;
 }
@@ -424,12 +429,6 @@ function cloneAllocations(allocations) {
   return Object.fromEntries(
     [...allocations.entries()].sort(([left], [right]) => modelSort(left, right)),
   );
-}
-
-function eventsInBounds(events, bounds) {
-  const startMs = bounds.start.getTime();
-  const endMs = bounds.end.getTime();
-  return usageBucketsInRange({ events }, startMs, endMs);
 }
 
 function buildModelStats(displayedEvents, intervals, bounds) {
@@ -449,17 +448,26 @@ function buildModelStats(displayedEvents, intervals, bounds) {
   };
 
   for (const event of displayedEvents) {
+    if (event?.invalidTokenRecord === true) continue;
     const model = trendModelLabel(event.model);
     const row = rowFor(model);
-    const tokens = Math.max(0, Number(event.totalTokens) || 0);
+    const allowFractional = event.rangeAllocationEstimated === true;
+    const tokens = tokenValue(event.totalTokens, { allowFractional });
     const credits = eventCredits(event);
-    row.tokens += tokens;
+    row.tokens = checkedTokenAdd(row.tokens, tokens, { allowFractional });
     if (Number.isFinite(credits) && credits >= 0) {
-      row.credits += credits;
-      row.ratedTokens += tokens;
+      row.credits = checkedFiniteAdd(row.credits, credits);
+      row.ratedTokens = checkedTokenAdd(row.ratedTokens, tokens, {
+        allowFractional,
+      });
     }
     const effort = String(event.effort || "unknown").toLowerCase();
-    row.efforts.set(effort, (row.efforts.get(effort) ?? 0) + tokens);
+    row.efforts.set(
+      effort,
+      checkedTokenAdd(row.efforts.get(effort) ?? 0, tokens, {
+        allowFractional,
+      }),
+    );
   }
 
   const startMs = bounds.start.getTime();
@@ -468,8 +476,12 @@ function buildModelStats(displayedEvents, intervals, bounds) {
     if (interval.endMs < startMs || interval.endMs >= endMs) continue;
     for (const [model, burnPoints] of interval.contributions) {
       const row = rowFor(model);
-      row.burnPoints += burnPoints;
-      row.attributedTokens += interval.modelTokens.get(model) ?? 0;
+      row.burnPoints = checkedFiniteAdd(row.burnPoints, burnPoints);
+      row.attributedTokens = checkedTokenAdd(
+        row.attributedTokens,
+        interval.modelTokens.get(model) ?? 0,
+        { allowFractional: true },
+      );
     }
   }
 
@@ -502,13 +514,33 @@ function buildModelStats(displayedEvents, intervals, bounds) {
     );
 }
 
-export function buildUsageTrend(snapshot = {}, bounds) {
+export function buildRangeAnalysis(
+  snapshot = {},
+  bounds,
+  { priorBounds = null, includeTrend = true } = {},
+) {
+  const quotaObservations = normalizeQuotaTimeline(
+    weeklyQuotaObservations(snapshot),
+  );
+  const indexed = buildIndexedRangeAnalysis(snapshot, bounds, {
+    priorBounds,
+    quotaObservations,
+  });
+  return Object.freeze({
+    ...indexed,
+    trend: includeTrend
+      ? buildUsageTrendFromAnalysis(snapshot, bounds, indexed)
+      : null,
+  });
+}
+
+function buildUsageTrendFromAnalysis(snapshot, bounds, rangeAnalysis) {
   const startMs = bounds.start.getTime();
   const endMs = bounds.end.getTime();
-  const displayedEvents = eventsInBounds(usageBuckets(snapshot), bounds);
-  const observations = normalizeQuotaTimeline(
-    weeklyQuotaObservations(snapshot),
-  ).filter((observation) => observation.timestampMs < endMs);
+  const displayedEvents = rangeAnalysis.currentEvents;
+  const observations = rangeAnalysis.quotaObservations.filter(
+    (observation) => observation.timestampMs < endMs,
+  );
 
   if (!observations.length) {
     return {
@@ -524,19 +556,8 @@ export function buildUsageTrend(snapshot = {}, bounds) {
     };
   }
 
-  const sortedEvents = splitUsageBucketsAtBoundaries(
-    usageBuckets(snapshot),
-    [
-      startMs,
-      endMs,
-      ...observations.flatMap((observation) => [
-        observation.cycleStartMs,
-        observation.timestampMs,
-      ]),
-    ],
-  )
+  const sortedEvents = rangeAnalysis.trendEvents
     .map((event) => ({ ...event, timestampMs: finiteTimestamp(event.timestamp) }))
-    .filter((event) => event.timestampMs !== null && event.timestampMs < endMs)
     .sort((left, right) => left.timestampMs - right.timestampMs);
   const points = [];
   const resets = [];
@@ -598,7 +619,10 @@ export function buildUsageTrend(snapshot = {}, bounds) {
       methods.add(allocation.method);
     }
     for (const [model, burnPoints] of allocation.contributions) {
-      allocations.set(model, (allocations.get(model) ?? 0) + burnPoints);
+      allocations.set(
+        model,
+        checkedFiniteAdd(allocations.get(model) ?? 0, burnPoints),
+      );
     }
     if (delta > 0) {
       intervals.push({
@@ -743,6 +767,15 @@ export function buildUsageTrend(snapshot = {}, bounds) {
   };
 }
 
+export function buildUsageTrend(snapshot = {}, bounds, { analysis = null } = {}) {
+  const rangeAnalysis = analysis ?? buildRangeAnalysis(snapshot, bounds);
+  return rangeAnalysis.trend ?? buildUsageTrendFromAnalysis(
+    snapshot,
+    bounds,
+    rangeAnalysis,
+  );
+}
+
 // Bin observed meter drain into calendar-day (or multi-day) columns in the
 // same percent unit as the meter line. Daily totals are the meter's own
 // observed drops; only the per-model split within a drop and the day
@@ -779,8 +812,8 @@ export function buildBurnDayBins(trend, bounds, { days, binSize = 1 } = {}) {
       )) {
         const share = burnPoints * fraction;
         if (!(share > 0)) continue;
-        bin.values.set(model, (bin.values.get(model) ?? 0) + share);
-        bin.totalPercent += share;
+        bin.values.set(model, checkedFiniteAdd(bin.values.get(model) ?? 0, share));
+        bin.totalPercent = checkedFiniteAdd(bin.totalPercent, share);
       }
     }
   }
@@ -789,8 +822,8 @@ export function buildBurnDayBins(trend, bounds, { days, binSize = 1 } = {}) {
   let totalPercent = 0;
   for (const bin of bins) {
     for (const [model, value] of bin.values) {
-      totals.set(model, (totals.get(model) ?? 0) + value);
-      totalPercent += value;
+      totals.set(model, checkedFiniteAdd(totals.get(model) ?? 0, value));
+      totalPercent = checkedFiniteAdd(totalPercent, value);
     }
   }
   return { bins, totals, totalPercent, binSize, binCount };

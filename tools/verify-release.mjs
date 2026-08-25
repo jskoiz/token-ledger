@@ -32,7 +32,6 @@ const FORBIDDEN_PACKED_PATHS = [
   "package-lock.json",
   "tests/",
   "tools/",
-  "tsconfig.json",
 ];
 
 function normalizePath(value) {

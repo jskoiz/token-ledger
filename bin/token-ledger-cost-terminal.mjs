@@ -8,7 +8,7 @@ import {
   hasDetailedTokenBreakdown,
   normalizeCodexCreditModel,
 } from "../lib/token-ledger-rates.mjs";
-import { sanitizeTerminalText } from "../lib/token-ledger-text.mjs";
+import { sanitizeTerminalText } from "../lib/token-ledger-terminal-text.mjs";
 
 function nonNegative(value) {
   const number = Number(value);
