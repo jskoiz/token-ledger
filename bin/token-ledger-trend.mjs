@@ -1,12 +1,12 @@
 import {
   creditsForUsage,
-  FAST_MODE_MULTIPLIER,
   RATE_CARD_AS_OF,
-} from "./token-ledger-rates.mjs";
+} from "../lib/token-ledger-rates.mjs";
 import {
-  splitUsageBucketsAtBoundaries,
-  usageBuckets,
-  usageBucketsInRange,
+  MAX_SAFE_TOKEN_COUNT,
+  checkedFiniteAdd,
+  checkedTokenAdd,
+  tokenValue,
 } from "../lib/token-ledger-usage.mjs";
 import {
   createTimeZoneFormatter,
@@ -15,6 +15,7 @@ import {
   shiftCalendarDate,
   todayInTimeZone,
 } from "../lib/token-ledger-calendar.mjs";
+import { buildRangeAnalysis as buildIndexedRangeAnalysis } from "../lib/token-ledger-range-analysis.mjs";
 
 const WEEK_MINUTES = 10_080;
 const RESET_JITTER_SECONDS = 5 * 60;
@@ -84,6 +85,14 @@ export function multiDayBounds(value, timeZone, rangeDays) {
   };
 }
 
+export function priorPeriodBounds(bounds, days = bounds.rangeDays) {
+  return multiDayBounds(
+    shiftCalendarDate(bounds.startDateString, -1),
+    bounds.timeZone,
+    days,
+  );
+}
+
 function clampPercent(value) {
   return Math.min(100, Math.max(0, Number(value) || 0));
 }
@@ -140,6 +149,13 @@ export function weeklyQuotaObservations(snapshot = {}) {
   );
   if (accountScoped.length) {
     observations = accountScoped;
+  } else if (
+    observations.some(
+      (observation) => observation.scope === "named",
+    )
+  ) {
+    // Explicitly named-only input has no account-wide meter to report.
+    observations = [];
   } else if (observations.some((observation) => observation.limitKey)) {
     const groups = new Map();
     for (const observation of observations) {
@@ -151,8 +167,9 @@ export function weeklyQuotaObservations(snapshot = {}) {
     const accountWide = [...groups.values()].filter((group) =>
       group.every((observation) => !observation.limitName),
     );
-    const pool = accountWide.length ? accountWide : [...groups.values()];
-    observations = pool.sort((left, right) => right.length - left.length)[0];
+    observations = accountWide.length
+      ? accountWide.sort((left, right) => right.length - left.length)[0]
+      : [];
   } else {
     const accountWide = observations.filter(
       (observation) => !observation.limitName,
@@ -260,10 +277,8 @@ export function eventCredits(event) {
   // Recompute from token components first so the current rate card applies;
   // snapshots can carry credits stored under an outdated card. Fast-mode
   // turns (service tier "priority") debit the limit at a higher rate.
-  const multiplier =
-    event.serviceTier === "priority" ? FAST_MODE_MULTIPLIER : 1;
-  const computed = creditsForUsage(event.model, event);
-  if (Number.isFinite(computed) && computed >= 0) return computed * multiplier;
+  const computed = creditsForUsage(event.model, event, event.serviceTier);
+  if (Number.isFinite(computed) && computed >= 0) return computed;
   const stored = Number(event.rateCardCredits);
   if (event.rateCardCredits !== null && event.rateCardCredits !== undefined) {
     // Stored credits from current snapshots already include the fast-mode
@@ -276,27 +291,41 @@ export function eventCredits(event) {
 function eventWeight(event, fallbackCreditsPerToken) {
   const credits = eventCredits(event);
   if (Number.isFinite(credits) && credits > 0) return credits;
-  const tokens = Math.max(0, Number(event.totalTokens) || 0);
+  const tokens = tokenValue(event.totalTokens, {
+    allowFractional: event.rangeAllocationEstimated === true,
+  });
   return fallbackCreditsPerToken > 0 ? tokens * fallbackCreditsPerToken : tokens;
+}
+
+function addRatedTotals(totals, credits, tokens) {
+  const scaledTokens = tokens / totals.scale;
+  const scaledCredits = credits / totals.scale;
+  const nextTokens = totals.tokens + scaledTokens;
+  const nextCredits = checkedFiniteAdd(totals.credits, scaledCredits);
+  const scaleFactor = Math.max(1, nextTokens / MAX_SAFE_TOKEN_COUNT);
+  totals.tokens = nextTokens / scaleFactor;
+  totals.credits = nextCredits / scaleFactor;
+  totals.scale *= scaleFactor;
 }
 
 function allocateBurn(delta, events, timeZone) {
   if (!(delta > 0)) return { contributions: new Map(), method: "none" };
 
-  let ratedCredits = 0;
-  let ratedTokens = 0;
+  const ratedTotals = { credits: 0, tokens: 0, scale: 1 };
   let hasUnrated = false;
   for (const event of events) {
+    if (event?.invalidTokenRecord === true) continue;
     const credits = eventCredits(event);
-    const tokens = Math.max(0, Number(event.totalTokens) || 0);
+    const allowFractional = event.rangeAllocationEstimated === true;
+    const tokens = tokenValue(event.totalTokens, { allowFractional });
     if (Number.isFinite(credits) && credits > 0) {
-      ratedCredits += credits;
-      ratedTokens += tokens;
+      addRatedTotals(ratedTotals, credits, tokens);
     } else if (tokens > 0) {
       hasUnrated = true;
     }
   }
 
+  const { credits: ratedCredits, tokens: ratedTokens } = ratedTotals;
   const fallbackCreditsPerToken =
     ratedCredits > 0 && ratedTokens > 0 ? ratedCredits / ratedTokens : 0;
   const weights = new Map();
@@ -306,12 +335,12 @@ function allocateBurn(delta, events, timeZone) {
     const weight = eventWeight(event, fallbackCreditsPerToken);
     if (!(weight > 0)) continue;
     const model = trendModelLabel(event.model);
-    weights.set(model, (weights.get(model) ?? 0) + weight);
+    weights.set(model, checkedFiniteAdd(weights.get(model) ?? 0, weight));
     if (timeZone) {
       const day = localDateString(event.timestampMs, timeZone);
-      dayWeights.set(day, (dayWeights.get(day) ?? 0) + weight);
+      dayWeights.set(day, checkedFiniteAdd(dayWeights.get(day) ?? 0, weight));
     }
-    totalWeight += weight;
+    totalWeight = checkedFiniteAdd(totalWeight, weight);
   }
 
   if (!(totalWeight > 0)) {
@@ -370,11 +399,27 @@ export function durationDayShares(startMs, endMs, timeZone) {
 
 function tokenTotalsByModel(events) {
   const totals = new Map();
+  let scale = 1;
+  let totalTokens = 0;
   for (const event of events) {
-    const tokens = Math.max(0, Number(event.totalTokens) || 0);
+    if (event?.invalidTokenRecord === true) continue;
+    const allowFractional = event.rangeAllocationEstimated === true;
+    const tokens = tokenValue(event.totalTokens, { allowFractional });
     if (!(tokens > 0)) continue;
     const model = trendModelLabel(event.model);
-    totals.set(model, (totals.get(model) ?? 0) + tokens);
+    const contribution = tokens / scale;
+    const nextTotal = totalTokens + contribution;
+    const scaleFactor = Math.max(1, nextTotal / MAX_SAFE_TOKEN_COUNT);
+    if (scaleFactor > 1) {
+      for (const [modelName, value] of totals) {
+        totals.set(modelName, value / scaleFactor);
+      }
+      totalTokens /= scaleFactor;
+      scale *= scaleFactor;
+    }
+    const scaledContribution = contribution / scaleFactor;
+    totals.set(model, (totals.get(model) ?? 0) + scaledContribution);
+    totalTokens += scaledContribution;
   }
   return totals;
 }
@@ -389,12 +434,6 @@ function cloneAllocations(allocations) {
   return Object.fromEntries(
     [...allocations.entries()].sort(([left], [right]) => modelSort(left, right)),
   );
-}
-
-function eventsInBounds(events, bounds) {
-  const startMs = bounds.start.getTime();
-  const endMs = bounds.end.getTime();
-  return usageBucketsInRange({ events }, startMs, endMs);
 }
 
 function buildModelStats(displayedEvents, intervals, bounds) {
@@ -414,17 +453,26 @@ function buildModelStats(displayedEvents, intervals, bounds) {
   };
 
   for (const event of displayedEvents) {
+    if (event?.invalidTokenRecord === true) continue;
     const model = trendModelLabel(event.model);
     const row = rowFor(model);
-    const tokens = Math.max(0, Number(event.totalTokens) || 0);
+    const allowFractional = event.rangeAllocationEstimated === true;
+    const tokens = tokenValue(event.totalTokens, { allowFractional });
     const credits = eventCredits(event);
-    row.tokens += tokens;
+    row.tokens = checkedTokenAdd(row.tokens, tokens, { allowFractional });
     if (Number.isFinite(credits) && credits >= 0) {
-      row.credits += credits;
-      row.ratedTokens += tokens;
+      row.credits = checkedFiniteAdd(row.credits, credits);
+      row.ratedTokens = checkedTokenAdd(row.ratedTokens, tokens, {
+        allowFractional,
+      });
     }
     const effort = String(event.effort || "unknown").toLowerCase();
-    row.efforts.set(effort, (row.efforts.get(effort) ?? 0) + tokens);
+    row.efforts.set(
+      effort,
+      checkedTokenAdd(row.efforts.get(effort) ?? 0, tokens, {
+        allowFractional,
+      }),
+    );
   }
 
   const startMs = bounds.start.getTime();
@@ -433,8 +481,12 @@ function buildModelStats(displayedEvents, intervals, bounds) {
     if (interval.endMs < startMs || interval.endMs >= endMs) continue;
     for (const [model, burnPoints] of interval.contributions) {
       const row = rowFor(model);
-      row.burnPoints += burnPoints;
-      row.attributedTokens += interval.modelTokens.get(model) ?? 0;
+      row.burnPoints = checkedFiniteAdd(row.burnPoints, burnPoints);
+      row.attributedTokens = checkedTokenAdd(
+        row.attributedTokens,
+        interval.modelTokens.get(model) ?? 0,
+        { allowFractional: true },
+      );
     }
   }
 
@@ -467,13 +519,33 @@ function buildModelStats(displayedEvents, intervals, bounds) {
     );
 }
 
-export function buildUsageTrend(snapshot = {}, bounds) {
+export function buildRangeAnalysis(
+  snapshot = {},
+  bounds,
+  { priorBounds = null, includeTrend = true } = {},
+) {
+  const quotaObservations = normalizeQuotaTimeline(
+    weeklyQuotaObservations(snapshot),
+  );
+  const indexed = buildIndexedRangeAnalysis(snapshot, bounds, {
+    priorBounds,
+    quotaObservations,
+  });
+  return Object.freeze({
+    ...indexed,
+    trend: includeTrend
+      ? buildUsageTrendFromAnalysis(snapshot, bounds, indexed)
+      : null,
+  });
+}
+
+function buildUsageTrendFromAnalysis(snapshot, bounds, rangeAnalysis) {
   const startMs = bounds.start.getTime();
   const endMs = bounds.end.getTime();
-  const displayedEvents = eventsInBounds(usageBuckets(snapshot), bounds);
-  const observations = normalizeQuotaTimeline(
-    weeklyQuotaObservations(snapshot),
-  ).filter((observation) => observation.timestampMs < endMs);
+  const displayedEvents = rangeAnalysis.currentEvents;
+  const observations = rangeAnalysis.quotaObservations.filter(
+    (observation) => observation.timestampMs < endMs,
+  );
 
   if (!observations.length) {
     return {
@@ -489,19 +561,8 @@ export function buildUsageTrend(snapshot = {}, bounds) {
     };
   }
 
-  const sortedEvents = splitUsageBucketsAtBoundaries(
-    usageBuckets(snapshot),
-    [
-      startMs,
-      endMs,
-      ...observations.flatMap((observation) => [
-        observation.cycleStartMs,
-        observation.timestampMs,
-      ]),
-    ],
-  )
+  const sortedEvents = rangeAnalysis.trendEvents
     .map((event) => ({ ...event, timestampMs: finiteTimestamp(event.timestamp) }))
-    .filter((event) => event.timestampMs !== null && event.timestampMs < endMs)
     .sort((left, right) => left.timestampMs - right.timestampMs);
   const points = [];
   const resets = [];
@@ -563,7 +624,10 @@ export function buildUsageTrend(snapshot = {}, bounds) {
       methods.add(allocation.method);
     }
     for (const [model, burnPoints] of allocation.contributions) {
-      allocations.set(model, (allocations.get(model) ?? 0) + burnPoints);
+      allocations.set(
+        model,
+        checkedFiniteAdd(allocations.get(model) ?? 0, burnPoints),
+      );
     }
     if (delta > 0) {
       intervals.push({
@@ -708,6 +772,15 @@ export function buildUsageTrend(snapshot = {}, bounds) {
   };
 }
 
+export function buildUsageTrend(snapshot = {}, bounds, { analysis = null } = {}) {
+  const rangeAnalysis = analysis ?? buildRangeAnalysis(snapshot, bounds);
+  return rangeAnalysis.trend ?? buildUsageTrendFromAnalysis(
+    snapshot,
+    bounds,
+    rangeAnalysis,
+  );
+}
+
 // Bin observed meter drain into calendar-day (or multi-day) columns in the
 // same percent unit as the meter line. Daily totals are the meter's own
 // observed drops; only the per-model split within a drop and the day
@@ -744,8 +817,8 @@ export function buildBurnDayBins(trend, bounds, { days, binSize = 1 } = {}) {
       )) {
         const share = burnPoints * fraction;
         if (!(share > 0)) continue;
-        bin.values.set(model, (bin.values.get(model) ?? 0) + share);
-        bin.totalPercent += share;
+        bin.values.set(model, checkedFiniteAdd(bin.values.get(model) ?? 0, share));
+        bin.totalPercent = checkedFiniteAdd(bin.totalPercent, share);
       }
     }
   }
@@ -754,8 +827,8 @@ export function buildBurnDayBins(trend, bounds, { days, binSize = 1 } = {}) {
   let totalPercent = 0;
   for (const bin of bins) {
     for (const [model, value] of bin.values) {
-      totals.set(model, (totals.get(model) ?? 0) + value);
-      totalPercent += value;
+      totals.set(model, checkedFiniteAdd(totals.get(model) ?? 0, value));
+      totalPercent = checkedFiniteAdd(totalPercent, value);
     }
   }
   return { bins, totals, totalPercent, binSize, binCount };
