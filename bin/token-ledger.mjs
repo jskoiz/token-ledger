@@ -22,6 +22,14 @@ import {
 import { renderTrendCombo } from "./token-ledger-trend-terminal.mjs";
 import { startInteractive } from "./token-ledger-tui.mjs";
 import {
+  createTimeZoneFormatter,
+  formatCalendarDate,
+  localDateBoundary,
+  shiftCalendarDate,
+  todayInTimeZone,
+  validateTimeZone,
+} from "../lib/token-ledger-calendar.mjs";
+import {
   readPrivateSnapshot,
   writePrivateSnapshot,
 } from "../lib/token-ledger-snapshot.mjs";
@@ -443,86 +451,12 @@ export function parseArgs(argv) {
   return options;
 }
 
-function numericDateParts(date) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: date.timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(date.value);
-  const values = Object.fromEntries(
-    parts
-      .filter((part) => part.type !== "literal")
-      .map((part) => [part.type, Number(part.value)]),
-  );
-  return values;
-}
-
-function dateStringFromParts(parts) {
-  return [parts.year, parts.month, parts.day]
-    .map((value, index) => (index === 0 ? String(value) : String(value).padStart(2, "0")))
-    .join("-");
-}
-
-function shiftCalendarDate(value, amount) {
-  const date = new Date(`${value}T00:00:00.000Z`);
-  date.setUTCDate(date.getUTCDate() + amount);
-  return date.toISOString().slice(0, 10);
-}
-
-function validateTimeZone(timeZone) {
-  try {
-    new Intl.DateTimeFormat("en-US", { timeZone }).format();
-  } catch {
-    throw new Error(`Unknown IANA timezone: ${timeZone}`);
-  }
-}
-
-function offsetAt(instant, timeZone) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hourCycle: "h23",
-  }).formatToParts(instant);
-  const values = Object.fromEntries(
-    parts
-      .filter((part) => part.type !== "literal")
-      .map((part) => [part.type, Number(part.value)]),
-  );
-  return (
-    Date.UTC(
-      values.year,
-      values.month - 1,
-      values.day,
-      values.hour,
-      values.minute,
-      values.second,
-    ) - instant.getTime()
-  );
-}
-
-function zonedMidnight(dateString, timeZone) {
-  const [year, month, day] = dateString.split("-").map(Number);
-  const utcGuess = Date.UTC(year, month - 1, day);
-  let instant = new Date(utcGuess - offsetAt(new Date(utcGuess), timeZone));
-  const refinedOffset = offsetAt(instant, timeZone);
-  instant = new Date(utcGuess - refinedOffset);
-  return instant;
-}
-
 export function dayBounds(value, timeZone) {
   validateTimeZone(timeZone);
+  const formatter = createTimeZoneFormatter(timeZone);
   let dateString = value;
   if (value === "today" || value === "yesterday") {
-    const today = dateStringFromParts(numericDateParts({
-      value: new Date(),
-      timeZone,
-    }));
+    const today = todayInTimeZone(timeZone, formatter);
     dateString = value === "today" ? today : shiftCalendarDate(today, -1);
   }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateString)) {
@@ -538,8 +472,8 @@ export function dayBounds(value, timeZone) {
     throw new Error(`Invalid calendar day: ${dateString}`);
   }
   const nextDateString = shiftCalendarDate(dateString, 1);
-  const start = zonedMidnight(dateString, timeZone);
-  const end = zonedMidnight(nextDateString, timeZone);
+  const start = localDateBoundary(dateString, timeZone, formatter);
+  const end = localDateBoundary(nextDateString, timeZone, formatter);
   return { dateString, start, end, timeZone };
 }
 
@@ -550,7 +484,7 @@ export function weekBounds(value, timeZone) {
     ...endDay,
     startDateString,
     endDateString: endDay.dateString,
-    start: zonedMidnight(startDateString, timeZone),
+    start: localDateBoundary(startDateString, timeZone),
     rangeDays: 7,
   };
 }
@@ -1244,14 +1178,13 @@ async function render(
     : options.range === "rolling"
       ? `last ${options.rollingLabel}`
       : options.range === "week"
-      ? `${bounds.startDateString} through ${bounds.endDateString}`
-      : new Intl.DateTimeFormat("en-US", {
-        timeZone: bounds.timeZone,
-        weekday: "short",
-        month: "short",
-        day: "numeric",
-        year: "numeric",
-      }).format(bounds.start);
+        ? `${bounds.startDateString} through ${bounds.endDateString}`
+        : formatCalendarDate(bounds.dateString, {
+          weekday: "short",
+          month: "short",
+          day: "numeric",
+          year: "numeric",
+        });
   const unit = chartUnit(rows[0]?.totalTokens ?? 0);
   const shares = rows.map((row) =>
     totalTokens > 0 ? (row.totalTokens / totalTokens) * 100 : 0,

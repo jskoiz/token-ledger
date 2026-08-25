@@ -8,6 +8,13 @@ import {
   checkedTokenAdd,
   tokenValue,
 } from "../lib/token-ledger-usage.mjs";
+import {
+  createTimeZoneFormatter,
+  localDateBoundary,
+  localDateString,
+  shiftCalendarDate,
+  todayInTimeZone,
+} from "../lib/token-ledger-calendar.mjs";
 import { buildRangeAnalysis as buildIndexedRangeAnalysis } from "../lib/token-ledger-range-analysis.mjs";
 
 const WEEK_MINUTES = 10_080;
@@ -35,79 +42,20 @@ function finiteTimestamp(value) {
   return Number.isFinite(timestamp) ? timestamp : null;
 }
 
-function dateStringFromParts(parts) {
-  return [parts.year, parts.month, parts.day]
-    .map((value, index) =>
-      index === 0 ? String(value) : String(value).padStart(2, "0"),
-    )
-    .join("-");
-}
-
-function shiftCalendarDate(dateString, amount) {
-  const [year, month, day] = dateString.split("-").map(Number);
-  const date = new Date(Date.UTC(year, month - 1, day + amount));
-  return dateStringFromParts({
-    year: date.getUTCFullYear(),
-    month: date.getUTCMonth() + 1,
-    day: date.getUTCDate(),
-  });
-}
-
-function offsetAt(instant, timeZone) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    timeZoneName: "longOffset",
-  }).formatToParts(instant);
-  const value = parts.find((part) => part.type === "timeZoneName")?.value ?? "GMT";
-  if (value === "GMT") return 0;
-  const match = value.match(/^GMT([+-])(\d{2}):?(\d{2})?$/);
-  if (!match) return 0;
-  const minutes = Number(match[2]) * 60 + Number(match[3] || 0);
-  return (match[1] === "+" ? 1 : -1) * minutes * 60 * 1_000;
-}
-
-function zonedMidnight(dateString, timeZone) {
-  const [year, month, day] = dateString.split("-").map(Number);
-  const utcGuess = Date.UTC(year, month - 1, day);
-  let instant = new Date(utcGuess - offsetAt(new Date(utcGuess), timeZone));
-  instant = new Date(utcGuess - offsetAt(instant, timeZone));
-  return instant;
-}
-
-function localDateString(timestampMs, timeZone) {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date(timestampMs));
-}
-
-function todayInTimeZone(timeZone) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(new Date());
-  const values = Object.fromEntries(
-    parts
-      .filter((part) => part.type !== "literal")
-      .map((part) => [part.type, Number(part.value)]),
-  );
-  return dateStringFromParts(values);
-}
-
 export function multiDayBounds(value, timeZone, rangeDays) {
   const days = Number(rangeDays);
   if (!Number.isSafeInteger(days) || days < 1 || days > MAX_TREND_DAYS) {
     throw new Error(`Trend range must be between 1 and ${MAX_TREND_DAYS} days.`);
   }
+  const formatter = createTimeZoneFormatter(timeZone);
   let endDateString = value;
   if (!endDateString || endDateString === "today") {
-    endDateString = todayInTimeZone(timeZone);
+    endDateString = todayInTimeZone(timeZone, formatter);
   } else if (endDateString === "yesterday") {
-    endDateString = shiftCalendarDate(todayInTimeZone(timeZone), -1);
+    endDateString = shiftCalendarDate(
+      todayInTimeZone(timeZone, formatter),
+      -1,
+    );
   }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(endDateString)) {
     throw new Error("Trend end date must be YYYY-MM-DD, today, or yesterday.");
@@ -126,8 +74,12 @@ export function multiDayBounds(value, timeZone, rangeDays) {
     dateString: endDateString,
     startDateString,
     endDateString,
-    start: zonedMidnight(startDateString, timeZone),
-    end: zonedMidnight(shiftCalendarDate(endDateString, 1), timeZone),
+    start: localDateBoundary(startDateString, timeZone, formatter),
+    end: localDateBoundary(
+      shiftCalendarDate(endDateString, 1),
+      timeZone,
+      formatter,
+    ),
     timeZone,
     rangeDays: days,
   };
@@ -420,19 +372,24 @@ function allocateBurn(delta, events, timeZone) {
 }
 
 // Fractions of the span [startMs, endMs) falling on each local calendar day.
-function durationDayShares(startMs, endMs, timeZone) {
+export function durationDayShares(startMs, endMs, timeZone) {
+  const formatter = createTimeZoneFormatter(timeZone);
   if (!(endMs > startMs)) {
-    return new Map([[localDateString(endMs, timeZone), 1]]);
+    return new Map([[localDateString(endMs, timeZone, formatter), 1]]);
   }
   const shares = new Map();
   let cursor = startMs;
   while (cursor < endMs) {
-    const day = localDateString(cursor, timeZone);
-    const nextMidnightMs = zonedMidnight(
+    const day = localDateString(cursor, timeZone, formatter);
+    const nextBoundaryMs = localDateBoundary(
       shiftCalendarDate(day, 1),
       timeZone,
+      formatter,
     ).getTime();
-    const sliceEnd = Math.min(endMs, Math.max(nextMidnightMs, cursor + 1));
+    if (!(nextBoundaryMs > cursor)) {
+      throw new Error(`Local calendar boundary did not advance after ${day}.`);
+    }
+    const sliceEnd = Math.min(endMs, nextBoundaryMs);
     shares.set(day, (shares.get(day) ?? 0) + (sliceEnd - cursor));
     cursor = sliceEnd;
   }

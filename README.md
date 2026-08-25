@@ -55,6 +55,11 @@ dashboard is interactive. `j`/`k` select a project; `q`, `Q`, `Esc`, or
 `Ctrl-C` exits. Enter does not inspect a project, and `d` / `w` / `m` do not
 change the range; choose the range in the command.
 
+Calendar boundaries use the first representable instant on a local date when
+midnight is skipped. If a time-zone transition skips an entire local date, that
+date contributes an empty interval and the next representable date boundary is
+used.
+
 ## Cache and input controls
 
 `tledger report [Nd|Nw] --cache-rate` writes a separate, purpose-built cache

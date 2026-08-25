@@ -6,7 +6,12 @@ import {
   trendModelLabel,
 } from "./token-ledger-trend.mjs";
 import { chooseBinSize } from "./token-ledger-image-layout.mjs";
-import { shiftCalendarDate } from "./token-ledger-image-primitives.mjs";
+import {
+  createTimeZoneFormatter,
+  localDateBoundary,
+  localDateString,
+  shiftCalendarDate,
+} from "../lib/token-ledger-calendar.mjs";
 import {
   MAX_SAFE_TOKEN_COUNT,
   checkedTokenAdd,
@@ -26,43 +31,6 @@ const SCALE_HEADROOM = 1 - Number.EPSILON;
 
 function rateFor(inputTokens, cachedInputTokens) {
   return inputTokens > 0 ? (cachedInputTokens / inputTokens) * 100 : null;
-}
-
-function localDateFormatter(timeZone) {
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    timeZoneName: "longOffset",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  });
-}
-
-function localDateString(timestampMs, formatter) {
-  const parts = formatter.formatToParts(new Date(timestampMs));
-  const values = Object.fromEntries(
-    parts
-      .filter((part) => part.type !== "literal")
-      .map((part) => [part.type, part.value]),
-  );
-  return `${values.year}-${values.month}-${values.day}`;
-}
-
-function timeZoneOffsetMs(timestampMs, formatter) {
-  const parts = formatter.formatToParts(new Date(timestampMs));
-  const value = parts.find((part) => part.type === "timeZoneName")?.value ?? "GMT";
-  if (value === "GMT") return 0;
-  const match = value.match(/^GMT([+-])(\d{2}):?(\d{2})?$/);
-  if (!match) return 0;
-  const minutes = Number(match[2]) * 60 + Number(match[3] || 0);
-  return (match[1] === "+" ? 1 : -1) * minutes * 60 * 1_000;
-}
-
-function zonedMidnightMs(dateString, formatter) {
-  const [year, month, day] = dateString.split("-").map(Number);
-  const utcGuess = Date.UTC(year, month - 1, day);
-  const first = utcGuess - timeZoneOffsetMs(utcGuess, formatter);
-  return utcGuess - timeZoneOffsetMs(first, formatter);
 }
 
 function primitiveString(value) {
@@ -325,12 +293,16 @@ function accumulateRange(
   const modelTotals = new Map();
   const dateFormatter = bins === null
     ? null
-    : localDateFormatter(bounds.timeZone);
+    : createTimeZoneFormatter(bounds.timeZone);
 
   const boundaries = [
     startMs,
     ...((bins ?? []).map((bin) =>
-      zonedMidnightMs(bin.endDateString, dateFormatter))),
+      localDateBoundary(
+        bin.endDateString,
+        bounds.timeZone,
+        dateFormatter,
+      ).getTime())),
     endMs,
   ];
   const events = sourceEvents === null
@@ -352,7 +324,7 @@ function accumulateRange(
     const { breakdown } = parsed;
     const dateString = dateFormatter === null
       ? null
-      : localDateString(parsed.timestampMs, dateFormatter);
+      : localDateString(parsed.timestampMs, bounds.timeZone, dateFormatter);
     const binIndex = dateString === null ? null : dateIndexByString.get(dateString);
     const bin = binIndex === undefined || binIndex === null ? null : bins[binIndex];
     const callCount = usageCallCount(event);

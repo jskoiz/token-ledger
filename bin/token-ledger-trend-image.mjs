@@ -28,6 +28,10 @@ import {
   TREND_IMAGE_MODEL_COLORS,
   FAST_MODE_LABEL_COLOR,
 } from "./token-ledger-image-primitives.mjs";
+import {
+  formatCalendarDate,
+  localDateBoundary,
+} from "../lib/token-ledger-calendar.mjs";
 
 export {
   TREND_IMAGE_MODEL_COLORS,
@@ -99,43 +103,17 @@ function sortedModelEntries(values) {
     .sort(([left], [right]) => modelSort(left, right));
 }
 
-function dateParts(dateString) {
-  return dateString.split("-").map(Number);
-}
-
-function timeZoneOffsetMs(instant, timeZone) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    timeZoneName: "longOffset",
-  }).formatToParts(instant);
-  const value = parts.find((part) => part.type === "timeZoneName")?.value ?? "GMT";
-  if (value === "GMT") return 0;
-  const match = value.match(/^GMT([+-])(\d{2}):?(\d{2})?$/);
-  if (!match) return 0;
-  const minutes = Number(match[2]) * 60 + Number(match[3] || 0);
-  return (match[1] === "+" ? 1 : -1) * minutes * 60 * 1_000;
-}
-
-function zonedMidnight(dateString, timeZone) {
-  const [year, month, day] = dateParts(dateString);
-  const utcGuess = Date.UTC(year, month - 1, day);
-  const first = new Date(utcGuess - timeZoneOffsetMs(new Date(utcGuess), timeZone));
-  return new Date(utcGuess - timeZoneOffsetMs(first, timeZone));
-}
-
-function localDateLabel(dateString, timeZone) {
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone,
+function localDateLabel(dateString) {
+  return formatCalendarDate(dateString, {
     month: "short",
     day: "numeric",
-  }).format(zonedMidnight(dateString, timeZone));
+  });
 }
 
-function localWeekdayLabel(dateString, timeZone) {
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone,
+function localWeekdayLabel(dateString) {
+  return formatCalendarDate(dateString, {
     weekday: "short",
-  }).format(zonedMidnight(dateString, timeZone));
+  });
 }
 
 function timestampDateLabel(timestampMs, timeZone) {
@@ -167,11 +145,11 @@ function timestampTimeLabel(timestampMs, timeZone) {
   }).format(new Date(timestampMs));
 }
 
-function binDateLabel(bin, timeZone) {
-  const start = localDateLabel(bin.startDateString, timeZone);
+function binDateLabel(bin) {
+  const start = localDateLabel(bin.startDateString);
   const lastDate = shiftCalendarDate(bin.endDateString, -1);
   if (lastDate === bin.startDateString) return start;
-  return `${start}–${localDateLabel(lastDate, timeZone).replace(/^[A-Za-z]+ /, "")}`;
+  return `${start}–${localDateLabel(lastDate).replace(/^[A-Za-z]+ /, "")}`;
 }
 
 // Fritsch–Carlson monotone cubic through the points; keeps the meter line
@@ -519,8 +497,8 @@ export function renderTrendImage({
     : null;
   const slotWidth = plotWidth / binCount;
   const binTimeRanges = actual.bins.map((bin) => ({
-    startMs: zonedMidnight(bin.startDateString, bounds.timeZone).getTime(),
-    endMs: zonedMidnight(bin.endDateString, bounds.timeZone).getTime(),
+    startMs: localDateBoundary(bin.startDateString, bounds.timeZone).getTime(),
+    endMs: localDateBoundary(bin.endDateString, bounds.timeZone).getTime(),
   }));
   const finalBinTimeRange = binTimeRanges.at(-1);
   const partialFinalBin = Boolean(
@@ -566,7 +544,7 @@ export function renderTrendImage({
     ? `TOKEN LEDGER · ${days}-DAY METER DRAIN`
     : `TOKEN LEDGER · ${days}-DAY TREND`;
   const subtitle = [
-    `${localDateLabel(bounds.startDateString, bounds.timeZone)} – ${localDateLabel(bounds.endDateString, bounds.timeZone)}, ${yearLabel}`,
+    `${localDateLabel(bounds.startDateString)} – ${localDateLabel(bounds.endDateString)}, ${yearLabel}`,
     bounds.timeZone,
     history,
   ].filter(Boolean).join(" · ");
@@ -1280,11 +1258,11 @@ export function renderTrendImage({
     for (let binIndex = 0; binIndex < binCount; binIndex += 1) {
       if (binIndex % step !== 0 && binIndex !== binCount - 1) continue;
       if (resetBinIndexes.has(binIndex)) continue;
-      const binEndMs = zonedMidnight(
+      const binEndMs = localDateBoundary(
         bars[binIndex].endDateString,
         bounds.timeZone,
       ).getTime();
-      const binStartMs = zonedMidnight(
+      const binStartMs = localDateBoundary(
         bars[binIndex].startDateString,
         bounds.timeZone,
       ).getTime();
@@ -1465,7 +1443,7 @@ export function renderTrendImage({
     }
     if (isLabeledColumn(binIndex)) {
       const weekday = actual.binSize === 1
-        ? localWeekdayLabel(bin.startDateString, bounds.timeZone).toUpperCase()
+        ? localWeekdayLabel(bin.startDateString).toUpperCase()
         : "";
       if (weekday) {
         elements.push(svgText({
@@ -1481,7 +1459,7 @@ export function renderTrendImage({
       elements.push(svgText({
         x: centerX,
         y: plotBottom + (weekday ? 54 : 40),
-        value: binDateLabel(bin, bounds.timeZone),
+        value: binDateLabel(bin),
         fill: COLORS.secondary,
         size: 15,
         anchor: "middle",
