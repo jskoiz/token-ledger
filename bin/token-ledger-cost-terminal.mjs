@@ -28,6 +28,10 @@ function percent(numerator, denominator) {
   return `${((numerator / denominator) * 100).toFixed(1)}%`;
 }
 
+// Snapshot model identifiers are unbounded input; padding every row to an
+// unbounded column width would amplify one long label across the whole table.
+const MODEL_LABEL_MAX_WIDTH = 40;
+
 function modelLabel(model) {
   const normalized = normalizeCodexCreditModel(model);
   const labels = {
@@ -42,7 +46,12 @@ function modelLabel(model) {
     "gpt-5.3-codex": "GPT-5.3 Codex",
     "gpt-5.2": "GPT-5.2",
   };
-  return sanitizeTerminalText(labels[normalized] ?? String(model ?? "Unknown model"));
+  const label = sanitizeTerminalText(
+    labels[normalized] ?? String(model ?? "Unknown model"),
+  );
+  return label.length > MODEL_LABEL_MAX_WIDTH
+    ? `${label.slice(0, MODEL_LABEL_MAX_WIDTH - 1)}…`
+    : label;
 }
 
 function creditReason(event) {
