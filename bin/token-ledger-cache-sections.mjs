@@ -149,15 +149,27 @@ function pushLegendItem(elements, { x, y, color, label, line = false }) {
   }));
 }
 
-function createCacheReportContext({ snapshot, bounds, days, options }) {
+function createCacheReportContext({ snapshot, bounds, days, options, analysis }) {
   const width = Math.max(900, Math.min(2_400, Number(options.imageWidth) || 1_280));
   const outer = 32;
   const contentRight = width - outer;
   const plotLeft = 82;
   const plotRight = width - 94;
   const plotWidth = plotRight - plotLeft;
-  const data = buildCacheReportData(snapshot, bounds, days, plotWidth);
-  const prior = priorPeriodSummary(snapshot, bounds, days);
+  const data = buildCacheReportData(
+    snapshot,
+    bounds,
+    days,
+    plotWidth,
+    null,
+    analysis?.currentEvents ?? null,
+  );
+  const prior = priorPeriodSummary(
+    snapshot,
+    bounds,
+    days,
+    analysis?.priorEvents ?? null,
+  );
   const models = combinedModelRows(data.models);
   const columnWidth = (contentRight - outer) / 3;
   const qualifierWidth = columnWidth - 22;
@@ -768,8 +780,15 @@ export function renderCacheReportSections({
   bounds,
   days = bounds.rangeDays ?? 7,
   options = {},
+  analysis = null,
 }) {
-  const context = createCacheReportContext({ snapshot, bounds, days, options });
+  const context = createCacheReportContext({
+    snapshot,
+    bounds,
+    days,
+    options,
+    analysis,
+  });
   return [
     ...buildCacheHeaderSection(context),
     ...buildCacheRateSection(context),

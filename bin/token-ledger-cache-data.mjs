@@ -312,7 +312,13 @@ function finalizeAggregate(aggregate) {
   return finalized;
 }
 
-function accumulateRange(snapshot, bounds, bins = null, dateIndexByString = null) {
+function accumulateRange(
+  snapshot,
+  bounds,
+  bins = null,
+  dateIndexByString = null,
+  sourceEvents = null,
+) {
   const startMs = bounds.start.getTime();
   const endMs = bounds.end.getTime();
   const totals = emptyAggregate();
@@ -321,17 +327,19 @@ function accumulateRange(snapshot, bounds, bins = null, dateIndexByString = null
     ? null
     : localDateFormatter(bounds.timeZone);
 
-  const events = bins === null
-    ? usageBucketsInRange(snapshot, startMs, endMs)
-    : splitUsageBucketsAtBoundaries(
-        usageBuckets(snapshot),
-        [
-          startMs,
-          ...bins.map((bin) =>
-            zonedMidnightMs(bin.endDateString, dateFormatter)),
-          endMs,
-        ],
-      );
+  const boundaries = [
+    startMs,
+    ...((bins ?? []).map((bin) =>
+      zonedMidnightMs(bin.endDateString, dateFormatter))),
+    endMs,
+  ];
+  const events = sourceEvents === null
+    ? bins === null
+      ? usageBucketsInRange(snapshot, startMs, endMs)
+      : splitUsageBucketsAtBoundaries(usageBuckets(snapshot), boundaries)
+    : bins === null
+      ? sourceEvents
+      : splitUsageBucketsAtBoundaries(sourceEvents, boundaries);
   for (const event of events) {
     const parsed = parseCacheEvent(event);
     if (
@@ -428,8 +436,8 @@ function accumulateRange(snapshot, bounds, bins = null, dateIndexByString = null
   return summary;
 }
 
-export function aggregateCacheRange(snapshot, bounds) {
-  return accumulateRange(snapshot, bounds);
+export function aggregateCacheRange(snapshot, bounds, { events = null } = {}) {
+  return accumulateRange(snapshot, bounds, null, null, events);
 }
 
 export function buildCacheReportData(
@@ -438,6 +446,7 @@ export function buildCacheReportData(
   days,
   plotWidth,
   binSizeOverride = null,
+  events = null,
 ) {
   const rangeDays = Math.max(1, Number(days) || Number(bounds.rangeDays) || 7);
   // The combined report passes the trend chart's bin size so both charts'
@@ -464,7 +473,13 @@ export function buildCacheReportData(
       Math.floor(index / binSize),
     ]),
   );
-  const summary = accumulateRange(snapshot, bounds, bins, dateIndexByString);
+  const summary = accumulateRange(
+    snapshot,
+    bounds,
+    bins,
+    dateIndexByString,
+    events,
+  );
   return {
     ...summary,
     bins: bins.map((bin) => finalizeAggregate(bin)),
@@ -498,8 +513,8 @@ export function combinedModelRows(models) {
   return [...visible, finalizeAggregate(remainder)];
 }
 
-export function priorPeriodSummary(snapshot, bounds, days) {
+export function priorPeriodSummary(snapshot, bounds, days, events = null) {
   const priorEndDate = shiftCalendarDate(bounds.startDateString, -1);
   const priorBounds = multiDayBounds(priorEndDate, bounds.timeZone, days);
-  return aggregateCacheRange(snapshot, priorBounds);
+  return aggregateCacheRange(snapshot, priorBounds, { events });
 }

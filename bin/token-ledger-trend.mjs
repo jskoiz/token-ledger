@@ -6,11 +6,9 @@ import {
   MAX_SAFE_TOKEN_COUNT,
   checkedFiniteAdd,
   checkedTokenAdd,
-  splitUsageBucketsAtBoundaries,
   tokenValue,
-  usageBuckets,
-  usageBucketsInRange,
 } from "../lib/token-ledger-usage.mjs";
+import { buildRangeAnalysis as buildIndexedRangeAnalysis } from "../lib/token-ledger-range-analysis.mjs";
 
 const WEEK_MINUTES = 10_080;
 const RESET_JITTER_SECONDS = 5 * 60;
@@ -133,6 +131,14 @@ export function multiDayBounds(value, timeZone, rangeDays) {
     timeZone,
     rangeDays: days,
   };
+}
+
+export function priorPeriodBounds(bounds, days = bounds.rangeDays) {
+  return multiDayBounds(
+    shiftCalendarDate(bounds.startDateString, -1),
+    bounds.timeZone,
+    days,
+  );
 }
 
 function clampPercent(value) {
@@ -461,12 +467,6 @@ function cloneAllocations(allocations) {
   );
 }
 
-function eventsInBounds(events, bounds) {
-  const startMs = bounds.start.getTime();
-  const endMs = bounds.end.getTime();
-  return usageBucketsInRange({ events }, startMs, endMs);
-}
-
 function buildModelStats(displayedEvents, intervals, bounds) {
   const rows = new Map();
   const rowFor = (model) => {
@@ -550,13 +550,33 @@ function buildModelStats(displayedEvents, intervals, bounds) {
     );
 }
 
-export function buildUsageTrend(snapshot = {}, bounds) {
+export function buildRangeAnalysis(
+  snapshot = {},
+  bounds,
+  { priorBounds = null, includeTrend = true } = {},
+) {
+  const quotaObservations = normalizeQuotaTimeline(
+    weeklyQuotaObservations(snapshot),
+  );
+  const indexed = buildIndexedRangeAnalysis(snapshot, bounds, {
+    priorBounds,
+    quotaObservations,
+  });
+  return Object.freeze({
+    ...indexed,
+    trend: includeTrend
+      ? buildUsageTrendFromAnalysis(snapshot, bounds, indexed)
+      : null,
+  });
+}
+
+function buildUsageTrendFromAnalysis(snapshot, bounds, rangeAnalysis) {
   const startMs = bounds.start.getTime();
   const endMs = bounds.end.getTime();
-  const displayedEvents = eventsInBounds(usageBuckets(snapshot), bounds);
-  const observations = normalizeQuotaTimeline(
-    weeklyQuotaObservations(snapshot),
-  ).filter((observation) => observation.timestampMs < endMs);
+  const displayedEvents = rangeAnalysis.currentEvents;
+  const observations = rangeAnalysis.quotaObservations.filter(
+    (observation) => observation.timestampMs < endMs,
+  );
 
   if (!observations.length) {
     return {
@@ -572,19 +592,8 @@ export function buildUsageTrend(snapshot = {}, bounds) {
     };
   }
 
-  const sortedEvents = splitUsageBucketsAtBoundaries(
-    usageBuckets(snapshot),
-    [
-      startMs,
-      endMs,
-      ...observations.flatMap((observation) => [
-        observation.cycleStartMs,
-        observation.timestampMs,
-      ]),
-    ],
-  )
+  const sortedEvents = rangeAnalysis.trendEvents
     .map((event) => ({ ...event, timestampMs: finiteTimestamp(event.timestamp) }))
-    .filter((event) => event.timestampMs !== null && event.timestampMs < endMs)
     .sort((left, right) => left.timestampMs - right.timestampMs);
   const points = [];
   const resets = [];
@@ -792,6 +801,15 @@ export function buildUsageTrend(snapshot = {}, bounds) {
         ?.timestampMs ?? null,
     rateCardAsOf: snapshot.provenance?.rateCardAsOf ?? RATE_CARD_AS_OF,
   };
+}
+
+export function buildUsageTrend(snapshot = {}, bounds, { analysis = null } = {}) {
+  const rangeAnalysis = analysis ?? buildRangeAnalysis(snapshot, bounds);
+  return rangeAnalysis.trend ?? buildUsageTrendFromAnalysis(
+    snapshot,
+    bounds,
+    rangeAnalysis,
+  );
 }
 
 // Bin observed meter drain into calendar-day (or multi-day) columns in the

@@ -297,7 +297,12 @@ export function buildActualTokenBins(
   bounds,
   days,
   width,
-  { binSize: forcedBinSize, minBinWidth, preferDaily } = {},
+  {
+    binSize: forcedBinSize,
+    minBinWidth,
+    preferDaily,
+    events = null,
+  } = {},
 ) {
   const binSize = forcedBinSize ?? chooseBinSize(days, width, { minBinWidth, preferDaily });
   const binCount = Math.ceil(days / binSize);
@@ -328,7 +333,7 @@ export function buildActualTokenBins(
     .map((dateString) =>
       zonedMidnight(dateString, bounds.timeZone, dateFormatter).getTime());
   for (const event of splitUsageBucketsAtBoundaries(
-    usageBuckets(snapshot),
+    events ?? usageBuckets(snapshot),
     binBoundaries,
   )) {
     const timestamp = new Date(event.timestamp).getTime();
@@ -563,10 +568,12 @@ function drainLabelLine(burnBins, plotWidth, leftWidth, rightWidth, enabled) {
 export function renderTrendCombo({
   snapshot,
   bounds,
-  trend = buildUsageTrend(snapshot, bounds),
+  trend: providedTrend = null,
   days = bounds.rangeDays ?? 7,
   options = {},
+  analysis = null,
 }) {
+  const trend = providedTrend ?? analysis?.trend ?? buildUsageTrend(snapshot, bounds, { analysis });
   const enabled = colorsEnabled(options);
   const frameWidth = Math.max(82, Math.min(158, Number(options.width) || 120));
   const innerWidth = frameWidth - 2;
@@ -574,7 +581,9 @@ export function renderTrendCombo({
   const rightWidth = 7;
   const plotWidth = Math.max(36, innerWidth - leftWidth - rightWidth - 2);
   const plotHeight = 11;
-  const actual = buildActualTokenBins(snapshot, bounds, days, plotWidth);
+  const actual = buildActualTokenBins(snapshot, bounds, days, plotWidth, {
+    events: analysis?.currentEvents,
+  });
   const burn = buildBurnDayBins(trend, bounds, {
     days,
     binSize: actual.binSize,
