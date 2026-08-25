@@ -4,8 +4,6 @@ import { spawnSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import {
   mkdir,
-  readFile,
-  stat,
 } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, resolve } from "node:path";
@@ -15,22 +13,59 @@ import {
   MODEL_COLORS as TERMINAL_MODEL_COLORS,
   renderTerminal,
 } from "./token-ledger-terminal.mjs";
-import { buildUsageTrend, multiDayBounds } from "./token-ledger-trend.mjs";
+import {
+  buildRangeAnalysis,
+  buildUsageTrend,
+  multiDayBounds,
+  priorPeriodBounds,
+} from "./token-ledger-trend.mjs";
 import {
   buildTrendReportViewModel,
   resolveEffectiveEnd,
 } from "./token-ledger-report-data.mjs";
-import {
-  renderTrendImage,
-  writeTrendPng,
-} from "./token-ledger-trend-image.mjs";
 import { renderTrendCombo } from "./token-ledger-trend-terminal.mjs";
+import { renderCostTerminal } from "./token-ledger-cost-terminal.mjs";
 import { startInteractive } from "./token-ledger-tui.mjs";
+import {
+  createTimeZoneFormatter,
+  formatCalendarDate,
+  localDateBoundary,
+  shiftCalendarDate,
+  todayInTimeZone,
+  validateTimeZone,
+} from "../lib/token-ledger-calendar.mjs";
+import {
+  readPrivateSnapshot,
+  writePrivateSnapshot,
+} from "../lib/token-ledger-snapshot.mjs";
+import {
+  collectionScope,
+  historyScopeLabel,
+  normalizeCollectionSince,
+  snapshotCollectionCutoffMs,
+  snapshotCollectionScope,
+  snapshotMatchesCollectionScope,
+} from "../lib/token-ledger-collection.mjs";
+import {
+  SNAPSHOT_SCHEMA_VERSION,
+  checkedFiniteAdd,
+  checkedTokenAdd,
+  tokenValue,
+  MAX_SAFE_TOKEN_COUNT,
+  usageBuckets,
+  usageBucketsInRange,
+  usageCallCount,
+  usageThreadIds,
+} from "../lib/token-ledger-usage.mjs";
+import { calculateCodexPurchasedCredits } from "../lib/token-ledger-rates.mjs";
+import { sanitizeTerminalText } from "../lib/token-ledger-terminal-text.mjs";
+
+export { sanitizeTerminalText };
 
 export const DEFAULT_SNAPSHOT = resolve(
   homedir(),
   ".token-ledger",
-  "token-ledger-snapshot.json",
+  "token-ledger-snapshot-v3.json.gz",
 );
 const DEFAULT_TOP = 10;
 const DEFAULT_TIME_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -48,49 +83,121 @@ const MODEL_COLORS = {
   other: TERMINAL_MODEL_COLORS.other,
 };
 
-function usage() {
-  return `Token Ledger terminal usage
+function createSharedTokenScale() {
+  return {
+    scale: 1,
+    totalTokens: 0,
+    targets: new Set(),
+  };
+}
+
+function addSharedTokenContribution(state, contribution, targets) {
+  const tokens = tokenValue(contribution, { allowFractional: true });
+  if (!(tokens > 0)) return;
+  const scaledTokens = tokens / state.scale;
+  for (const target of targets) {
+    state.targets.add(target);
+    target.totalTokens += scaledTokens;
+  }
+  state.totalTokens += scaledTokens;
+  const scaleFactor = Math.max(
+    1,
+    state.totalTokens / MAX_SAFE_TOKEN_COUNT,
+  );
+  if (scaleFactor === 1) return;
+  for (const target of state.targets) {
+    target.totalTokens /= scaleFactor;
+    if (target.totalTokens >= MAX_SAFE_TOKEN_COUNT - 2) {
+      target.totalTokens = MAX_SAFE_TOKEN_COUNT;
+    }
+  }
+  state.totalTokens = MAX_SAFE_TOKEN_COUNT;
+  state.scale *= scaleFactor;
+}
+
+export function usage() {
+  return `Token Ledger
 
 Usage:
-  tledger 1d                 Rolling 24-hour project breakdown (ends now)
-  tledger <N>d               Rolling N-day project breakdown (ends now)
-  tledger <N>w               Rolling N-week project breakdown (ends now)
-  tledger day <YYYY-MM-DD>
-  tledger week [end-day]
-  tledger trend [Nd|Nw]
-  tledger report [Nd|Nw]
-  npm run usage:day -- <YYYY-MM-DD>
-  npm run usage:week -- [end-day]
+  tledger 1d                         Last 24 hours in the terminal
+  tledger week                       Last 7 calendar days in the terminal
+  tledger 30d                        Rolling 30 days in the terminal
+  tledger cost 7d --basis api-usd    Hypothetical API-equivalent USD estimate
+  tledger cost week --basis codex-credits
+                                     Codex purchased-credit estimate
+  tledger report 7d                  Write the 7-day PNG report
+  tledger report 7d --cache-rate     Write the cache-only PNG report
 
-Options:
-  --date <day>         Date as YYYY-MM-DD, today, or yesterday
-  --period <window>    Trend window, for example 7d, 14d, or 2w
-  --input <file>       Snapshot to read (default: ~/.token-ledger/token-ledger-snapshot.json)
-  --refresh            Rebuild the default snapshot from CODEX_HOME or ~/.codex
-  --no-refresh         Use the cached snapshot without checking local JSONL files
-  --codex-home <dir>   Codex data root used when refreshing
-  --tz <name>          IANA timezone (default: machine timezone)
-  --top <number>       Number of projects to show (default: 10)
-  --width <number>     Terminal layout width in columns
-  --raw-projects       Keep singleton thread labels instead of grouping them
-  --no-archived        Skip archived_sessions when refreshing
-  --plain              Disable terminal colors
-  --ascii              Use ASCII bars instead of Unicode blocks
-  --static             Print once instead of opening the interactive dashboard
-  --drain               Trend columns show observed limit drain percent instead of token volume
-  --image               Write trend view as a PNG image and open it on screen
-  --image-output <file> PNG output path for trend view
-  --image-width <px>   PNG image width from 900 to 2400 pixels
-  --no-open            Skip opening the finished PNG in the default viewer
-  --youplot            Use the legacy single-series YouPlot renderer
-  --help               Show this help
+Common options:
+  --static                  Print once instead of opening the dashboard
+  --refresh                 Rebuild the local usage cache
+  --since <ISO timestamp>   Collect history at or after this timestamp
+  --image-output <file>     Choose where to save a PNG
+  --no-open                 Do not open a generated PNG
+  -h, --help                Show this quick guide
+  --help-all                Show every command and option
 
-The report command writes the dashboard PNG (same as trend --image) to
-token-ledger-report-<period>.png; use --image-output to choose the path.
+Token Ledger reads local Codex data only. It does not upload your usage.`;
+}
 
-The command reads a privacy-reduced Token Ledger snapshot. It never uploads
-the snapshot or prints message bodies, tool payloads, credentials, or local
-input/source paths. Explicit PNG output paths are reported after writing.`;
+export function advancedUsage() {
+  return `Token Ledger command reference
+
+Terminal commands:
+  tledger 1d                         Rolling 24-hour project breakdown
+  tledger <N>d                       Rolling N-day project breakdown
+  tledger <N>w                       Rolling N-week project breakdown
+  tledger day <YYYY-MM-DD>           One local calendar day
+  tledger week [end-day]             Seven local calendar days
+  tledger trend [Nd|Nw]              Multi-day terminal trend
+
+Cost commands (basis is required):
+  tledger cost <1d|Nd|Nw|week> --basis api-usd
+                                      Hypothetical API-equivalent USD estimate
+  tledger cost <1d|Nd|Nw|week> --basis codex-credits
+                                      Codex purchased-credit estimate
+
+Report commands:
+  tledger report [Nd|Nw]             Write the usage dashboard PNG
+  tledger report [Nd|Nw] --cache-rate
+                                      Write the cache-only PNG
+
+Dates and ranges:
+  --date <day>               YYYY-MM-DD, today, or yesterday
+  --period <window>          Trend window such as 7d, 14d, or 2w
+  --tz <name>                IANA timezone (default: machine timezone)
+
+Data and refresh:
+  --input <file>             Read an explicit snapshot
+  --refresh                  Rebuild the default snapshot from local Codex data
+  --no-refresh               Use the cached snapshot without checking source files
+  --codex-home <dir>         Codex data root used when refreshing
+  --since <ISO timestamp>    Collect history at or after this timestamp
+  --no-archived              Skip archived sessions when refreshing
+
+Terminal output:
+  --top <number>             Projects to show, from 1 to 100 (default: 10)
+  --width <number>           Layout width, from 40 to 200 columns
+  --raw-projects             Keep singleton thread labels ungrouped
+  --plain                    Disable terminal colors
+  --ascii                    Use ASCII bars instead of Unicode blocks
+  --static                   Print once instead of opening the dashboard
+  --youplot                  Use the legacy single-series renderer
+
+Report output:
+  --drain                    Chart estimated meter drain instead of token volume
+  --cache-rate               Write the cache-only report (report command only)
+  --image                    Write the trend view as a PNG
+  --image-output <file>      Choose the PNG output path
+  --image-width <px>         Set PNG width from 900 to 2400 pixels
+  --no-open                  Do not open the finished PNG
+
+Help:
+  -h, --help                Show the quick guide
+  --help-all                Show this complete reference
+
+The default snapshot is ~/.token-ledger/token-ledger-snapshot-v3.json.gz.
+Token Ledger reads local Codex data only. It does not upload your usage.`;
 }
 
 function durationAlias(value) {
@@ -135,10 +242,23 @@ function readOption(argv, index, name) {
 }
 
 export function parseArgs(argv) {
+  const helpCommand = argv[0] === "help";
+  const costCommand = argv[0] === "cost";
+  const costRangeValue = costCommand ? argv[1] : null;
+  const costHelpWithoutRange = costCommand &&
+    ["--help", "-h", "--help-all"].includes(costRangeValue);
+  const costAlias = costCommand && costRangeValue !== "week" && !costHelpWithoutRange
+    ? durationAlias(costRangeValue)
+    : null;
+  const costRangeValid = costRangeValue === "week" || Boolean(costAlias);
   const alias = durationAlias(argv[0]);
-  const rolling24hCommand = argv[0] === "1d";
-  const rollingDurationCommand = Boolean(alias) && !rolling24hCommand;
-  const command = rolling24hCommand
+  const rolling24hCommand = argv[0] === "1d" ||
+    (costCommand && costAlias?.days === 1);
+  const rollingDurationCommand = (Boolean(alias) && argv[0] !== "1d") ||
+    (costCommand && Boolean(costAlias) && costAlias.days !== 1);
+  const command = costCommand && costRangeValue === "week"
+    ? "week"
+    : rolling24hCommand
     ? "rolling24h"
     : rollingDurationCommand
       ? "rolling"
@@ -149,13 +269,14 @@ export function parseArgs(argv) {
         : "day";
   const options = {
     range: command,
-    view: command === "trend" ? "trend" : "projects",
+    view: costCommand ? "cost" : command === "trend" ? "trend" : "projects",
     rolling24h: rolling24hCommand,
     rollingDuration: rollingDurationCommand,
-    rollingDays: alias?.days ?? (rolling24hCommand ? 1 : null),
-    rollingAmount: alias?.amount ?? (rolling24hCommand ? 1 : null),
-    rollingUnit: alias?.unit ?? (rolling24hCommand ? "d" : null),
-    rollingLabel: alias?.label ?? "1 day",
+    rollingDays: (costCommand ? costAlias?.days : alias?.days) ?? (rolling24hCommand ? 1 : null),
+    rollingAmount: (costCommand ? costAlias?.amount : alias?.amount) ?? (rolling24hCommand ? 1 : null),
+    rollingUnit: (costCommand ? costAlias?.unit : alias?.unit) ?? (rolling24hCommand ? "d" : null),
+    rollingLabel: (costCommand ? costAlias?.label : alias?.label) ?? "1 day",
+    basis: null,
     report: argv[0] === "report",
     trendDays: 7,
     date: null,
@@ -164,6 +285,7 @@ export function parseArgs(argv) {
     refresh: false,
     autoRefresh: true,
     codexHome: resolve(process.env.CODEX_HOME || `${homedir()}/.codex`),
+    since: null,
     includeArchived: true,
     timeZone: DEFAULT_TIME_ZONE,
     top: DEFAULT_TOP,
@@ -171,22 +293,30 @@ export function parseArgs(argv) {
     rawProjects: false,
     plain: false,
     ascii: false,
-    static: false,
+    static: costCommand,
     image: false,
     imageOutput: null,
     imageWidth: null,
     openImage: true,
     drain: false,
+    cacheRate: false,
     legacyPlot: false,
-    help: false,
+    help: argv.length === 0 || helpCommand,
+    helpAll: false,
   };
 
   let trendPeriodSeen = false;
-  let index = alias || ["day", "week", "trend", "report"].includes(argv[0]) ? 1 : 0;
+  let basisSeen = false;
+  let index = costCommand
+    ? costHelpWithoutRange ? 1 : 2
+    : alias || ["day", "week", "trend", "report", "help"].includes(argv[0]) ? 1 : 0;
   for (; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--help" || argument === "-h") {
       options.help = true;
+    } else if (argument === "--help-all") {
+      options.help = true;
+      options.helpAll = true;
     } else if (argument === "--date") {
       options.date = readOption(argv, index, "--date");
       index += 1;
@@ -207,6 +337,18 @@ export function parseArgs(argv) {
       options.trendDays = period.days;
       trendPeriodSeen = true;
       index += 1;
+    } else if (argument === "--basis") {
+      if (options.view !== "cost") {
+        throw new Error("--basis is only available with the cost command.");
+      }
+      if (basisSeen) throw new Error("Cost basis can only be specified once.");
+      const value = readOption(argv, index, "--basis");
+      if (value !== "codex-credits" && value !== "api-usd") {
+        throw new Error("--basis must be codex-credits or api-usd.");
+      }
+      options.basis = value;
+      basisSeen = true;
+      index += 1;
     } else if (argument === "--input") {
       options.input = resolve(readOption(argv, index, "--input"));
       options.inputExplicit = true;
@@ -218,10 +360,17 @@ export function parseArgs(argv) {
     } else if (argument === "--codex-home") {
       options.codexHome = resolve(readOption(argv, index, "--codex-home"));
       index += 1;
+    } else if (argument === "--since") {
+      const value = readOption(argv, index, "--since");
+      options.since = new Date(normalizeCollectionSince(value));
+      index += 1;
     } else if (argument === "--tz") {
       options.timeZone = readOption(argv, index, "--tz");
       index += 1;
     } else if (argument === "--top") {
+      if (options.view === "cost") {
+        throw new Error("--top is not available with the cost command.");
+      }
       const value = Number(readOption(argv, index, "--top"));
       if (!Number.isInteger(value) || value < 1 || value > 100) {
         throw new Error("--top must be an integer from 1 to 100.");
@@ -229,6 +378,9 @@ export function parseArgs(argv) {
       options.top = value;
       index += 1;
     } else if (argument === "--width") {
+      if (options.view === "cost") {
+        throw new Error("--width is not available with the cost command.");
+      }
       const value = Number(readOption(argv, index, "--width"));
       if (!Number.isInteger(value) || value < 40 || value > 200) {
         throw new Error("--width must be an integer from 40 to 200.");
@@ -242,6 +394,9 @@ export function parseArgs(argv) {
     } else if (argument === "--plain") {
       options.plain = true;
     } else if (argument === "--ascii") {
+      if (options.view === "cost") {
+        throw new Error("--ascii is not available with the cost command.");
+      }
       options.ascii = true;
     } else if (argument === "--static") {
       options.static = true;
@@ -250,6 +405,11 @@ export function parseArgs(argv) {
         throw new Error("--drain is only available for the trend view.");
       }
       options.drain = true;
+    } else if (argument === "--cache-rate") {
+      if (!options.report) {
+        throw new Error("--cache-rate is only available with the report command.");
+      }
+      options.cacheRate = true;
     } else if (argument === "--image") {
       if (options.view !== "trend") {
         throw new Error("--image is only available for the trend view.");
@@ -317,6 +477,12 @@ export function parseArgs(argv) {
   }
 
   if (options.report) options.image = true;
+  if (!options.help && costCommand && !costRangeValid) {
+    throw new Error("Cost range must be 1d, Nd, Nw, or week.");
+  }
+  if (!options.help && costCommand && !options.basis) {
+    throw new Error("The cost command requires --basis codex-credits or --basis api-usd.");
+  }
   if (!options.help && (options.rolling24h || options.rollingDuration) && options.date) {
     throw new Error(`${options.rollingLabel} does not accept --date; its rolling window ends now.`);
   }
@@ -335,89 +501,24 @@ export function parseArgs(argv) {
   if (!options.help && options.view === "trend" && options.legacyPlot) {
     throw new Error("--youplot is only available for the project view.");
   }
-  return options;
-}
-
-function numericDateParts(date) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: date.timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(date.value);
-  const values = Object.fromEntries(
-    parts
-      .filter((part) => part.type !== "literal")
-      .map((part) => [part.type, Number(part.value)]),
-  );
-  return values;
-}
-
-function dateStringFromParts(parts) {
-  return [parts.year, parts.month, parts.day]
-    .map((value, index) => (index === 0 ? String(value) : String(value).padStart(2, "0")))
-    .join("-");
-}
-
-function shiftCalendarDate(value, amount) {
-  const date = new Date(`${value}T00:00:00.000Z`);
-  date.setUTCDate(date.getUTCDate() + amount);
-  return date.toISOString().slice(0, 10);
-}
-
-function validateTimeZone(timeZone) {
-  try {
-    new Intl.DateTimeFormat("en-US", { timeZone }).format();
-  } catch {
-    throw new Error(`Unknown IANA timezone: ${timeZone}`);
+  if (!options.help && options.view === "cost" && options.legacyPlot) {
+    throw new Error("--youplot is not available with the cost command.");
   }
-}
-
-function offsetAt(instant, timeZone) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hourCycle: "h23",
-  }).formatToParts(instant);
-  const values = Object.fromEntries(
-    parts
-      .filter((part) => part.type !== "literal")
-      .map((part) => [part.type, Number(part.value)]),
-  );
-  return (
-    Date.UTC(
-      values.year,
-      values.month - 1,
-      values.day,
-      values.hour,
-      values.minute,
-      values.second,
-    ) - instant.getTime()
-  );
-}
-
-function zonedMidnight(dateString, timeZone) {
-  const [year, month, day] = dateString.split("-").map(Number);
-  const utcGuess = Date.UTC(year, month - 1, day);
-  let instant = new Date(utcGuess - offsetAt(new Date(utcGuess), timeZone));
-  const refinedOffset = offsetAt(instant, timeZone);
-  instant = new Date(utcGuess - refinedOffset);
-  return instant;
+  if (!options.help && options.view === "cost" && options.rawProjects) {
+    throw new Error("--raw-projects is not available with the cost command.");
+  }
+  if (!options.help && options.cacheRate && options.drain) {
+    throw new Error("--cache-rate cannot be combined with --drain.");
+  }
+  return options;
 }
 
 export function dayBounds(value, timeZone) {
   validateTimeZone(timeZone);
+  const formatter = createTimeZoneFormatter(timeZone);
   let dateString = value;
   if (value === "today" || value === "yesterday") {
-    const today = dateStringFromParts(numericDateParts({
-      value: new Date(),
-      timeZone,
-    }));
+    const today = todayInTimeZone(timeZone, formatter);
     dateString = value === "today" ? today : shiftCalendarDate(today, -1);
   }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateString)) {
@@ -433,8 +534,8 @@ export function dayBounds(value, timeZone) {
     throw new Error(`Invalid calendar day: ${dateString}`);
   }
   const nextDateString = shiftCalendarDate(dateString, 1);
-  const start = zonedMidnight(dateString, timeZone);
-  const end = zonedMidnight(nextDateString, timeZone);
+  const start = localDateBoundary(dateString, timeZone, formatter);
+  const end = localDateBoundary(nextDateString, timeZone, formatter);
   return { dateString, start, end, timeZone };
 }
 
@@ -445,7 +546,7 @@ export function weekBounds(value, timeZone) {
     ...endDay,
     startDateString,
     endDateString: endDay.dateString,
-    start: zonedMidnight(startDateString, timeZone),
+    start: localDateBoundary(startDateString, timeZone),
     rangeDays: 7,
   };
 }
@@ -477,13 +578,6 @@ export function rollingDurationBounds(
 
 export function rolling24hBounds(value = new Date(), timeZone = DEFAULT_TIME_ZONE) {
   return rollingDurationBounds(value, timeZone, 1);
-}
-
-export function sanitizeTerminalText(value) {
-  return String(value ?? "")
-    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "")
-    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
-    .replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ");
 }
 
 function cleanLabel(value, fallback) {
@@ -555,7 +649,7 @@ function displayLabel(value) {
   return `${label.slice(0, 14)}…${label.slice(-13)}`;
 }
 
-export function oneOffProjects(snapshot) {
+export function oneOffProjects(snapshot, events = null) {
   const threadIdsByProject = new Map();
   const add = (project, threadId) => {
     if (!project || !threadId) return;
@@ -564,7 +658,9 @@ export function oneOffProjects(snapshot) {
     ids.add(threadId);
     threadIdsByProject.set(normalizedProject, ids);
   };
-  for (const event of snapshot.events ?? []) add(event.project, event.threadId);
+  for (const bucket of events ?? usageBuckets(snapshot)) {
+    for (const threadId of usageThreadIds(bucket)) add(bucket.project, threadId);
+  }
   for (const thread of snapshot.threads ?? []) add(thread.project, thread.id);
   return new Set(
     [...threadIdsByProject.entries()]
@@ -584,20 +680,31 @@ function modelLabel(value) {
   return model;
 }
 
-export function filterDayEvents(snapshot, bounds) {
-  const start = bounds.start.getTime();
-  const end = bounds.end.getTime();
-  return (snapshot.events ?? []).filter((event) => {
-    const timestamp = new Date(event.timestamp).getTime();
-    return Number.isFinite(timestamp) && timestamp >= start && timestamp < end;
+function currentRateCardCredits(event) {
+  return calculateCodexPurchasedCredits({
+    model: event?.rateCardModel ?? event?.model,
+    serviceTier: event?.serviceTier,
+    usage: event,
   });
 }
 
-export function aggregateProjects(snapshot, events, options = {}) {
-  const singletonProjects = options.rawProjects ? new Set() : oneOffProjects(snapshot);
+export function filterDayEvents(snapshot, bounds, analysis = null) {
+  if (analysis !== null) return analysis.currentEvents;
+  const start = bounds.start.getTime();
+  const end = bounds.end.getTime();
+  return usageBucketsInRange(snapshot, start, end);
+}
+
+export function aggregateProjects(snapshot, events, options = {}, analysis = null) {
+  const singletonProjects = options.rawProjects
+    ? new Set()
+    : oneOffProjects(snapshot, analysis?.allEvents);
   const grouped = new Map();
+  const sharedTokenScale = createSharedTokenScale();
 
   for (const event of events) {
+    if (event?.invalidTokenRecord === true) continue;
+    const allowFractional = event?.rangeAllocationEstimated === true;
     const rawProject = cleanLabel(event.project, "Unlabelled activity");
     const project =
       !options.rawProjects && singletonProjects.has(rawProject)
@@ -617,15 +724,33 @@ export function aggregateProjects(snapshot, events, options = {}) {
         knownCreditTokens: 0,
         models: new Map(),
       };
-    row.totalTokens += Number(event.totalTokens) || 0;
-    row.outputTokens += Number(event.outputTokens) || 0;
-    row.reasoningTokens += Number(event.reasoningTokens) || 0;
-    row.toolCalls += Number(event.toolCalls) || 0;
-    row.events += 1;
-    if (event.threadId) row.threadIds.add(event.threadId);
-    if (event.rateCardCredits !== null && Number.isFinite(Number(event.rateCardCredits))) {
-      row.rateCardCredits += Number(event.rateCardCredits);
-      row.knownCreditTokens += Number(event.totalTokens) || 0;
+    row.outputTokens = checkedTokenAdd(
+      row.outputTokens,
+      tokenValue(event.outputTokens, { allowFractional }),
+      { allowFractional },
+    );
+    row.reasoningTokens = checkedTokenAdd(
+      row.reasoningTokens,
+      tokenValue(event.reasoningTokens, { allowFractional }),
+      { allowFractional },
+    );
+    row.toolCalls = checkedTokenAdd(
+      row.toolCalls,
+      tokenValue(event.toolCalls, { allowFractional }),
+      { allowFractional },
+    );
+    row.events = checkedTokenAdd(row.events, usageCallCount(event), {
+      allowFractional,
+    });
+    for (const threadId of usageThreadIds(event)) row.threadIds.add(threadId);
+    const rateCardCredits = currentRateCardCredits(event);
+    if (Number.isFinite(rateCardCredits)) {
+      row.rateCardCredits = checkedFiniteAdd(row.rateCardCredits, rateCardCredits);
+      row.knownCreditTokens = checkedTokenAdd(
+        row.knownCreditTokens,
+        tokenValue(event.totalTokens, { allowFractional }),
+        { allowFractional },
+      );
     }
 
     const model = modelLabel(event.model);
@@ -635,10 +760,19 @@ export function aggregateProjects(snapshot, events, options = {}) {
       events: 0,
       rateCardCredits: 0,
     };
-    modelRow.totalTokens += Number(event.totalTokens) || 0;
-    modelRow.events += 1;
-    if (event.rateCardCredits !== null && Number.isFinite(Number(event.rateCardCredits))) {
-      modelRow.rateCardCredits += Number(event.rateCardCredits);
+    addSharedTokenContribution(
+      sharedTokenScale,
+      tokenValue(event.totalTokens, { allowFractional }),
+      [row, modelRow],
+    );
+    modelRow.events = checkedTokenAdd(modelRow.events, usageCallCount(event), {
+      allowFractional,
+    });
+    if (Number.isFinite(rateCardCredits)) {
+      modelRow.rateCardCredits = checkedFiniteAdd(
+        modelRow.rateCardCredits,
+        rateCardCredits,
+      );
     }
     row.models.set(model, modelRow);
     grouped.set(project, row);
@@ -660,16 +794,38 @@ export function aggregateProjects(snapshot, events, options = {}) {
     });
 }
 
-function totalSummary(events) {
-  return events.reduce(
+function totalSummary(events, projectRows) {
+  const summary = events.reduce(
     (summary, event) => {
-      summary.totalTokens += Number(event.totalTokens) || 0;
-      summary.outputTokens += Number(event.outputTokens) || 0;
-      summary.toolCalls += Number(event.toolCalls) || 0;
-      if (event.threadId) summary.threadIds.add(event.threadId);
-      if (event.rateCardCredits !== null && Number.isFinite(Number(event.rateCardCredits))) {
-        summary.rateCardCredits += Number(event.rateCardCredits);
-        summary.knownCreditTokens += Number(event.totalTokens) || 0;
+      if (event?.invalidTokenRecord === true) return summary;
+      const allowFractional = event?.rangeAllocationEstimated === true;
+      summary.outputTokens = checkedTokenAdd(
+        summary.outputTokens,
+        tokenValue(event.outputTokens, { allowFractional }),
+        { allowFractional },
+      );
+      summary.toolCalls = checkedTokenAdd(
+        summary.toolCalls,
+        tokenValue(event.toolCalls, { allowFractional }),
+        { allowFractional },
+      );
+      summary.calls = checkedTokenAdd(summary.calls, usageCallCount(event), {
+        allowFractional,
+      });
+      for (const threadId of usageThreadIds(event)) {
+        summary.threadIds.add(threadId);
+      }
+      const rateCardCredits = currentRateCardCredits(event);
+      if (Number.isFinite(rateCardCredits)) {
+        summary.rateCardCredits = checkedFiniteAdd(
+          summary.rateCardCredits,
+          rateCardCredits,
+        );
+        summary.knownCreditTokens = checkedTokenAdd(
+          summary.knownCreditTokens,
+          tokenValue(event.totalTokens, { allowFractional }),
+          { allowFractional },
+        );
       }
       return summary;
     },
@@ -677,11 +833,17 @@ function totalSummary(events) {
       totalTokens: 0,
       outputTokens: 0,
       toolCalls: 0,
+      calls: 0,
       rateCardCredits: 0,
       knownCreditTokens: 0,
       threadIds: new Set(),
     },
   );
+  summary.totalTokens = projectRows.reduce(
+    (sum, row) => sum + row.totalTokens,
+    0,
+  );
+  return summary;
 }
 
 function compact(value, digits = 2) {
@@ -766,7 +928,7 @@ function runYouPlot(rows, options, dateLabel, unit) {
   const chartInput = [
     "project\tvalue",
     ...rows.map(
-      (row) => `${row.displayProject.replace(/[\t\r\n]+/g, " ")}\t${chartNumber(row.totalTokens, unit.divisor)}`,
+      (row) => `${sanitizeTerminalText(row.displayProject).replace(/[\t\r\n]+/g, " ")}\t${chartNumber(row.totalTokens, unit.divisor)}`,
     ),
   ].join("\n");
   const terminalWidth = Number(process.stdout.columns) || 100;
@@ -807,7 +969,7 @@ async function readSnapshot(snapshotPath) {
   const snapshotLabel = safeDisplayLabel(snapshotPath, "snapshot");
   let parsed;
   try {
-    parsed = JSON.parse(await readFile(snapshotPath, "utf8"));
+    parsed = await readPrivateSnapshot(snapshotPath);
   } catch (error) {
     if (error?.code === "ENOENT") {
       throw new Error(`Snapshot not found: ${snapshotLabel}`);
@@ -816,10 +978,47 @@ async function readSnapshot(snapshotPath) {
       `Could not read snapshot ${snapshotLabel}: ${safeErrorMessage(error, [snapshotPath])}`,
     );
   }
-  if (!parsed || !Array.isArray(parsed.events)) {
-    throw new Error(`Snapshot is missing its events array: ${snapshotLabel}`);
+  if (
+    !parsed ||
+    parsed.schemaVersion !== SNAPSHOT_SCHEMA_VERSION ||
+    !Array.isArray(parsed.events)
+  ) {
+    throw new Error(
+      `Snapshot uses an unsupported schema: ${snapshotLabel}. Rebuild it with --refresh.`,
+    );
   }
   return parsed;
+}
+
+function snapshotScopeMatchesOptions(snapshot, options) {
+  const requested = collectionScope(options);
+  const actual = snapshotCollectionScope(snapshot);
+  if (!actual) {
+    // Explicit snapshots are deliberate inputs. Preserve the existing
+    // fixture/export workflow when no collection filter was requested, while
+    // refusing to claim that an unknown snapshot satisfies a filter.
+    return requested.since === null && requested.includeArchived;
+  }
+  return snapshotMatchesCollectionScope(snapshot, requested);
+}
+
+function snapshotScopeError(snapshot, options) {
+  const requested = collectionScope(options);
+  const actual = snapshotCollectionScope(snapshot);
+  const describe = (scope) => {
+    if (!scope) return "unknown collection scope";
+    const since = scope.since === null ? "full history" : `since ${scope.since}`;
+    const archives = scope.includeArchived
+      ? "archived sessions included"
+      : "archived sessions excluded";
+    return `${since}; ${archives}`;
+  };
+  const remedy = options.inputExplicit
+    ? "For --input, supply matching --since/--no-archived filters or rebuild that file with the collector; --refresh cannot be combined with --input."
+    : "Rebuild it with --refresh.";
+  return new Error(
+    `Snapshot collection scope does not match the requested filters (requested ${describe(requested)}; found ${describe(actual)}). ${remedy}`,
+  );
 }
 
 async function refreshSnapshot(options) {
@@ -830,7 +1029,7 @@ async function refreshSnapshot(options) {
   }
   let progressStarted = false;
   try {
-    const { collectUsage, writePrivateSnapshot } = await import(
+    const { collectUsage } = await import(
       "../lib/token-ledger-importer.mjs"
     );
     process.stderr.write("Token Ledger: refreshing local snapshot…\n");
@@ -840,25 +1039,44 @@ async function refreshSnapshot(options) {
         output: options.input,
         codexHome: options.codexHome,
         includeArchived: options.includeArchived,
-        since: null,
+        since: options.since,
       },
       ({ current, total }) => {
         process.stderr.write(`\rToken Ledger: scanned ${current}/${total} rollout files`);
       },
     );
     process.stderr.write("\n");
-    await writePrivateSnapshot(options.input, snapshot);
-    return snapshot;
+    const writeResult = await writePrivateSnapshot(options.input, snapshot);
+    const storedSnapshot = writeResult.snapshot;
+    process.stderr.write(
+      `Token Ledger: cached ${(writeResult.bytesWritten / 1_000_000).toFixed(1)} MB ${writeResult.encoding} snapshot (${(writeResult.jsonBytes / 1_000_000).toFixed(1)} MB JSON before encoding; ${storedSnapshot.events.length.toLocaleString()} buckets for ${storedSnapshot.coverage.observedModelCalls.toLocaleString()} calls; ${(writeResult.maxBytes / 1_000_000).toFixed(1)} MB limit).\n`,
+    );
+    if (writeResult.bytesWritten / writeResult.maxBytes >= 0.7) {
+      process.stderr.write(
+        "Token Ledger: snapshot is above 70% of its safety limit; older buckets will compact automatically as it grows.\n",
+      );
+    }
+    return storedSnapshot;
   } catch (error) {
     if (progressStarted) process.stderr.write("\n");
+    if (error?.code === "ERR_SNAPSHOT_SIZE_LIMIT" && existsSync(options.input)) {
+      try {
+        const previous = await readSnapshot(options.input);
+        if (snapshotScopeMatchesOptions(previous, options)) {
+          process.stderr.write(
+            "Token Ledger: refresh exceeded the safety limit; continuing with the previous cache, which may be stale.\n",
+          );
+          return previous;
+        }
+      } catch {
+        // Preserve the original refresh error when the previous cache cannot
+        // prove that it has the requested collection scope.
+      }
+    }
     throw new Error(
       `Could not refresh local snapshot: ${safeErrorMessage(error, [options.input, options.codexHome])}`,
     );
   }
-}
-
-export function snapshotNeedsRefresh(snapshotMtimeMs, latestJsonlMtimeMs) {
-  return latestJsonlMtimeMs > snapshotMtimeMs;
 }
 
 export function snapshotCacheIsFresh(
@@ -873,6 +1091,14 @@ export function snapshotCacheIsFresh(
   );
 }
 
+export function shouldCheckSourceFreshness(
+  options = {},
+) {
+  // The source manifest is cheap to stat and is the cache's validity anchor.
+  // The full collector only runs when the persisted watermark changes.
+  return options.autoRefresh !== false && options.inputExplicit !== true;
+}
+
 function snapshotAgeLabel(ageMs) {
   if (ageMs < 60 * 1_000) return "now";
   const minutes = Math.floor(ageMs / (60 * 1_000));
@@ -882,10 +1108,18 @@ function snapshotAgeLabel(ageMs) {
   return `${Math.floor(hours / 24)}d old`;
 }
 
+function primitiveString(value) {
+  try {
+    const text = String.prototype.valueOf.call(value);
+    return text === value ? text : null;
+  } catch {
+    return null;
+  }
+}
+
 export function snapshotFreshness(snapshot = {}, nowMs = Date.now()) {
-  const generatedAtMs = typeof snapshot.generatedAt === "string"
-    ? Date.parse(snapshot.generatedAt)
-    : NaN;
+  const generatedAt = primitiveString(snapshot.generatedAt);
+  const generatedAtMs = generatedAt === null ? NaN : Date.parse(generatedAt);
   if (
     !Number.isFinite(generatedAtMs) ||
     !Number.isFinite(nowMs) ||
@@ -899,9 +1133,9 @@ export function snapshotFreshness(snapshot = {}, nowMs = Date.now()) {
   };
 }
 
-// Resolves the snapshot together with how its freshness was established, so
-// report output can distinguish source-verified data from explicit or
-// unchecked snapshots instead of claiming everything is current.
+// Resolve the snapshot together with the evidence available for its report
+// cutoff. A cache can be readable without being current, so callers must keep
+// this status separate from the age label shown in terminal output.
 export async function loadSnapshot(options) {
   if (options.refresh) {
     return {
@@ -920,40 +1154,34 @@ export async function loadSnapshot(options) {
       sourceStatus: "verified-current",
     };
   }
-  if (options.inputExplicit) {
+  const cached = await readSnapshot(options.input);
+  if (!snapshotScopeMatchesOptions(cached, options)) {
+    if (options.inputExplicit || !options.autoRefresh) {
+      throw snapshotScopeError(cached, options);
+    }
     return {
-      snapshot: await readSnapshot(options.input),
-      sourceStatus: "explicit-snapshot",
+      snapshot: await refreshSnapshot(options),
+      sourceStatus: "verified-current",
     };
+  }
+
+  if (options.inputExplicit) {
+    return { snapshot: cached, sourceStatus: "explicit-snapshot" };
   }
   if (!options.autoRefresh) {
-    return {
-      snapshot: await readSnapshot(options.input),
-      sourceStatus: "unchecked-cache",
-    };
+    return { snapshot: cached, sourceStatus: "unchecked-cache" };
   }
 
-  let snapshotStat;
-  try {
-    snapshotStat = await stat(options.input);
-  } catch (error) {
-    throw new Error(
-      `Could not inspect snapshot ${safeDisplayLabel(options.input, "snapshot")}: ${safeErrorMessage(error, [options.input])}`,
-    );
-  }
-  if (snapshotCacheIsFresh(snapshotStat.mtimeMs)) {
-    // The recent-mtime shortcut skips the source walk entirely, so the
-    // snapshot's own capture time bounds what the report may claim.
-    return {
-      snapshot: await readSnapshot(options.input),
-      sourceStatus: "unchecked-cache",
-    };
+  if (!shouldCheckSourceFreshness(options)) {
+    return { snapshot: cached, sourceStatus: "unchecked-cache" };
   }
 
-  const { latestSourceModifiedAt } = await import("../lib/token-ledger-importer.mjs");
-  let latestSourceMtimeMs;
+  const { sourceInventory, sourceWatermarksEqual } = await import(
+    "../lib/token-ledger-importer.mjs"
+  );
+  let inventory;
   try {
-    latestSourceMtimeMs = await latestSourceModifiedAt(
+    inventory = await sourceInventory(
       options.codexHome,
       options.includeArchived,
     );
@@ -962,29 +1190,51 @@ export async function loadSnapshot(options) {
       `Could not inspect local Codex source: ${safeErrorMessage(error, [options.codexHome])}`,
     );
   }
-  if (snapshotNeedsRefresh(snapshotStat.mtimeMs, latestSourceMtimeMs)) {
+  if (!sourceWatermarksEqual(cached.sourceWatermark, inventory.watermark)) {
     try {
       return {
         snapshot: await refreshSnapshot(options),
         sourceStatus: "verified-current",
       };
     } catch {
-      return {
-        snapshot: await readSnapshot(options.input),
-        sourceStatus: "stale-fallback",
-      };
+      return { snapshot: cached, sourceStatus: "stale-fallback" };
     }
   }
-  return {
-    snapshot: await readSnapshot(options.input),
-    sourceStatus: "verified-current",
-  };
+  return { snapshot: cached, sourceStatus: "verified-current" };
 }
 
-function render(options, snapshot, bounds, events, rows, allRows, freshness, report = {}) {
+async function render(
+  options,
+  snapshot,
+  bounds,
+  events,
+  rows,
+  allRows,
+  freshness,
+  report = {},
+  analysis,
+) {
+  if (options.view === "cost") {
+    return renderCostTerminal({ events, bounds, basis: options.basis });
+  }
   if (options.view === "trend") {
-    const trend = buildUsageTrend(snapshot, bounds);
+    if (options.image && options.cacheRate) {
+      const { renderCacheReportImage } = await import(
+        "./token-ledger-cache-image.mjs"
+      );
+      return renderCacheReportImage({
+        snapshot,
+        bounds,
+        days: options.trendDays,
+        options,
+        analysis,
+      });
+    }
+    const trend = buildUsageTrend(snapshot, bounds, { analysis });
     if (options.image) {
+      const { renderTrendImage } = await import(
+        "./token-ledger-trend-image.mjs"
+      );
       return renderTrendImage({
         snapshot,
         bounds,
@@ -998,6 +1248,7 @@ function render(options, snapshot, bounds, events, rows, allRows, freshness, rep
           reportTimeMs: report.reportTimeMs ?? null,
           sourceStatus: report.sourceStatus ?? "unchecked-cache",
           projectRows: allRows,
+          events,
         }),
       });
     }
@@ -1007,6 +1258,7 @@ function render(options, snapshot, bounds, events, rows, allRows, freshness, rep
       trend,
       days: options.trendDays,
       options,
+      analysis,
     });
   }
   if (!options.legacyPlot) {
@@ -1021,30 +1273,31 @@ function render(options, snapshot, bounds, events, rows, allRows, freshness, rep
     });
   }
   const enabled = !options.plain && !process.env.NO_COLOR && Boolean(process.stdout.isTTY);
-  const summary = totalSummary(events);
+  const summary = totalSummary(events, allRows);
   const totalTokens = summary.totalTokens;
   const dateLabel = options.range === "rolling24h"
     ? "last 24 hours"
     : options.range === "rolling"
       ? `last ${options.rollingLabel}`
       : options.range === "week"
-      ? `${bounds.startDateString} through ${bounds.endDateString}`
-      : new Intl.DateTimeFormat("en-US", {
-        timeZone: bounds.timeZone,
-        weekday: "short",
-        month: "short",
-        day: "numeric",
-        year: "numeric",
-      }).format(bounds.start);
+        ? `${bounds.startDateString} through ${bounds.endDateString}`
+        : formatCalendarDate(bounds.dateString, {
+          weekday: "short",
+          month: "short",
+          day: "numeric",
+          year: "numeric",
+        });
   const unit = chartUnit(rows[0]?.totalTokens ?? 0);
   const shares = rows.map((row) =>
     totalTokens > 0 ? (row.totalTokens / totalTokens) * 100 : 0,
   );
   const chart = runYouPlot(rows, options, dateLabel, unit).trimEnd();
+  const historyScope = historyScopeLabel(snapshot);
 
   const header = [
     `Token Ledger · ${dateLabel} · ${bounds.timeZone}`,
-    `${compact(totalTokens)} tokens · ${summary.threadIds.size.toLocaleString()} threads · ${events.length.toLocaleString()} calls · ${compact(summary.outputTokens)} output`,
+    `${compact(totalTokens)} tokens · ${summary.threadIds.size.toLocaleString()} threads · ${summary.calls.toLocaleString()} calls · ${compact(summary.outputTokens)} output`,
+    ...(historyScope ? [`History: ${historyScope}`] : []),
     `Source: ${sourceLabel(options.input, snapshot)}`,
     "",
     chart,
@@ -1057,7 +1310,7 @@ function render(options, snapshot, bounds, events, rows, allRows, freshness, rep
       summary.rateCardCredits > 0 && row.rateCardCredits > 0
         ? ` · ${percent((row.rateCardCredits / summary.rateCardCredits) * 100)} credits`
         : "";
-    return `${String(index + 1).padStart(2, " ")}  ${row.displayProject} · ${compact(row.totalTokens)} · ${percent(shares[index])} · ${row.threads.toLocaleString()} threads${knownCreditShare}\n    ${modelMix(row, enabled)}`;
+    return `${String(index + 1).padStart(2, " ")}  ${sanitizeTerminalText(row.displayProject)} · ${compact(row.totalTokens)} · ${percent(shares[index])} · ${row.threads.toLocaleString()} threads${knownCreditShare}\n    ${modelMix(row, enabled)}`;
   });
 
   return `${header.join("\n")}\n\n${details.join("\n")}`;
@@ -1089,49 +1342,78 @@ function rangeDescription(options, bounds) {
   return bounds.dateString;
 }
 
+function emptyRangeMessage(options, snapshot, bounds) {
+  const range = rangeDescription(options, bounds);
+  const cutoffMs = snapshotCollectionCutoffMs(snapshot);
+  const hasUncollectedHistory =
+    Number.isFinite(cutoffMs) && bounds.start.getTime() < cutoffMs;
+  const lines = [
+    hasUncollectedHistory
+      ? `No model-call events were collected for ${range} (${bounds.timeZone}); history before the snapshot cutoff is outside this snapshot and is not a verified zero.`
+      : `No model-call events found for ${range} (${bounds.timeZone}).`,
+  ];
+  const scope = historyScopeLabel(snapshot);
+  if (scope) lines.push(`History: ${scope}`);
+  lines.push(`Source: ${sourceLabel(options.input, snapshot)}`);
+  return lines.join("\n");
+}
+
 export async function run(options, { nowMs } = {}) {
   const hasInjectedNow = nowMs !== undefined;
   const now = new Date(hasInjectedNow ? nowMs : Date.now());
   const bounds = boundsForOptions(options, now);
   const { snapshot, sourceStatus } = await loadSnapshot(options);
-  let events = filterDayEvents(snapshot, bounds);
-  let reportTimeMs = null;
-  if (options.view === "trend" && options.image) {
-    reportTimeMs = hasInjectedNow ? now.getTime() : Date.now();
-    // The PNG report stops at the effective cutoff (wall clock for verified
-    // sources, snapshot capture time otherwise), so every panel is fed from
-    // the same bounded event set.
+  const analysis = buildRangeAnalysis(
+    snapshot,
+    bounds,
+    {
+      priorBounds: options.view === "trend"
+        ? priorPeriodBounds(bounds, options.trendDays)
+        : null,
+      includeTrend: options.view === "trend" && !options.cacheRate,
+    },
+  );
+  let events = filterDayEvents(snapshot, bounds, analysis);
+  const writingImage = options.view === "trend" && options.image;
+  const writingEmptyCacheReport = writingImage && options.cacheRate;
+  const reportTimeMs = hasInjectedNow ? now.getTime() : Date.now();
+  if (writingImage && !options.cacheRate) {
     const effectiveEndMs = resolveEffectiveEnd({
       snapshot,
       bounds,
       reportTimeMs,
       sourceStatus,
     });
+    // Keep the terminal aggregation and the report's project breakdown on the
+    // same captured event window. The report view model independently applies
+    // the same bound to raw snapshot events for its other panels.
     events = events.filter(
       (event) => new Date(event.timestamp).getTime() < effectiveEndMs,
     );
   }
-  if (events.length === 0) {
-    return [
-      `No model-call events found for ${rangeDescription(options, bounds)} (${bounds.timeZone}).`,
-      `Source: ${sourceLabel(options.input, snapshot)}`,
-    ].join("\n");
+  if (events.length === 0 && !writingEmptyCacheReport) {
+    return emptyRangeMessage(options, snapshot, bounds);
   }
-  const allRows = aggregateProjects(snapshot, events, options);
+  const allRows = options.cacheRate || options.view === "cost"
+    ? []
+    : aggregateProjects(snapshot, events, options, analysis);
   const rows = allRows.slice(0, options.top);
-  const writingImage = options.view === "trend" && options.image;
   const outputPath = writingImage
     ? options.imageOutput ??
       resolve(
         process.cwd(),
-        `token-ledger-${options.report ? "report" : "trend"}-${options.trendDays}d.png`,
+        `token-ledger-${options.cacheRate ? "cache-report" : options.report ? "report" : "trend"}-${options.trendDays}d.png`,
       )
     : null;
-  const imageLabel = options.report ? "report" : "trend image";
+  const imageLabel = options.cacheRate
+    ? "cache report"
+    : options.report
+      ? "report"
+      : "trend image";
   if (writingImage) {
     process.stderr.write(`Token Ledger: generating ${imageLabel} PNG…\n`);
   }
-  const output = render(
+  const output = await render(
     options,
     snapshot,
     bounds,
@@ -1140,17 +1422,19 @@ export async function run(options, { nowMs } = {}) {
     allRows,
     snapshotFreshness(
       snapshot,
-      hasInjectedNow ? now.getTime() : Date.now(),
+      reportTimeMs,
     ),
     { sourceStatus, reportTimeMs },
+    analysis,
   );
   if (writingImage) {
     await mkdir(dirname(outputPath), { recursive: true });
     process.stderr.write(`Token Ledger: encoding ${imageLabel} PNG…\n`);
+    const { writeTrendPng } = await import("./token-ledger-trend-image.mjs");
     await writeTrendPng(output, outputPath);
     process.stderr.write(`Token Ledger: finished ${imageLabel} PNG.\n`);
     const lines = [
-      `Wrote ${options.report ? "report" : "trend image"}: ${outputPath}`,
+      `Wrote ${imageLabel}: ${outputPath}`,
       `Range: ${bounds.startDateString} through ${bounds.endDateString} (${bounds.timeZone})`,
     ];
     // Show the finished report on screen right away instead of leaving it to
@@ -1183,6 +1467,7 @@ function shouldUseInteractive(options) {
   return Boolean(
     !options.static &&
       options.view !== "trend" &&
+      options.view !== "cost" &&
       !options.plain &&
       !options.legacyPlot &&
       !process.env.NO_COLOR &&
@@ -1194,16 +1479,13 @@ function shouldUseInteractive(options) {
 async function runInteractive(options) {
   const bounds = boundsForOptions(options);
   const { snapshot } = await loadSnapshot(options);
-  const events = filterDayEvents(snapshot, bounds);
+  const analysis = buildRangeAnalysis(snapshot, bounds, { includeTrend: false });
+  const events = filterDayEvents(snapshot, bounds, analysis);
   if (events.length === 0) {
-    process.stdout.write([
-      `No model-call events found for ${rangeDescription(options, bounds)} (${bounds.timeZone}).`,
-      `Source: ${sourceLabel(options.input, snapshot)}`,
-      "",
-    ].join("\n"));
+    process.stdout.write(`${emptyRangeMessage(options, snapshot, bounds)}\n`);
     return;
   }
-  const allRows = aggregateProjects(snapshot, events, options);
+  const allRows = aggregateProjects(snapshot, events, options, analysis);
   await startInteractive({
     options,
     snapshot,
@@ -1220,7 +1502,7 @@ async function main() {
   try {
     options = parseArgs(process.argv.slice(2));
     if (options.help) {
-      process.stdout.write(`${usage()}\n`);
+      process.stdout.write(`${options.helpAll ? advancedUsage() : usage()}\n`);
       return;
     }
     if (shouldUseInteractive(options)) {
@@ -1230,11 +1512,11 @@ async function main() {
     }
   } catch (error) {
     process.stderr.write(
-      `Token Ledger CLI failed: ${safeErrorMessage(error, [
+      `Token Ledger: ${safeErrorMessage(error, [
         options?.input,
         options?.codexHome,
         options?.imageOutput,
-      ])}\n\n${usage()}\n`,
+      ])}\nRun \`tledger --help\` for examples or \`tledger --help-all\` for every option.\n`,
     );
     process.exitCode = 1;
   }

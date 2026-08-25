@@ -1,16 +1,17 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
+import { readPrivateSnapshot } from "../lib/token-ledger-snapshot.mjs";
 import {
   buildUsageTrend,
   multiDayBounds,
 } from "../bin/token-ledger-trend.mjs";
 import { renderTrendCombo } from "../bin/token-ledger-trend-terminal.mjs";
 
-const input = process.argv[2] || "/Users/jk/.token-ledger/token-ledger-snapshot.json";
+const input = process.argv[2] || "/Users/jk/.token-ledger/token-ledger-snapshot-v3.json.gz";
 const output = process.argv[3] || resolve("artifacts", "token-ledger-trend-7d.svg");
 const width = Number(process.argv[4]) || 100;
-const snapshot = JSON.parse(await readFile(input, "utf8"));
+const snapshot = await readPrivateSnapshot(input);
 const bounds = multiDayBounds("2026-08-15", "Pacific/Honolulu", 7);
 const rendered = renderTrendCombo({
   snapshot,

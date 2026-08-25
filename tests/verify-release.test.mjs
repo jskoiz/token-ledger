@@ -1,7 +1,20 @@
 import assert from "node:assert/strict";
+import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { selectProductionPackageEntries } from "../tools/verify-release.mjs";
+
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+test("keeps the stale Next.js TypeScript configuration out of the repository", () => {
+  assert.equal(existsSync(resolve(REPO_ROOT, "tsconfig.json")), false);
+  assert.doesNotMatch(
+    readFileSync(resolve(REPO_ROOT, "tools/verify-release.mjs"), "utf8"),
+    /tsconfig\.json/,
+  );
+});
 
 test("selects only the tarball production dependency closure", () => {
   const sourceLock = {
@@ -84,5 +97,12 @@ test("rejects a reachable dev-only package", () => {
         },
       ),
     /marked as dev-only/,
+  );
+});
+
+test("rejects a lockfile without a packages map", () => {
+  assert.throws(
+    () => selectProductionPackageEntries({}, { name: "tledger" }),
+    /has no packages map/,
   );
 });

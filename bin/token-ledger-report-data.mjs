@@ -9,7 +9,19 @@ import {
   trendModelLabel,
   weeklyQuotaObservations,
 } from "./token-ledger-trend.mjs";
-import { RATE_CARD_AS_OF } from "./token-ledger-rates.mjs";
+import { historyScopeLabel } from "../lib/token-ledger-collection.mjs";
+import {
+  CODEX_CREDIT_RATE_CARD_AS_OF,
+  isFastServiceTier,
+} from "../lib/token-ledger-rates.mjs";
+import { MAX_SAFE_TOKEN_COUNT } from "../lib/token-ledger-usage.mjs";
+import {
+  localDateBoundary,
+  localDateString,
+  shiftCalendarDate,
+} from "../lib/token-ledger-calendar.mjs";
+
+export { shiftCalendarDate };
 
 const DAY_MS = 86_400_000;
 // Two readings this close in percent confirm a flat reported interval.
@@ -29,7 +41,7 @@ export const SOURCE_STATUSES = [
 // Fast mode is an overlapping usage property, not a separate model. Both
 // recognized service-tier labels count.
 export function isFastMode(serviceTier) {
-  return serviceTier === "priority" || serviceTier === "fast";
+  return isFastServiceTier(serviceTier);
 }
 
 function finiteTimestamp(value) {
@@ -39,20 +51,8 @@ function finiteTimestamp(value) {
 
 function dateStringFromParts(year, month, day) {
   return [year, month, day]
-    .map((value, index) =>
-      index === 0 ? String(value) : String(value).padStart(2, "0"),
-    )
+    .map((value, index) => String(value).padStart(index === 0 ? 4 : 2, "0"))
     .join("-");
-}
-
-export function shiftCalendarDate(dateString, amount) {
-  const [year, month, day] = dateString.split("-").map(Number);
-  const date = new Date(Date.UTC(year, month - 1, day + amount));
-  return dateStringFromParts(
-    date.getUTCFullYear(),
-    date.getUTCMonth() + 1,
-    date.getUTCDate(),
-  );
 }
 
 function offsetAt(instant, timeZone) {
@@ -110,16 +110,7 @@ function zonedDateTime(dateString, timeZone, time = {}) {
 }
 
 export function zonedMidnight(dateString, timeZone) {
-  return zonedDateTime(dateString, timeZone);
-}
-
-function localDateString(timestampMs, timeZone) {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date(timestampMs));
+  return localDateBoundary(dateString, timeZone);
 }
 
 // Whether the stored input/output components of an event can be trusted.
@@ -278,6 +269,7 @@ function buildMeter({ snapshot, bounds, effectiveEndMs, sourceStatus, events }) 
       toMs: to.timestampMs,
       fromPercent: from.remainingPercent,
       toPercent: to.remainingPercent,
+      cycle: from.cycle,
       kind:
         Math.abs(to.remainingPercent - from.remainingPercent) <=
         METER_EQUAL_TOLERANCE
@@ -388,6 +380,8 @@ export function buildTrendReportViewModel({
   reportTimeMs = null,
   sourceStatus = "unchecked-cache",
   projectRows = null,
+  events = null,
+  priorEvents = null,
 }) {
   if (!SOURCE_STATUSES.includes(sourceStatus)) {
     throw new Error(`Unknown report source status: ${sourceStatus}`);
@@ -443,8 +437,11 @@ export function buildTrendReportViewModel({
     models: new Map(),
   }));
 
-  // One pass over the snapshot classifies every event once; the bounded set
-  // feeds every panel so subtotals reconcile by construction.
+  // One pass over the selected range classifies every event once; the bounded
+  // set feeds every panel so subtotals reconcile by construction. Callers that
+  // already built a shared range analysis may provide its split current and
+  // prior fragments so the image report uses the exact same allocations as
+  // the terminal and cache renderers.
   const boundedEvents = [];
   const priorStartMs = zonedMidnight(
     shiftCalendarDate(bounds.startDateString, -rangeDays),
@@ -469,23 +466,44 @@ export function buildTrendReportViewModel({
   let detailedCalls = 0;
   let modelCalls = 0;
 
-  for (const event of snapshot.events ?? []) {
+  const currentEvents = Array.isArray(events) ? events : snapshot.events ?? [];
+  const comparisonEvents = Array.isArray(priorEvents)
+    ? priorEvents
+    : snapshot.events ?? [];
+  const rawTokenTotal = currentEvents.reduce((sum, event) => {
+    const tokens = Number(event?.totalTokens);
+    return Number.isFinite(tokens) && tokens > 0 ? sum + tokens : sum;
+  }, 0);
+  const tokenScale = Number.isFinite(rawTokenTotal) &&
+      rawTokenTotal > MAX_SAFE_TOKEN_COUNT
+    ? rawTokenTotal / MAX_SAFE_TOKEN_COUNT
+    : 1;
+  const scaledTokens = (value) => {
+    const tokens = Number(value);
+    return Number.isFinite(tokens) && tokens > 0 ? tokens / tokenScale : 0;
+  };
+  for (const event of comparisonEvents) {
     const timestampMs = finiteTimestamp(event.timestamp);
     if (timestampMs === null) continue;
-    const tokens = Math.max(0, Number(event.totalTokens) || 0);
+    const tokens = scaledTokens(event.totalTokens);
     if (timestampMs >= priorStartMs && timestampMs < priorEndMs) {
       priorEquivalentTokens += tokens;
       priorHasEvents = true;
     }
+  }
+  for (const event of currentEvents) {
+    const timestampMs = finiteTimestamp(event.timestamp);
+    if (timestampMs === null) continue;
     if (timestampMs < startMs || timestampMs >= effectiveEndMs) continue;
 
+    const tokens = scaledTokens(event.totalTokens);
     const model = trendModelLabel(event.model);
     const fast = isFastMode(event.serviceTier);
     const usable = usableComponents(event);
-    const input = usable ? Math.max(0, Number(event.inputTokens) || 0) : 0;
-    const output = usable ? Math.max(0, Number(event.outputTokens) || 0) : 0;
+    const input = usable ? scaledTokens(event.inputTokens) : 0;
+    const output = usable ? scaledTokens(event.outputTokens) : 0;
     const cached = usable
-      ? Math.min(input, Math.max(0, Number(event.cachedInputTokens) || 0))
+      ? Math.min(input, scaledTokens(event.cachedInputTokens))
       : 0;
 
     boundedEvents.push({ timestampMs, tokens, model, fast, event });
@@ -677,8 +695,9 @@ export function buildTrendReportViewModel({
     provenance: {
       localOnly: (snapshot.provenance?.kind ?? "codex-local-metadata") ===
         "codex-local-metadata",
+      historyScope: historyScopeLabel(snapshot),
       snapshotGeneratedAtMs,
-      rateCardAsOf: RATE_CARD_AS_OF,
+      rateCardAsOf: CODEX_CREDIT_RATE_CARD_AS_OF,
       snapshotRateCardAsOf: snapshot.provenance?.rateCardAsOf ?? null,
     },
   };

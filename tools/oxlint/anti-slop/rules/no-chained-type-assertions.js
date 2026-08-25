@@ -1,0 +1,85 @@
+import { defineRule } from "@oxlint/plugins";
+
+
+
+
+function isTypeAssertionExpression(node             )                                  {
+  return node.type === "TSAsExpression" || node.type === "TSTypeAssertion";
+}
+
+function isTransparentAssertionWrapper(node             )          {
+  return (
+    node.type === "ParenthesizedExpression" ||
+    node.type === "TSNonNullExpression" ||
+    node.type === "TSSatisfiesExpression"
+  );
+}
+
+function unwrapAssertionExpression(expression                   )                    {
+  let current = expression;
+  while (isTransparentAssertionWrapper(current)) {
+    current = current.expression;
+  }
+  return current;
+}
+
+function isConstAssertion(node                         )          {
+  const { typeAnnotation } = node;
+  return (
+    typeAnnotation.type === "TSTypeReference" &&
+    typeAnnotation.typeName.type === "Identifier" &&
+    typeAnnotation.typeName.name === "const"
+  );
+}
+
+function isOutermostAssertionInChain(node                         )          {
+  let current                    = node;
+  let parent = node.parent;
+
+  while (isTransparentAssertionWrapper(parent) && parent.expression === current) {
+    current = parent;
+    parent = parent.parent;
+  }
+
+  return !isTypeAssertionExpression(parent) || parent.expression !== current;
+}
+
+function isForbiddenAssertionChain(node                         )          {
+  let assertionCount = 0;
+  let hasNonConstAssertion = false;
+  let current                    = node;
+
+  while (isTypeAssertionExpression(current)) {
+    assertionCount += 1;
+    hasNonConstAssertion ||= !isConstAssertion(current);
+    current = unwrapAssertionExpression(current.expression);
+  }
+
+  return assertionCount > 1 && hasNonConstAssertion;
+}
+
+/** Disallow nested TypeScript type assertions, while permitting chains made only of const assertions. */
+export const noChainedTypeAssertionsRule = defineRule({
+  meta: {
+    type: "problem",
+    docs: {
+      description:
+        "Disallow chained TypeScript as and angle-bracket assertions, including parenthesized chains.",
+    },
+    messages: {
+      chained:
+        "This assertion chain discards type evidence. Keep the original precise type, or parse untrusted input at its boundary before narrowing it.",
+    },
+  },
+  createOnce(context) {
+    const checkTypeAssertion = (node                         ) => {
+      if (!isOutermostAssertionInChain(node) || !isForbiddenAssertionChain(node)) return;
+      context.report({ node, messageId: "chained" });
+    };
+
+    return {
+      TSAsExpression: checkTypeAssertion,
+      TSTypeAssertion: checkTypeAssertion,
+    };
+  },
+});

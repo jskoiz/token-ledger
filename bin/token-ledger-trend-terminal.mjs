@@ -1,4 +1,25 @@
 import { buildBurnDayBins, buildUsageTrend, trendModelLabel } from "./token-ledger-trend.mjs";
+import { chooseBinSize } from "./token-ledger-image-layout.mjs";
+import {
+  MAX_SAFE_TOKEN_COUNT,
+  checkedTokenAdd,
+  splitUsageBucketsAtBoundaries,
+  tokenValue,
+  usageBuckets,
+  usageCallCount,
+} from "../lib/token-ledger-usage.mjs";
+import {
+  createTimeZoneFormatter,
+  formatCalendarDate,
+  localDateBoundary,
+  localDateString,
+  shiftCalendarDate,
+} from "../lib/token-ledger-calendar.mjs";
+import { isFastServiceTier } from "../lib/token-ledger-rates.mjs";
+import { sanitizeTerminalText } from "../lib/token-ledger-terminal-text.mjs";
+
+export { chooseBinSize } from "./token-ledger-image-layout.mjs";
+import { historyScopeLabel } from "../lib/token-ledger-collection.mjs";
 
 const RESET = "\u001b[0m";
 const PRIMARY_STYLE = [38, 2, 255, 255, 255];
@@ -7,6 +28,89 @@ const BORDER_STYLE = [38, 2, 88, 88, 88];
 const GRID_STYLE = [38, 2, 72, 72, 72];
 const LINE_STYLE = [1, 38, 2, 255, 236, 168];
 const RESET_LINE_STYLE = [1, 38, 2, 255, 255, 255];
+const TOKEN_SCALE = Symbol("tokenScale");
+
+function tokenScale(target) {
+  return Number.isFinite(target[TOKEN_SCALE]) && target[TOKEN_SCALE] >= 1
+    ? target[TOKEN_SCALE]
+    : 1;
+}
+
+function setTokenScale(target, scale) {
+  Object.defineProperty(target, TOKEN_SCALE, {
+    configurable: true,
+    enumerable: false,
+    value: scale,
+    writable: true,
+  });
+}
+
+function scaleTokenMap(values, ratio) {
+  for (const [model, value] of values) {
+    values.set(model, value * ratio);
+  }
+}
+
+function addBinTokens(bin, model, tokens, fast) {
+  if (!(tokens > 0)) return;
+  const scale = tokenScale(bin);
+  const scaledTokens = tokens / scale;
+  bin.totalTokens += scaledTokens;
+  bin.values.set(model, (bin.values.get(model) ?? 0) + scaledTokens);
+  if (fast) {
+    bin.fastValues.set(model, (bin.fastValues.get(model) ?? 0) + scaledTokens);
+  }
+
+  const scaleFactor = Math.max(1, bin.totalTokens / MAX_SAFE_TOKEN_COUNT);
+  if (scaleFactor === 1) return;
+  bin.totalTokens = MAX_SAFE_TOKEN_COUNT;
+  scaleTokenMap(bin.values, 1 / scaleFactor);
+  scaleTokenMap(bin.fastValues, 1 / scaleFactor);
+  setTokenScale(bin, scale * scaleFactor);
+}
+
+function mergeBinTotals(state, bin) {
+  const sourceScale = tokenScale(bin);
+  const commonScale = Math.max(state.scale, sourceScale);
+  const targetRatio = state.scale / commonScale;
+  const sourceRatio = sourceScale / commonScale;
+  state.totalTokens *= targetRatio;
+  scaleTokenMap(state.values, targetRatio);
+  scaleTokenMap(state.fastValues, targetRatio);
+  for (const [model, value] of bin.values) {
+    state.totalTokens += value * sourceRatio;
+    state.values.set(
+      model,
+      (state.values.get(model) ?? 0) + value * sourceRatio,
+    );
+  }
+  for (const [model, value] of bin.fastValues) {
+    state.fastValues.set(
+      model,
+      (state.fastValues.get(model) ?? 0) + value * sourceRatio,
+    );
+  }
+
+  const scaleFactor = Math.max(1, state.totalTokens / MAX_SAFE_TOKEN_COUNT);
+  if (scaleFactor > 1) {
+    state.totalTokens = MAX_SAFE_TOKEN_COUNT;
+    scaleTokenMap(state.values, 1 / scaleFactor);
+    scaleTokenMap(state.fastValues, 1 / scaleFactor);
+  }
+  state.scale = commonScale * scaleFactor;
+}
+
+function alignBinsToScale(bins, scale) {
+  for (const bin of bins) {
+    const sourceScale = tokenScale(bin);
+    if (sourceScale === scale) continue;
+    const ratio = sourceScale / scale;
+    bin.totalTokens *= ratio;
+    scaleTokenMap(bin.values, ratio);
+    scaleTokenMap(bin.fastValues, ratio);
+    setTokenScale(bin, scale);
+  }
+}
 
 // Mirrors the SVG renderer's validated categorical palette.
 export const TREND_MODEL_COLORS = {
@@ -34,6 +138,8 @@ const MODEL_ORDER = [
   "Unknown",
 ];
 
+const ATTRIBUTION_MODEL_ORDER = ["Luna", "Sol", "Terra"];
+
 function colorsEnabled(options = {}) {
   return options.forceColor ??
     (!options.plain && !process.env.NO_COLOR && Boolean(process.stdout.isTTY));
@@ -44,7 +150,7 @@ function colorize(value, style, enabled) {
 }
 
 function stripAnsi(value) {
-  return String(value).replace(/\u001b\[[0-9;]*m/g, "");
+  return sanitizeTerminalText(value);
 }
 
 function visibleLength(value) {
@@ -107,94 +213,11 @@ function modelSort(left, right) {
   );
 }
 
-function dateParts(dateString) {
-  return dateString.split("-").map(Number);
-}
-
-function dateStringFromParts(year, month, day) {
-  return [year, month, day]
-    .map((value, index) =>
-      index === 0 ? String(value) : String(value).padStart(2, "0"),
-    )
-    .join("-");
-}
-
-function shiftCalendarDate(dateString, amount) {
-  const [year, month, day] = dateParts(dateString);
-  const date = new Date(Date.UTC(year, month - 1, day + amount));
-  return dateStringFromParts(
-    date.getUTCFullYear(),
-    date.getUTCMonth() + 1,
-    date.getUTCDate(),
-  );
-}
-
-function timeZoneOffsetMs(instant, timeZone) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    timeZoneName: "longOffset",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hourCycle: "h23",
-  }).formatToParts(instant);
-  const value = parts.find((part) => part.type === "timeZoneName")?.value ?? "GMT";
-  if (value === "GMT") return 0;
-  const match = value.match(/^GMT([+-])(\d{2}):?(\d{2})?$/);
-  if (!match) return 0;
-  const minutes = Number(match[2]) * 60 + Number(match[3] || 0);
-  return (match[1] === "+" ? 1 : -1) * minutes * 60 * 1_000;
-}
-
-function zonedMidnight(dateString, timeZone) {
-  const [year, month, day] = dateParts(dateString);
-  const utcGuess = Date.UTC(year, month - 1, day);
-  const first = new Date(utcGuess - timeZoneOffsetMs(new Date(utcGuess), timeZone));
-  return new Date(first.getTime() - timeZoneOffsetMs(first, timeZone));
-}
-
-function localDateString(timestamp, timeZone) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(new Date(timestamp));
-  const values = Object.fromEntries(
-    parts
-      .filter((part) => part.type !== "literal")
-      .map((part) => [part.type, part.value]),
-  );
-  return `${values.year}-${values.month}-${values.day}`;
-}
-
-function localDateLabel(dateString, timeZone) {
-  const date = zonedMidnight(dateString, timeZone);
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone,
+function localDateLabel(dateString) {
+  return formatCalendarDate(dateString, {
     month: "short",
     day: "2-digit",
-  })
-    .format(date)
-    .toUpperCase();
-}
-
-export function chooseBinSize(days, width, { minBinWidth = 1, preferDaily = false } = {}) {
-  const rangeDays = Number(days);
-  const plotWidth = Math.max(1, Number(width) || 1);
-  const minimumBinWidth = Math.max(1, Number(minBinWidth) || 1);
-  const maxBinCount = Math.max(1, Math.floor(plotWidth / minimumBinWidth));
-  const preferredBinSize = preferDaily
-    ? 1
-    : rangeDays <= 14
-      ? 1
-      : plotWidth >= 120
-        ? 2
-        : 3;
-  return Math.max(preferredBinSize, Math.ceil(rangeDays / maxBinCount));
+  }).toUpperCase();
 }
 
 function sortedModelEntries(values) {
@@ -208,7 +231,12 @@ export function buildActualTokenBins(
   bounds,
   days,
   width,
-  { binSize: forcedBinSize, minBinWidth, preferDaily } = {},
+  {
+    binSize: forcedBinSize,
+    minBinWidth,
+    preferDaily,
+    events = null,
+  } = {},
 ) {
   const binSize = forcedBinSize ?? chooseBinSize(days, width, { minBinWidth, preferDaily });
   const binCount = Math.ceil(days / binSize);
@@ -230,35 +258,52 @@ export function buildActualTokenBins(
       index,
     ]),
   );
-
-  for (const event of snapshot.events ?? []) {
+  const dateFormatter = createTimeZoneFormatter(bounds.timeZone);
+  const binBoundaries = [
+    bins[0]?.startDateString,
+    ...bins.map((bin) => bin.endDateString),
+  ]
+    .filter(Boolean)
+    .map((dateString) =>
+      localDateBoundary(dateString, bounds.timeZone, dateFormatter).getTime());
+  for (const event of splitUsageBucketsAtBoundaries(
+    events ?? usageBuckets(snapshot),
+    binBoundaries,
+  )) {
     const timestamp = new Date(event.timestamp).getTime();
     if (!Number.isFinite(timestamp)) continue;
-    const dateString = localDateString(timestamp, bounds.timeZone);
+    const dateString = localDateString(timestamp, bounds.timeZone, dateFormatter);
     const dayIndex = dateIndexByString.get(dateString);
     if (dayIndex === undefined || dayIndex >= days) continue;
     const bin = bins[Math.floor(dayIndex / binSize)];
-    const tokens = Math.max(0, Number(event.totalTokens) || 0);
+    if (event?.invalidTokenRecord === true) continue;
+    const allowFractional = event.rangeAllocationEstimated === true;
+    const tokens = tokenValue(event.totalTokens, { allowFractional });
     const model = trendModelLabel(event.model);
-    bin.totalTokens += tokens;
-    bin.calls += 1;
-    bin.values.set(model, (bin.values.get(model) ?? 0) + tokens);
-    if (event.serviceTier === "priority") {
-      bin.fastValues.set(model, (bin.fastValues.get(model) ?? 0) + tokens);
-    }
+    bin.calls = checkedTokenAdd(bin.calls, usageCallCount(event), {
+      allowFractional,
+    });
+    addBinTokens(bin, model, tokens, isFastServiceTier(event.serviceTier));
   }
 
-  const totals = new Map();
-  const fastTotals = new Map();
+  const totalsState = {
+    scale: 1,
+    totalTokens: 0,
+    values: new Map(),
+    fastValues: new Map(),
+  };
   for (const bin of bins) {
-    for (const [model, value] of bin.values) {
-      totals.set(model, (totals.get(model) ?? 0) + value);
-    }
-    for (const [model, value] of bin.fastValues) {
-      fastTotals.set(model, (fastTotals.get(model) ?? 0) + value);
-    }
+    mergeBinTotals(totalsState, bin);
   }
-  return { bins, totals, fastTotals, binSize, binCount };
+  alignBinsToScale(bins, totalsState.scale);
+  return {
+    bins,
+    totals: totalsState.values,
+    fastTotals: totalsState.fastValues,
+    scale: totalsState.scale,
+    binSize,
+    binCount,
+  };
 }
 
 function niceCeiling(value) {
@@ -274,7 +319,12 @@ function allocateSegmentHeights(entries, total, maxValue, plotHeight) {
     ? Math.max(1, Math.round((total / maxValue) * (plotHeight - 1)))
     : 0;
   if (!barHeight) return [];
-  const ideal = entries.map(([, value]) => (value / total) * barHeight);
+  // Model counters can cap independently when the bin total reaches the
+  // safe-token limit. Partition the already-scaled bar across the model
+  // entries so capped components cannot make the stack taller than its bin.
+  const segmentTotal = entries.reduce((sum, [, value]) => sum + value, 0);
+  const partitionTotal = segmentTotal > 0 ? segmentTotal : total;
+  const ideal = entries.map(([, value]) => (value / partitionTotal) * barHeight);
   const heights = ideal.map(Math.floor);
   let remainder = barHeight - heights.reduce((sum, value) => sum + value, 0);
   const order = ideal
@@ -354,7 +404,7 @@ function lineRow(remainingPercent, plotHeight) {
   );
 }
 
-function xLabelLine(bins, plotWidth, leftWidth, rightWidth, timeZone) {
+function xLabelLine(bins, plotWidth, leftWidth, rightWidth) {
   const labels = Array.from({ length: plotWidth }, () => " ");
   const write = (label, offset) => {
     for (let index = 0; index < label.length; index += 1) {
@@ -365,7 +415,7 @@ function xLabelLine(bins, plotWidth, leftWidth, rightWidth, timeZone) {
   bins.forEach((bin, index) => {
     const start = Math.round((index * plotWidth) / bins.length);
     const end = Math.round(((index + 1) * plotWidth) / bins.length);
-    const label = localDateLabel(bin.startDateString, timeZone);
+    const label = localDateLabel(bin.startDateString);
     if (end - start >= label.length) {
       write(label, start + Math.floor((end - start - label.length) / 2));
     } else if (index === 0 || index === bins.length - 1 || end - start >= 4) {
@@ -384,9 +434,26 @@ function frameLine(content, width) {
   return `│${fit(content, width - 2)}│`;
 }
 
+function wrapAttributionEntries(prefix, entries, width) {
+  const lines = [];
+  let line = prefix;
+  for (const entry of entries) {
+    const separator = line === prefix ? " · " : "   ";
+    const candidate = `${line}${separator}${entry}`;
+    if (visibleLength(candidate) <= width) {
+      line = candidate;
+      continue;
+    }
+    lines.push(line);
+    line = entry;
+  }
+  lines.push(line);
+  return lines;
+}
+
 function formatAttribution(trend, enabled, width, percentMode) {
   const rows = new Map((trend.models ?? []).map((row) => [row.model, row]));
-  const entries = ["Luna", "Sol"]
+  const entries = ATTRIBUTION_MODEL_ORDER
     .map((model) => {
       const row = rows.get(model);
       if (!row || !(row.tokensPerBurnPoint > 0)) return null;
@@ -396,30 +463,20 @@ function formatAttribution(trend, enabled, width, percentMode) {
     })
     .filter(Boolean);
   if (!entries.length) return [];
-  if (percentMode) {
-    const valueLine = colorize(
-      `Observed burn rate · ${entries.join("   ")}`,
-      SECONDARY_STYLE,
-      enabled,
-    );
-    const method = colorize(
-      `Columns sum to observed meter drops; model split via rate-card credit weights (card ${trend.rateCardAsOf}).`,
-      SECONDARY_STYLE,
-      enabled,
-    );
-    return [fit(valueLine, width - 2), fit(method, width - 2)];
-  }
-  const valueLine = colorize(
-    `ESTIMATE ONLY · quota attribution lens · ${entries.join("   ")}`,
-    SECONDARY_STYLE,
-    enabled,
+  const prefix = percentMode
+    ? "Observed burn rate"
+    : "ESTIMATE ONLY · quota attribution lens";
+  const valueLines = wrapAttributionEntries(prefix, entries, width - 2).map(
+    (line) => fit(colorize(line, SECONDARY_STYLE, enabled), width - 2),
   );
   const method = colorize(
-    `Rate-card/token weights, ${trend.rateCardAsOf}; separate from actual-token bars and not official quota math.`,
+    percentMode
+      ? `Columns sum to observed meter drops; model split via rate-card credit weights (card ${trend.rateCardAsOf}).`
+      : `Rate-card/token weights, ${trend.rateCardAsOf}; separate from actual-token bars and not official quota math.`,
     SECONDARY_STYLE,
     enabled,
   );
-  return [fit(valueLine, width - 2), fit(method, width - 2)];
+  return [...valueLines, fit(method, width - 2)];
 }
 
 function drainLabelLine(burnBins, plotWidth, leftWidth, rightWidth, enabled) {
@@ -445,10 +502,12 @@ function drainLabelLine(burnBins, plotWidth, leftWidth, rightWidth, enabled) {
 export function renderTrendCombo({
   snapshot,
   bounds,
-  trend = buildUsageTrend(snapshot, bounds),
+  trend: providedTrend = null,
   days = bounds.rangeDays ?? 7,
   options = {},
+  analysis = null,
 }) {
+  const trend = providedTrend ?? analysis?.trend ?? buildUsageTrend(snapshot, bounds, { analysis });
   const enabled = colorsEnabled(options);
   const frameWidth = Math.max(82, Math.min(158, Number(options.width) || 120));
   const innerWidth = frameWidth - 2;
@@ -456,7 +515,9 @@ export function renderTrendCombo({
   const rightWidth = 7;
   const plotWidth = Math.max(36, innerWidth - leftWidth - rightWidth - 2);
   const plotHeight = 11;
-  const actual = buildActualTokenBins(snapshot, bounds, days, plotWidth);
+  const actual = buildActualTokenBins(snapshot, bounds, days, plotWidth, {
+    events: analysis?.currentEvents,
+  });
   const burn = buildBurnDayBins(trend, bounds, {
     days,
     binSize: actual.binSize,
@@ -466,6 +527,7 @@ export function renderTrendCombo({
   // and shows the observed drop per column in a label row instead.
   const meterUsable = Boolean(trend.available && burn.totalPercent > 0);
   const percentMode = Boolean(options.drain) && meterUsable;
+  const meterAvailable = Boolean(trend.available && (trend.points ?? []).length > 0);
   const barBins = percentMode ? burn.bins : actual.bins;
   const binTotal = (bin) => (percentMode ? bin.totalPercent : bin.totalTokens);
   const maxLeft = niceCeiling(
@@ -539,11 +601,12 @@ export function renderTrendCombo({
   }
 
   const axisRows = [0, Math.floor(baseline / 2), baseline];
+  const history = historyScopeLabel(snapshot);
   const lines = [
     `┌${"─".repeat(frameWidth - 2)}┐`,
     frameLine(
       colorize(
-        `TOKEN LEDGER · ${percentMode ? "OBSERVED LIMIT DRAIN + WEEKLY METER" : "ACTUAL TOKENS + WEEKLY QUOTA"} · ${localDateLabel(bounds.startDateString, bounds.timeZone)} – ${localDateLabel(bounds.endDateString, bounds.timeZone)} · ${days}D`,
+        `TOKEN LEDGER · ${percentMode ? "OBSERVED LIMIT DRAIN + WEEKLY METER" : meterAvailable ? "ACTUAL TOKENS + WEEKLY QUOTA" : "ACTUAL TOKENS"} · ${localDateLabel(bounds.startDateString)} – ${localDateLabel(bounds.endDateString)} · ${days}D`,
         PRIMARY_STYLE,
         enabled,
       ),
@@ -553,14 +616,17 @@ export function renderTrendCombo({
       colorize(
         percentMode
           ? "BARS = observed limit % consumed per day by model · LINE = meter remaining · one percent scale"
-          : meterUsable
+          : meterAvailable
             ? "BARS = actual token quantity by model · LINE = meter remaining · -% row = observed drain per column"
-            : "BARS = actual token quantity by model · LINE = observed remaining quota · separate scales",
+            : "BARS = actual token quantity by model · no account-wide weekly meter observed",
         SECONDARY_STYLE,
         enabled,
       ),
       frameWidth,
     ),
+    ...(history
+      ? [frameLine(colorize(history, SECONDARY_STYLE, enabled), frameWidth)]
+      : []),
     `├${"─".repeat(frameWidth - 2)}┤`,
   ];
   for (let row = 0; row < plotHeight; row += 1) {
@@ -571,7 +637,9 @@ export function renderTrendCombo({
         ? percent(leftValue)
         : compact(leftValue)
       : "";
-    const rightLabel = axisRows.includes(row) ? `${Math.round(rightValue)}%` : "";
+    const rightLabel = meterAvailable && axisRows.includes(row)
+      ? `${Math.round(rightValue)}%`
+      : "";
     const content = chart[row]
       .map(({ char, style }) => colorize(char, style, enabled))
       .join("");
@@ -579,7 +647,7 @@ export function renderTrendCombo({
   }
   const axis = `${" ".repeat(leftWidth)}${colorize(`└${"─".repeat(plotWidth)}┘`, BORDER_STYLE, enabled)}${" ".repeat(rightWidth)}`;
   lines.push(frameLine(axis, frameWidth));
-  lines.push(frameLine(xLabelLine(barBins, plotWidth, leftWidth, rightWidth, bounds.timeZone), frameWidth));
+  lines.push(frameLine(xLabelLine(barBins, plotWidth, leftWidth, rightWidth), frameWidth));
   if (!percentMode && meterUsable) {
     lines.push(frameLine(drainLabelLine(burn.bins, plotWidth, leftWidth, rightWidth, enabled), frameWidth));
     lines.push(frameLine(fit("CALENDAR DAY · -% = OBSERVED METER DROP", innerWidth, "center"), frameWidth));
@@ -588,7 +656,10 @@ export function renderTrendCombo({
   }
   lines.push(`├${"─".repeat(frameWidth - 2)}┤`);
 
-  const totalTokens = [...actual.totals.values()].reduce((sum, value) => sum + value, 0);
+  const totalTokens = [...actual.totals.values()].reduce(
+    (sum, value) => checkedTokenAdd(sum, value, { allowFractional: true }),
+    0,
+  );
   const legendModels = percentMode
     ? [...burn.totals.keys()].sort(modelSort)
     : [...actual.totals.keys()].sort(modelSort);
@@ -618,8 +689,12 @@ export function renderTrendCombo({
     const rightLegendWidth = innerWidth - 2 - leftLegendWidth;
     lines.push(frameLine(`${fit(legend[index], leftLegendWidth)}  ${fit(legend[index + 1] ?? "", rightLegendWidth)}`, frameWidth));
   }
-  lines.push(frameLine(colorize("LINE · OBSERVED WEEKLY QUOTA REMAINING · RIGHT AXIS", LINE_STYLE, enabled), frameWidth));
-  lines.push(frameLine(colorize("↟ reset marker returns the line to 100%; it never rises within a cycle", SECONDARY_STYLE, enabled), frameWidth));
+  if (meterAvailable) {
+    lines.push(frameLine(colorize("LINE · OBSERVED WEEKLY QUOTA REMAINING · RIGHT AXIS", LINE_STYLE, enabled), frameWidth));
+    lines.push(frameLine(colorize("↟ reset marker returns the line to 100%; it never rises within a cycle", SECONDARY_STYLE, enabled), frameWidth));
+  } else {
+    lines.push(frameLine(colorize("NO ACCOUNT-WIDE WEEKLY METER OBSERVED", SECONDARY_STYLE, enabled), frameWidth));
+  }
   for (const line of formatAttribution(trend, enabled, frameWidth, percentMode)) {
     lines.push(frameLine(line, frameWidth));
   }

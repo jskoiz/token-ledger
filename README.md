@@ -187,8 +187,8 @@ In the interactive dashboard:
 
 - `↑` / `↓` or `j` / `k` moves between projects.
 - `q`, `Q`, `Esc`, or `Ctrl-C` exits.
-- Enter does not inspect a project, and `d` / `w` / `m` do not change the
-  range; choose the desired range in the command instead.
+- Enter does not inspect a project, and `d` / `w` / `m` do not
+  change the range; choose the desired range in the command instead.
 
 ## Verify from source
 

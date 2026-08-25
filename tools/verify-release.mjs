@@ -32,7 +32,6 @@ const FORBIDDEN_PACKED_PATHS = [
   "package-lock.json",
   "tests/",
   "tools/",
-  "tsconfig.json",
 ];
 
 function normalizePath(value) {
@@ -174,7 +173,7 @@ function dependencyEntries(packageEntry) {
 
 export function selectProductionPackageEntries(sourceLock, packageJson) {
   const sourcePackages = sourceLock.packages;
-  assert(sourcePackages && typeof sourcePackages === "object", "package-lock.json has no packages map.");
+  assert(sourcePackages, "package-lock.json has no packages map.");
 
   const selectedPackages = new Map();
   const pendingPackages = [[`node_modules/${packageJson.name}`, packageJson]];
@@ -213,6 +212,7 @@ async function writeSmokeFixture(path) {
   const now = Date.now();
   const hour = 60 * 60 * 1000;
   const fixture = {
+    schemaVersion: 3,
     generatedAt: new Date(now - 5 * 60 * 1000).toISOString(),
     events: [
       {
@@ -438,15 +438,28 @@ async function main() {
       USERPROFILE: cleanHome,
     };
 
-    const helpOutput = run(installedBinary, ["--help"], {
+    const quickHelpOutput = run(installedBinary, ["--help"], {
       cwd: installDirectory,
       env: cleanEnvironment,
     });
     assert(
-      helpOutput.includes("Rolling 24-hour project breakdown") &&
-        helpOutput.includes("--input") &&
-        helpOutput.includes("--no-refresh"),
-      "Installed tledger --help did not expose the expected release CLI options.",
+      quickHelpOutput.includes("Last 24 hours in the terminal") &&
+        quickHelpOutput.includes("Write the 7-day PNG report") &&
+        quickHelpOutput.includes("--help-all") &&
+        !quickHelpOutput.includes("--codex-home"),
+      "Installed tledger --help did not expose the expected quick guide.",
+    );
+
+    const completeHelpOutput = run(installedBinary, ["--help-all"], {
+      cwd: installDirectory,
+      env: cleanEnvironment,
+    });
+    assert(
+      completeHelpOutput.includes("Rolling 24-hour project breakdown") &&
+        completeHelpOutput.includes("--input") &&
+        completeHelpOutput.includes("--no-refresh") &&
+        completeHelpOutput.includes("--cache-rate"),
+      "Installed tledger --help-all did not expose the complete CLI reference.",
     );
 
     const fixturePath = join(installDirectory, "release-smoke-fixture.json");
@@ -481,11 +494,71 @@ async function main() {
       "Installed smoke output exposed a source or fixture path.",
     );
 
+    const reportPath = join(installDirectory, "release-report.png");
+    const reportOutput = run(
+      installedBinary,
+      [
+        "report",
+        "7d",
+        "--input",
+        fixturePath,
+        "--no-open",
+        "--tz",
+        "UTC",
+        "--image-output",
+        reportPath,
+      ],
+      { cwd: installDirectory, env: cleanEnvironment },
+    );
+    assert(
+      reportOutput.includes("Wrote report:") &&
+        reportOutput.includes("release-report.png"),
+      `Installed tledger report smoke output was unexpected:\n${reportOutput}`,
+    );
+    const reportBytes = await readFile(reportPath);
+    assert(
+      JSON.stringify([...reportBytes.subarray(0, 8)]) ===
+        JSON.stringify([137, 80, 78, 71, 13, 10, 26, 10]),
+      "Installed tledger report smoke did not write a PNG.",
+    );
+
+    const cacheReportPath = join(installDirectory, "release-cache-report.png");
+    const cacheReportOutput = run(
+      installedBinary,
+      [
+        "report",
+        "7d",
+        "--cache-rate",
+        "--input",
+        fixturePath,
+        "--no-open",
+        "--tz",
+        "UTC",
+        "--image-output",
+        cacheReportPath,
+      ],
+      { cwd: installDirectory, env: cleanEnvironment },
+    );
+    assert(
+      cacheReportOutput.includes("Wrote cache report:") &&
+        cacheReportOutput.includes("release-cache-report.png"),
+      `Installed tledger cache-report smoke output was unexpected:\n${cacheReportOutput}`,
+    );
+    const cacheReportBytes = await readFile(cacheReportPath);
+    assert(
+      JSON.stringify([...cacheReportBytes.subarray(0, 8)]) ===
+        JSON.stringify([137, 80, 78, 71, 13, 10, 26, 10]),
+      "Installed tledger cache-report smoke did not write a PNG.",
+    );
+
     console.log(`Packed ${packMetadata.id ?? `${packageJson.name}@${packageJson.version}`}.`);
     console.log(`Package contents verified (${packedFiles.length} files).`);
     console.log("Installed tarball in a clean temporary directory.");
-    console.log("tledger --help: passed.");
+    console.log("tledger --help quick guide: passed.");
+    console.log("tledger --help-all command reference: passed.");
     console.log("tledger 1d --static project smoke: passed (Alpha 1.20K, Beta 800, 2.00K total).");
+    console.log("tledger report PNG smoke: passed.");
+    console.log("tledger report --cache-rate PNG smoke: passed.");
     console.log("Release verification passed.");
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });

@@ -5,10 +5,37 @@ import sharp from "sharp";
 import { buildBurnDayBins, buildUsageTrend } from "./token-ledger-trend.mjs";
 import { chooseBinSize } from "./token-ledger-trend-terminal.mjs";
 import {
-  buildTrendReportViewModel,
+  calculateCodexPurchasedCredits,
+  codexCreditMultiplier,
+  isFastServiceTier,
+} from "../lib/token-ledger-rates.mjs";
+import {
+  compact,
+  escapeXml,
+  fastShade,
   shiftCalendarDate,
+  svgRect,
+  svgText,
+  textWidth,
+  truncateText,
+  TREND_IMAGE_MODEL_COLORS,
+} from "./token-ledger-image-primitives.mjs";
+import {
+  buildTrendReportViewModel,
   zonedMidnight,
 } from "./token-ledger-report-data.mjs";
+
+export {
+  compact,
+  escapeXml,
+  fastShade,
+  shiftCalendarDate,
+  svgRect,
+  svgText,
+  textWidth,
+  truncateText,
+  TREND_IMAGE_MODEL_COLORS,
+};
 
 const MODEL_ORDER = [
   "Luna",
@@ -22,21 +49,6 @@ const MODEL_ORDER = [
   "Unknown",
   "Unattributed",
 ];
-
-// Dark-surface categorical palette; the co-occurring set and the stack-order
-// adjacency both pass CVD, normal-vision, and contrast checks on #0e1420.
-export const TREND_IMAGE_MODEL_COLORS = {
-  Luna: "#3b82f6",
-  Sol: "#10a394",
-  Terra: "#8b7cf6",
-  "GPT-5.5": "#d55181",
-  "GPT-5.4": "#0891b2",
-  Daybreak: "#16a34a",
-  "Auto review": "#e5484d",
-  Other: "#64748b",
-  Unknown: "#64748b",
-  Unattributed: "#475569",
-};
 
 const COLORS = {
   background: "#0e1420",
@@ -64,43 +76,8 @@ const COLORS = {
   onFill: "rgba(255,255,255,.82)",
 };
 
-const FONT_FAMILY = "system-ui, -apple-system, 'Segoe UI', sans-serif";
-const MONO_FAMILY = "ui-monospace, Menlo, monospace";
 const FAST_MODE_LABEL_COLOR = "#a78bfa";
 const MIN_BAR_WIDTH = 26;
-
-function escapeXml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&apos;");
-}
-
-function compact(value, digits = 2) {
-  if (!Number.isFinite(value)) return "—";
-  const absolute = Math.abs(value);
-  const units = [
-    [1_000_000_000, "B"],
-    [1_000_000, "M"],
-    [1_000, "K"],
-  ];
-  for (let index = 0; index < units.length; index += 1) {
-    const [divisor, suffix] = units[index];
-    if (absolute < divisor) continue;
-    const scaled = value / divisor;
-    const magnitude = Math.abs(scaled);
-    const precision = magnitude >= 100 ? 0 : magnitude >= 10 ? 1 : digits;
-    // Values that round to 1000 of a unit belong to the next unit up
-    // (999,999 → 1.00M, not 1000K).
-    if (index > 0 && Number(magnitude.toFixed(precision)) >= 1_000) {
-      return compact(Math.sign(value) * divisor * 1_000, digits);
-    }
-    return `${scaled.toFixed(precision)}${suffix}`;
-  }
-  return Math.round(value).toLocaleString("en-US");
-}
 
 function pct(value) {
   if (!Number.isFinite(value)) return "—";
@@ -134,17 +111,62 @@ function durationLabel(ms) {
   return `${Math.max(1, Math.round(hours))} ${Math.max(1, Math.round(hours)) === 1 ? "hour" : "hours"}`;
 }
 
-// Darker step of the same hue; retained for terminal parity and callers that
-// still shade fast-mode swatches (the report itself uses the hatch pattern).
-export function fastShade(hexColor) {
-  const match = /^#([0-9a-f]{6})$/i.exec(String(hexColor));
-  if (!match) return hexColor;
-  const channels = [0, 2, 4].map((offset) =>
-    Math.round(parseInt(match[1].slice(offset, offset + 2), 16) * 0.62),
-  );
-  return `#${channels.map((value) => value.toString(16).padStart(2, "0")).join("")}`;
+function fastRateSummary(snapshot, bounds, effectiveEndMs, events = null) {
+  let standardCardCredits = 0;
+  let fastCardCredits = 0;
+  let unratedTokens = 0;
+  const multipliers = new Set();
+  const sourceEvents = events ?? snapshot.events ?? [];
+  for (const event of sourceEvents) {
+    const timestampMs = new Date(event?.timestamp).getTime();
+    if (
+      !Number.isFinite(timestampMs) ||
+      timestampMs < bounds.start.getTime() ||
+      timestampMs >= effectiveEndMs ||
+      !isFastServiceTier(event?.serviceTier)
+    ) {
+      continue;
+    }
+    const tokens = Math.max(0, Number(event.totalTokens) || 0);
+    const model = event.rateCardModel ?? event.model;
+    const multiplier = codexCreditMultiplier(model, event.serviceTier);
+    const standardCredits = calculateCodexPurchasedCredits({
+      model,
+      serviceTier: null,
+      usage: event,
+    });
+    const fastCredits = calculateCodexPurchasedCredits({
+      model,
+      serviceTier: event.serviceTier,
+      usage: event,
+    });
+    if (
+      multiplier === null ||
+      !Number.isFinite(standardCredits) ||
+      !(standardCredits > 0) ||
+      !Number.isFinite(fastCredits)
+    ) {
+      unratedTokens += tokens;
+      continue;
+    }
+    standardCardCredits += standardCredits;
+    fastCardCredits += fastCredits;
+    multipliers.add(multiplier);
+  }
+  const sortedMultipliers = [...multipliers].sort((left, right) => left - right);
+  return {
+    unratedTokens,
+    effectiveMultiplier: standardCardCredits > 0
+      ? fastCardCredits / standardCardCredits
+      : null,
+    minimumMultiplier: sortedMultipliers[0] ?? null,
+    maximumMultiplier: sortedMultipliers.at(-1) ?? null,
+    mixedMultipliers: sortedMultipliers.length > 1,
+  };
 }
 
+// Darker step of the same hue; retained for terminal parity and callers that
+// still shade fast-mode swatches (the report itself uses the hatch pattern).
 // Ceiling scale for the daily chart. Tighter than 1–2–5 so a 2.39B peak lands
 // on a 3.00B axis instead of 5.00B.
 const NICE_CEILING_STEPS = [1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10];
@@ -172,21 +194,6 @@ function styleForModel(model) {
   return TREND_IMAGE_MODEL_COLORS[model] ?? TREND_IMAGE_MODEL_COLORS.Other;
 }
 
-// Rough sans-serif advance widths in em units, for placing inline runs.
-// SVG has no flow layout.
-function textWidth(text, size, weight = 400) {
-  let units = 0;
-  for (const character of String(text)) {
-    if (/[il.,:;'|!]/.test(character)) units += 0.3;
-    else if (/[Ijtfr\-()[\] ]/.test(character)) units += 0.37;
-    else if (/[mwMW@%]/.test(character)) units += 0.92;
-    else if (/[A-Z]/.test(character)) units += 0.7;
-    else if (/[0-9+±×−≈]/.test(character)) units += 0.58;
-    else units += 0.55;
-  }
-  return units * size * (weight >= 700 ? 1.05 : 1);
-}
-
 function truncateToWidth(text, maxWidth, size, weight = 400) {
   const value = String(text);
   if (textWidth(value, size, weight) <= maxWidth) return value;
@@ -195,38 +202,6 @@ function truncateToWidth(text, maxWidth, size, weight = 400) {
     kept = kept.slice(0, -1);
   }
   return `${kept.trimEnd()}…`;
-}
-
-function svgText({
-  x,
-  y,
-  value,
-  fill = COLORS.ink,
-  size = 12,
-  weight = 400,
-  anchor = "start",
-  spacing = null,
-  opacity = null,
-  mono = false,
-}) {
-  const spacingAttr = spacing ? ` letter-spacing="${spacing}"` : "";
-  const opacityAttr = opacity !== null ? ` opacity="${opacity}"` : "";
-  const family = mono ? MONO_FAMILY : FONT_FAMILY;
-  return `<text x="${x}" y="${y}" fill="${fill}" font-family="${family}" font-size="${size}px" font-weight="${weight}" text-anchor="${anchor}"${spacingAttr}${opacityAttr}>${escapeXml(value)}</text>`;
-}
-
-function svgRect(x, y, width, height, attrs = {}) {
-  const pieces = [
-    `x="${Number(x).toFixed(2)}"`,
-    `y="${Number(y).toFixed(2)}"`,
-    `width="${Math.max(0, Number(width)).toFixed(2)}"`,
-    `height="${Math.max(0, Number(height)).toFixed(2)}"`,
-  ];
-  for (const [key, value] of Object.entries(attrs)) {
-    if (value === null || value === undefined) continue;
-    pieces.push(`${key}="${value}"`);
-  }
-  return `<rect ${pieces.join(" ")}/>`;
 }
 
 function svgLine(x1, y1, x2, y2, attrs = {}) {
@@ -369,7 +344,9 @@ export function renderTrendImage({
   projectRows = null,
   viewModel = null,
   reportTimeMs = null,
-  sourceStatus = "unchecked-cache",
+  sourceStatus = null,
+  analysis = null,
+  reportEvents = null,
 }) {
   const width = Math.max(900, Math.min(2_400, Number(options.imageWidth) || 1_280));
   const outer = 28;
@@ -377,18 +354,33 @@ export function renderTrendImage({
   const contentWidth = width - outer * 2;
   const wide = width >= 1_100;
 
+  const effectiveReportTimeMs = Number.isFinite(reportTimeMs)
+    ? reportTimeMs
+    : Number.isFinite(options.reportTimeMs)
+      ? options.reportTimeMs
+      : null;
+  const effectiveSourceStatus = sourceStatus ?? options.sourceStatus ??
+    "verified-current";
   const vm = viewModel ?? buildTrendReportViewModel({
     snapshot,
     bounds,
     days,
-    reportTimeMs,
-    sourceStatus,
+    reportTimeMs: effectiveReportTimeMs,
+    sourceStatus: effectiveSourceStatus,
     projectRows,
+    events: analysis?.currentEvents ?? null,
+    priorEvents: analysis?.priorEvents ?? null,
   });
   const { summary, meter, meta } = vm;
   const timeZone = meta.timeZone;
   const stale = meta.sourceStatus === "stale-fallback";
   const verified = meta.sourceStatus === "verified-current";
+  const fastRates = fastRateSummary(
+    snapshot,
+    bounds,
+    meta.effectiveEndMs,
+    reportEvents ?? analysis?.currentEvents,
+  );
 
   // Drain mode swaps the main chart to observed meter-drain columns; every
   // other panel keeps actual-token semantics.
@@ -411,7 +403,11 @@ export function renderTrendImage({
   function buildHeaderSection() {
     const yearLabel = meta.endDateString.slice(0, 4);
     const title = `TOKEN LEDGER · ${meta.rangeDays}-DAY TREND`;
-    const subtitle = `${localDateLabel(meta.startDateString, timeZone)} – ${localDateLabel(meta.endDateString, timeZone)}, ${yearLabel} · ${timeZone}`;
+    const subtitle = [
+      `${localDateLabel(meta.startDateString, timeZone)} – ${localDateLabel(meta.endDateString, timeZone)}, ${yearLabel}`,
+      timeZone,
+      vm.provenance.historyScope,
+    ].filter(Boolean).join(" · ");
     elements.push(svgText({
       x: outer,
       y: 46,
@@ -525,13 +521,18 @@ export function renderTrendImage({
       unit: "tokens",
       sub: hasFast
         ? {
-            text: `${pct(summary.fastSharePercent)} of total usage`,
+            text: `${pct(summary.fastSharePercent)} of total usage${
+              fastRates.effectiveMultiplier === null
+                ? ""
+                : ` · ${fastRates.effectiveMultiplier.toFixed(2)}× effective`
+            }`,
             color: COLORS.secondary,
           }
         : { text: "no fast-mode usage in range", color: COLORS.muted },
       bar: hasFast
         ? { fraction: summary.fastSharePercent / 100, fill: FAST_MODE_LABEL_COLOR }
         : null,
+      caption: hasFast ? "Darker shade = fast mode" : null,
     });
     cards.push({
       accent: COLORS.secondary,
@@ -809,6 +810,24 @@ export function renderTrendImage({
 
   function buildKpiSection(top) {
     const cards = compactCards();
+    if (summary.fastTokens > 0) {
+      const rateLabel = fastRates.effectiveMultiplier === null
+        ? "UNRATED"
+        : fastRates.mixedMultipliers
+          ? `${fastRates.minimumMultiplier}×–${fastRates.maximumMultiplier}× by model`
+          : `${fastRates.effectiveMultiplier.toFixed(2)}×`;
+      const rateSuffix = fastRates.unratedTokens > 0
+        ? " · some fast usage unrated"
+        : "";
+      elements.push(svgText({
+        x: contentRight,
+        y: top - 3,
+        value: `Fast credit rate · ${rateLabel}${rateSuffix} · Darker shade = fast mode`,
+        fill: COLORS.muted,
+        size: 10.5,
+        anchor: "end",
+      }));
+    }
     const cardHeight = 140;
     const gap = 12;
     if (wide) {
@@ -1189,7 +1208,10 @@ export function renderTrendImage({
         y -= segmentHeight;
         if (segmentHeight <= 0.4) continue;
         const baseColor = styleForModel(entry.model);
-        elements.push(svgRect(x, y, barWidth, segmentHeight, { fill: baseColor }));
+        elements.push(svgRect(x, y, barWidth, segmentHeight, {
+          fill: baseColor,
+          "data-series": "usage-bars",
+        }));
         // Fast-mode tokens are a subset of the segment: same color, hatched,
         // never extra height.
         const fastFraction = value > 0 ? Math.min(1, entry.fastTokens / value) : 0;
@@ -1294,6 +1316,23 @@ export function renderTrendImage({
     // solid runs mark spans confirmed by repeated equal readings, dashed runs
     // bridge unobserved gaps. The line never extends past the last reading.
     if (meterVisible) {
+      // Dense windows keep a line per reset but cap the callout chips so the
+      // top of the plot stays readable; scheduled expiries win the labels.
+      const chipLimit = 4;
+      const labeledResets = (() => {
+        if (meter.resets.length <= chipLimit) return new Set(meter.resets);
+        const scheduled = meter.resets.filter(
+          (reset) => reset.kind === "weekly-expiry",
+        );
+        const pool = scheduled.length >= chipLimit ? scheduled : meter.resets;
+        const selected = new Set();
+        for (let index = 0; index < chipLimit; index += 1) {
+          selected.add(
+            pool[Math.round((index / (chipLimit - 1)) * (pool.length - 1))],
+          );
+        }
+        return selected;
+      })();
       for (const reset of meter.resets) {
         const x = xForTs(reset.timestampMs);
         elements.push(svgLine(x, plotTop, x, plotBottom, {
@@ -1301,6 +1340,7 @@ export function renderTrendImage({
           "stroke-width": 2,
           "stroke-dasharray": reset.inferred ? "5 6" : null,
         }));
+        if (!labeledResets.has(reset)) continue;
         elements.push(chip(
           Math.max(plotLeft + 46, Math.min(plotRight - 46, x)),
           plotTop + 13,
@@ -1327,6 +1367,7 @@ export function renderTrendImage({
             "stroke-width": segment.kind === "confirmed" ? 2.6 : 2,
             "stroke-dasharray": segment.kind === "confirmed" ? null : "5 5",
             "stroke-linecap": "round",
+            "data-series": "weekly-meter",
           },
         ));
       }
