@@ -1,9 +1,16 @@
 import { buildBurnDayBins, buildUsageTrend, trendModelLabel } from "./token-ledger-trend.mjs";
+import { chooseBinSize } from "./token-ledger-image-layout.mjs";
 import {
+  MAX_SAFE_TOKEN_COUNT,
+  checkedTokenAdd,
   splitUsageBucketsAtBoundaries,
+  tokenValue,
   usageBuckets,
   usageCallCount,
 } from "../lib/token-ledger-usage.mjs";
+import { sanitizeTerminalText } from "../lib/token-ledger-terminal-text.mjs";
+
+export { chooseBinSize } from "./token-ledger-image-layout.mjs";
 import { historyScopeLabel } from "../lib/token-ledger-collection.mjs";
 
 const RESET = "\u001b[0m";
@@ -13,6 +20,89 @@ const BORDER_STYLE = [38, 2, 88, 88, 88];
 const GRID_STYLE = [38, 2, 72, 72, 72];
 const LINE_STYLE = [1, 38, 2, 255, 236, 168];
 const RESET_LINE_STYLE = [1, 38, 2, 255, 255, 255];
+const TOKEN_SCALE = Symbol("tokenScale");
+
+function tokenScale(target) {
+  return Number.isFinite(target[TOKEN_SCALE]) && target[TOKEN_SCALE] >= 1
+    ? target[TOKEN_SCALE]
+    : 1;
+}
+
+function setTokenScale(target, scale) {
+  Object.defineProperty(target, TOKEN_SCALE, {
+    configurable: true,
+    enumerable: false,
+    value: scale,
+    writable: true,
+  });
+}
+
+function scaleTokenMap(values, ratio) {
+  for (const [model, value] of values) {
+    values.set(model, value * ratio);
+  }
+}
+
+function addBinTokens(bin, model, tokens, fast) {
+  if (!(tokens > 0)) return;
+  const scale = tokenScale(bin);
+  const scaledTokens = tokens / scale;
+  bin.totalTokens += scaledTokens;
+  bin.values.set(model, (bin.values.get(model) ?? 0) + scaledTokens);
+  if (fast) {
+    bin.fastValues.set(model, (bin.fastValues.get(model) ?? 0) + scaledTokens);
+  }
+
+  const scaleFactor = Math.max(1, bin.totalTokens / MAX_SAFE_TOKEN_COUNT);
+  if (scaleFactor === 1) return;
+  bin.totalTokens = MAX_SAFE_TOKEN_COUNT;
+  scaleTokenMap(bin.values, 1 / scaleFactor);
+  scaleTokenMap(bin.fastValues, 1 / scaleFactor);
+  setTokenScale(bin, scale * scaleFactor);
+}
+
+function mergeBinTotals(state, bin) {
+  const sourceScale = tokenScale(bin);
+  const commonScale = Math.max(state.scale, sourceScale);
+  const targetRatio = state.scale / commonScale;
+  const sourceRatio = sourceScale / commonScale;
+  state.totalTokens *= targetRatio;
+  scaleTokenMap(state.values, targetRatio);
+  scaleTokenMap(state.fastValues, targetRatio);
+  for (const [model, value] of bin.values) {
+    state.totalTokens += value * sourceRatio;
+    state.values.set(
+      model,
+      (state.values.get(model) ?? 0) + value * sourceRatio,
+    );
+  }
+  for (const [model, value] of bin.fastValues) {
+    state.fastValues.set(
+      model,
+      (state.fastValues.get(model) ?? 0) + value * sourceRatio,
+    );
+  }
+
+  const scaleFactor = Math.max(1, state.totalTokens / MAX_SAFE_TOKEN_COUNT);
+  if (scaleFactor > 1) {
+    state.totalTokens = MAX_SAFE_TOKEN_COUNT;
+    scaleTokenMap(state.values, 1 / scaleFactor);
+    scaleTokenMap(state.fastValues, 1 / scaleFactor);
+  }
+  state.scale = commonScale * scaleFactor;
+}
+
+function alignBinsToScale(bins, scale) {
+  for (const bin of bins) {
+    const sourceScale = tokenScale(bin);
+    if (sourceScale === scale) continue;
+    const ratio = sourceScale / scale;
+    bin.totalTokens *= ratio;
+    scaleTokenMap(bin.values, ratio);
+    scaleTokenMap(bin.fastValues, ratio);
+    setTokenScale(bin, scale);
+  }
+}
 
 // Mirrors the SVG renderer's validated categorical palette.
 export const TREND_MODEL_COLORS = {
@@ -40,6 +130,8 @@ const MODEL_ORDER = [
   "Unknown",
 ];
 
+const ATTRIBUTION_MODEL_ORDER = ["Luna", "Sol", "Terra"];
+
 function colorsEnabled(options = {}) {
   return options.forceColor ??
     (!options.plain && !process.env.NO_COLOR && Boolean(process.stdout.isTTY));
@@ -50,7 +142,7 @@ function colorize(value, style, enabled) {
 }
 
 function stripAnsi(value) {
-  return String(value).replace(/\u001b\[[0-9;]*m/g, "");
+  return sanitizeTerminalText(value);
 }
 
 function visibleLength(value) {
@@ -195,21 +287,6 @@ function localDateLabel(dateString, timeZone) {
     .toUpperCase();
 }
 
-export function chooseBinSize(days, width, { minBinWidth = 1, preferDaily = false } = {}) {
-  const rangeDays = Number(days);
-  const plotWidth = Math.max(1, Number(width) || 1);
-  const minimumBinWidth = Math.max(1, Number(minBinWidth) || 1);
-  const maxBinCount = Math.max(1, Math.floor(plotWidth / minimumBinWidth));
-  const preferredBinSize = preferDaily
-    ? 1
-    : rangeDays <= 14
-      ? 1
-      : plotWidth >= 120
-        ? 2
-        : 3;
-  return Math.max(preferredBinSize, Math.ceil(rangeDays / maxBinCount));
-}
-
 function sortedModelEntries(values) {
   return [...values.entries()]
     .filter(([, value]) => value > 0)
@@ -221,7 +298,12 @@ export function buildActualTokenBins(
   bounds,
   days,
   width,
-  { binSize: forcedBinSize, minBinWidth, preferDaily } = {},
+  {
+    binSize: forcedBinSize,
+    minBinWidth,
+    preferDaily,
+    events = null,
+  } = {},
 ) {
   const binSize = forcedBinSize ?? chooseBinSize(days, width, { minBinWidth, preferDaily });
   const binCount = Math.ceil(days / binSize);
@@ -252,7 +334,7 @@ export function buildActualTokenBins(
     .map((dateString) =>
       zonedMidnight(dateString, bounds.timeZone, dateFormatter).getTime());
   for (const event of splitUsageBucketsAtBoundaries(
-    usageBuckets(snapshot),
+    events ?? usageBuckets(snapshot),
     binBoundaries,
   )) {
     const timestamp = new Date(event.timestamp).getTime();
@@ -261,27 +343,34 @@ export function buildActualTokenBins(
     const dayIndex = dateIndexByString.get(dateString);
     if (dayIndex === undefined || dayIndex >= days) continue;
     const bin = bins[Math.floor(dayIndex / binSize)];
-    const tokens = Math.max(0, Number(event.totalTokens) || 0);
+    if (event?.invalidTokenRecord === true) continue;
+    const allowFractional = event.rangeAllocationEstimated === true;
+    const tokens = tokenValue(event.totalTokens, { allowFractional });
     const model = trendModelLabel(event.model);
-    bin.totalTokens += tokens;
-    bin.calls += usageCallCount(event);
-    bin.values.set(model, (bin.values.get(model) ?? 0) + tokens);
-    if (event.serviceTier === "priority") {
-      bin.fastValues.set(model, (bin.fastValues.get(model) ?? 0) + tokens);
-    }
+    bin.calls = checkedTokenAdd(bin.calls, usageCallCount(event), {
+      allowFractional,
+    });
+    addBinTokens(bin, model, tokens, event.serviceTier === "priority");
   }
 
-  const totals = new Map();
-  const fastTotals = new Map();
+  const totalsState = {
+    scale: 1,
+    totalTokens: 0,
+    values: new Map(),
+    fastValues: new Map(),
+  };
   for (const bin of bins) {
-    for (const [model, value] of bin.values) {
-      totals.set(model, (totals.get(model) ?? 0) + value);
-    }
-    for (const [model, value] of bin.fastValues) {
-      fastTotals.set(model, (fastTotals.get(model) ?? 0) + value);
-    }
+    mergeBinTotals(totalsState, bin);
   }
-  return { bins, totals, fastTotals, binSize, binCount };
+  alignBinsToScale(bins, totalsState.scale);
+  return {
+    bins,
+    totals: totalsState.values,
+    fastTotals: totalsState.fastValues,
+    scale: totalsState.scale,
+    binSize,
+    binCount,
+  };
 }
 
 function niceCeiling(value) {
@@ -297,7 +386,12 @@ function allocateSegmentHeights(entries, total, maxValue, plotHeight) {
     ? Math.max(1, Math.round((total / maxValue) * (plotHeight - 1)))
     : 0;
   if (!barHeight) return [];
-  const ideal = entries.map(([, value]) => (value / total) * barHeight);
+  // Model counters can cap independently when the bin total reaches the
+  // safe-token limit. Partition the already-scaled bar across the model
+  // entries so capped components cannot make the stack taller than its bin.
+  const segmentTotal = entries.reduce((sum, [, value]) => sum + value, 0);
+  const partitionTotal = segmentTotal > 0 ? segmentTotal : total;
+  const ideal = entries.map(([, value]) => (value / partitionTotal) * barHeight);
   const heights = ideal.map(Math.floor);
   let remainder = barHeight - heights.reduce((sum, value) => sum + value, 0);
   const order = ideal
@@ -407,9 +501,26 @@ function frameLine(content, width) {
   return `│${fit(content, width - 2)}│`;
 }
 
+function wrapAttributionEntries(prefix, entries, width) {
+  const lines = [];
+  let line = prefix;
+  for (const entry of entries) {
+    const separator = line === prefix ? " · " : "   ";
+    const candidate = `${line}${separator}${entry}`;
+    if (visibleLength(candidate) <= width) {
+      line = candidate;
+      continue;
+    }
+    lines.push(line);
+    line = entry;
+  }
+  lines.push(line);
+  return lines;
+}
+
 function formatAttribution(trend, enabled, width, percentMode) {
   const rows = new Map((trend.models ?? []).map((row) => [row.model, row]));
-  const entries = ["Luna", "Sol"]
+  const entries = ATTRIBUTION_MODEL_ORDER
     .map((model) => {
       const row = rows.get(model);
       if (!row || !(row.tokensPerBurnPoint > 0)) return null;
@@ -419,30 +530,20 @@ function formatAttribution(trend, enabled, width, percentMode) {
     })
     .filter(Boolean);
   if (!entries.length) return [];
-  if (percentMode) {
-    const valueLine = colorize(
-      `Observed burn rate · ${entries.join("   ")}`,
-      SECONDARY_STYLE,
-      enabled,
-    );
-    const method = colorize(
-      `Columns sum to observed meter drops; model split via rate-card credit weights (card ${trend.rateCardAsOf}).`,
-      SECONDARY_STYLE,
-      enabled,
-    );
-    return [fit(valueLine, width - 2), fit(method, width - 2)];
-  }
-  const valueLine = colorize(
-    `ESTIMATE ONLY · quota attribution lens · ${entries.join("   ")}`,
-    SECONDARY_STYLE,
-    enabled,
+  const prefix = percentMode
+    ? "Observed burn rate"
+    : "ESTIMATE ONLY · quota attribution lens";
+  const valueLines = wrapAttributionEntries(prefix, entries, width - 2).map(
+    (line) => fit(colorize(line, SECONDARY_STYLE, enabled), width - 2),
   );
   const method = colorize(
-    `Rate-card/token weights, ${trend.rateCardAsOf}; separate from actual-token bars and not official quota math.`,
+    percentMode
+      ? `Columns sum to observed meter drops; model split via rate-card credit weights (card ${trend.rateCardAsOf}).`
+      : `Rate-card/token weights, ${trend.rateCardAsOf}; separate from actual-token bars and not official quota math.`,
     SECONDARY_STYLE,
     enabled,
   );
-  return [fit(valueLine, width - 2), fit(method, width - 2)];
+  return [...valueLines, fit(method, width - 2)];
 }
 
 function drainLabelLine(burnBins, plotWidth, leftWidth, rightWidth, enabled) {
@@ -468,10 +569,12 @@ function drainLabelLine(burnBins, plotWidth, leftWidth, rightWidth, enabled) {
 export function renderTrendCombo({
   snapshot,
   bounds,
-  trend = buildUsageTrend(snapshot, bounds),
+  trend: providedTrend = null,
   days = bounds.rangeDays ?? 7,
   options = {},
+  analysis = null,
 }) {
+  const trend = providedTrend ?? analysis?.trend ?? buildUsageTrend(snapshot, bounds, { analysis });
   const enabled = colorsEnabled(options);
   const frameWidth = Math.max(82, Math.min(158, Number(options.width) || 120));
   const innerWidth = frameWidth - 2;
@@ -479,7 +582,9 @@ export function renderTrendCombo({
   const rightWidth = 7;
   const plotWidth = Math.max(36, innerWidth - leftWidth - rightWidth - 2);
   const plotHeight = 11;
-  const actual = buildActualTokenBins(snapshot, bounds, days, plotWidth);
+  const actual = buildActualTokenBins(snapshot, bounds, days, plotWidth, {
+    events: analysis?.currentEvents,
+  });
   const burn = buildBurnDayBins(trend, bounds, {
     days,
     binSize: actual.binSize,
@@ -489,6 +594,7 @@ export function renderTrendCombo({
   // and shows the observed drop per column in a label row instead.
   const meterUsable = Boolean(trend.available && burn.totalPercent > 0);
   const percentMode = Boolean(options.drain) && meterUsable;
+  const meterAvailable = Boolean(trend.available && (trend.points ?? []).length > 0);
   const barBins = percentMode ? burn.bins : actual.bins;
   const binTotal = (bin) => (percentMode ? bin.totalPercent : bin.totalTokens);
   const maxLeft = niceCeiling(
@@ -567,7 +673,7 @@ export function renderTrendCombo({
     `┌${"─".repeat(frameWidth - 2)}┐`,
     frameLine(
       colorize(
-        `TOKEN LEDGER · ${percentMode ? "OBSERVED LIMIT DRAIN + WEEKLY METER" : "ACTUAL TOKENS + WEEKLY QUOTA"} · ${localDateLabel(bounds.startDateString, bounds.timeZone)} – ${localDateLabel(bounds.endDateString, bounds.timeZone)} · ${days}D`,
+        `TOKEN LEDGER · ${percentMode ? "OBSERVED LIMIT DRAIN + WEEKLY METER" : meterAvailable ? "ACTUAL TOKENS + WEEKLY QUOTA" : "ACTUAL TOKENS"} · ${localDateLabel(bounds.startDateString, bounds.timeZone)} – ${localDateLabel(bounds.endDateString, bounds.timeZone)} · ${days}D`,
         PRIMARY_STYLE,
         enabled,
       ),
@@ -577,9 +683,9 @@ export function renderTrendCombo({
       colorize(
         percentMode
           ? "BARS = observed limit % consumed per day by model · LINE = meter remaining · one percent scale"
-          : meterUsable
+          : meterAvailable
             ? "BARS = actual token quantity by model · LINE = meter remaining · -% row = observed drain per column"
-            : "BARS = actual token quantity by model · LINE = observed remaining quota · separate scales",
+            : "BARS = actual token quantity by model · no account-wide weekly meter observed",
         SECONDARY_STYLE,
         enabled,
       ),
@@ -598,7 +704,9 @@ export function renderTrendCombo({
         ? percent(leftValue)
         : compact(leftValue)
       : "";
-    const rightLabel = axisRows.includes(row) ? `${Math.round(rightValue)}%` : "";
+    const rightLabel = meterAvailable && axisRows.includes(row)
+      ? `${Math.round(rightValue)}%`
+      : "";
     const content = chart[row]
       .map(({ char, style }) => colorize(char, style, enabled))
       .join("");
@@ -615,7 +723,10 @@ export function renderTrendCombo({
   }
   lines.push(`├${"─".repeat(frameWidth - 2)}┤`);
 
-  const totalTokens = [...actual.totals.values()].reduce((sum, value) => sum + value, 0);
+  const totalTokens = [...actual.totals.values()].reduce(
+    (sum, value) => checkedTokenAdd(sum, value, { allowFractional: true }),
+    0,
+  );
   const legendModels = percentMode
     ? [...burn.totals.keys()].sort(modelSort)
     : [...actual.totals.keys()].sort(modelSort);
@@ -645,8 +756,12 @@ export function renderTrendCombo({
     const rightLegendWidth = innerWidth - 2 - leftLegendWidth;
     lines.push(frameLine(`${fit(legend[index], leftLegendWidth)}  ${fit(legend[index + 1] ?? "", rightLegendWidth)}`, frameWidth));
   }
-  lines.push(frameLine(colorize("LINE · OBSERVED WEEKLY QUOTA REMAINING · RIGHT AXIS", LINE_STYLE, enabled), frameWidth));
-  lines.push(frameLine(colorize("↟ reset marker returns the line to 100%; it never rises within a cycle", SECONDARY_STYLE, enabled), frameWidth));
+  if (meterAvailable) {
+    lines.push(frameLine(colorize("LINE · OBSERVED WEEKLY QUOTA REMAINING · RIGHT AXIS", LINE_STYLE, enabled), frameWidth));
+    lines.push(frameLine(colorize("↟ reset marker returns the line to 100%; it never rises within a cycle", SECONDARY_STYLE, enabled), frameWidth));
+  } else {
+    lines.push(frameLine(colorize("NO ACCOUNT-WIDE WEEKLY METER OBSERVED", SECONDARY_STYLE, enabled), frameWidth));
+  }
   for (const line of formatAttribution(trend, enabled, frameWidth, percentMode)) {
     lines.push(frameLine(line, frameWidth));
   }
