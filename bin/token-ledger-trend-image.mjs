@@ -40,6 +40,7 @@ export {
   textWidth,
   truncateText,
 } from "./token-ledger-image-primitives.mjs";
+import { historyScopeLabel } from "../lib/token-ledger-collection.mjs";
 
 const MODEL_ORDER = [
   "Luna",
@@ -560,10 +561,23 @@ export function renderTrendImage({
     : xForTimestamp(reportTimeMs);
 
   const yearLabel = bounds.endDateString.slice(0, 4);
+  const history = historyScopeLabel(snapshot);
   const title = percentMode
     ? `TOKEN LEDGER · ${days}-DAY METER DRAIN`
     : `TOKEN LEDGER · ${days}-DAY TREND`;
-  const subtitle = `${localDateLabel(bounds.startDateString, bounds.timeZone)} – ${localDateLabel(bounds.endDateString, bounds.timeZone)}, ${yearLabel} · ${bounds.timeZone}`;
+  const subtitle = [
+    `${localDateLabel(bounds.startDateString, bounds.timeZone)} – ${localDateLabel(bounds.endDateString, bounds.timeZone)}, ${yearLabel}`,
+    bounds.timeZone,
+    history,
+  ].filter(Boolean).join(" · ");
+  const headerTitleWidth = textWidth(title, 27, 800) -
+    0.27 * (title.length - 1);
+  const headerAvailableWidth = contentRight - outer;
+  const headerMetadataFits = headerTitleWidth + textWidth(subtitle, 14) + 24 <=
+    headerAvailableWidth;
+  const renderedSubtitle = headerMetadataFits
+    ? subtitle
+    : truncateText(subtitle, headerAvailableWidth, 14);
   const description = percentMode
     ? "Dark report card: compact actual-token stat cards beside pace and runway, stacked columns of observed weekly-meter drain with an explicitly estimated per-model split, the OpenAI-reported weekly limit remaining as an amber line, a partial final day ending at report time, a compressed cache-rate-by-period strip, and top projects beside per-model cache rates."
     : hasLine
@@ -586,8 +600,8 @@ export function renderTrendImage({
     }),
     svgText({
       x: contentRight,
-      y: headerBaseline,
-      value: subtitle,
+      y: headerMetadataFits ? headerBaseline : headerBaseline + 24,
+      value: renderedSubtitle,
       fill: COLORS.muted,
       size: 14,
       anchor: "end",

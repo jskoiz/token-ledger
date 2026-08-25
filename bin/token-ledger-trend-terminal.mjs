@@ -11,6 +11,7 @@ import {
 import { sanitizeTerminalText } from "../lib/token-ledger-terminal-text.mjs";
 
 export { chooseBinSize } from "./token-ledger-image-layout.mjs";
+import { historyScopeLabel } from "../lib/token-ledger-collection.mjs";
 
 const RESET = "\u001b[0m";
 const PRIMARY_STYLE = [38, 2, 255, 255, 255];
@@ -667,6 +668,7 @@ export function renderTrendCombo({
   }
 
   const axisRows = [0, Math.floor(baseline / 2), baseline];
+  const history = historyScopeLabel(snapshot);
   const lines = [
     `┌${"─".repeat(frameWidth - 2)}┐`,
     frameLine(
@@ -689,6 +691,9 @@ export function renderTrendCombo({
       ),
       frameWidth,
     ),
+    ...(history
+      ? [frameLine(colorize(history, SECONDARY_STYLE, enabled), frameWidth)]
+      : []),
     `├${"─".repeat(frameWidth - 2)}┤`,
   ];
   for (let row = 0; row < plotHeight; row += 1) {

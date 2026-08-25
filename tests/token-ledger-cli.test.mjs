@@ -366,14 +366,10 @@ function lifecycleRun(codexHome, cachePath, includeArchived = true) {
   return run(options);
 }
 
-async function ageLifecycleCache(cachePath, sourcePaths) {
+async function ageLifecycleCache(cachePath) {
   const cacheTimeMs = Date.now() - 2 * 60 * 60 * 1_000;
   const cacheDate = new Date(cacheTimeMs);
-  const sourceDate = new Date(cacheTimeMs - 1_000);
   await utimes(cachePath, cacheDate, cacheDate);
-  for (const sourcePath of sourcePaths) {
-    await utimes(sourcePath, sourceDate, sourceDate);
-  }
   return cacheTimeMs;
 }
 
@@ -402,7 +398,7 @@ test("successful metadata-backed refresh lifecycle remains hermetic", async () =
     1_000,
     { parentThreadId },
   );
-  const archivedRolloutPath = await writeLifecycleRollout(
+  await writeLifecycleRollout(
     codexHome,
     archivedThreadId,
     timestamp,
@@ -502,13 +498,7 @@ test("successful metadata-backed refresh lifecycle remains hermetic", async () =
     );
 
     const initialCache = await readFile(cachePath);
-    const sourcePaths = [
-      activeRolloutPath,
-      archivedRolloutPath,
-      indexPath,
-      currentStatePath,
-    ];
-    const unchangedCacheTimeMs = await ageLifecycleCache(cachePath, sourcePaths);
+    const unchangedCacheTimeMs = await ageLifecycleCache(cachePath);
     await lifecycleRun(codexHome, cachePath);
     assert.deepEqual(await readFile(cachePath), initialCache);
 
@@ -529,7 +519,7 @@ test("successful metadata-backed refresh lifecycle remains hermetic", async () =
       1_500,
     );
 
-    const indexCacheTimeMs = await ageLifecycleCache(cachePath, sourcePaths);
+    const indexCacheTimeMs = await ageLifecycleCache(cachePath);
     await writeLifecycleIndex(
       codexHome,
       activeThreadId,
@@ -545,10 +535,7 @@ test("successful metadata-backed refresh lifecycle remains hermetic", async () =
       "Fresh indexed metadata title",
     );
 
-    const currentStateCacheTimeMs = await ageLifecycleCache(
-      cachePath,
-      sourcePaths,
-    );
+    const currentStateCacheTimeMs = await ageLifecycleCache(cachePath);
     updateLifecycleStateDatabase(currentStatePath, "realtime_voice", 12_345);
     await setLifecycleSourceNewer(currentStatePath, currentStateCacheTimeMs);
     await lifecycleRun(codexHome, cachePath);
@@ -570,12 +557,7 @@ test("successful metadata-backed refresh lifecycle remains hermetic", async () =
       tokensUsed: 22_222,
       title: "Legacy SQLite title",
     });
-    const legacyCacheTimeMs = await ageLifecycleCache(cachePath, [
-      activeRolloutPath,
-      archivedRolloutPath,
-      indexPath,
-      legacyStatePath,
-    ]);
+    const legacyCacheTimeMs = await ageLifecycleCache(cachePath);
     await setLifecycleSourceNewer(legacyStatePath, legacyCacheTimeMs);
     await lifecycleRun(codexHome, cachePath);
     refreshedSnapshot = await readPrivateSnapshot(cachePath);
@@ -665,6 +647,7 @@ test("bare CLI shows the concise quick guide", () => {
   assert.match(result.stdout, /tledger 1d\s+Last 24 hours/);
   assert.match(result.stdout, /tledger report 7d\s+Write the 7-day PNG report/);
   assert.match(result.stdout, /--help-all\s+Show every command and option/);
+  assert.match(result.stdout, /--since <ISO timestamp>/);
   assert.doesNotMatch(result.stdout, /--codex-home|--youplot|npm run/);
 });
 
@@ -677,6 +660,7 @@ test("--help-all shows the complete command reference", () => {
   assert.equal(result.stderr, "");
   assert.match(result.stdout, /Token Ledger command reference/);
   assert.match(result.stdout, /--codex-home <dir>/);
+  assert.match(result.stdout, /--since <ISO timestamp>/);
   assert.match(result.stdout, /--youplot/);
   assert.match(result.stdout, /--image-width <px>/);
 });
@@ -1081,6 +1065,35 @@ test("parseArgs accepts the day subcommand and date option", () => {
   assert.equal(options.date, "2026-08-01");
   assert.equal(options.top, 5);
   assert.equal(options.rawProjects, true);
+});
+
+test("parseArgs normalizes and validates the collection cutoff", () => {
+  const options = parseArgs([
+    "day",
+    "--date",
+    "2026-08-20",
+    "--since",
+    "2026-08-20T07:00:00-05:00",
+    "--no-archived",
+  ]);
+  assert.equal(options.since.toISOString(), "2026-08-20T12:00:00.000Z");
+  assert.equal(options.includeArchived, false);
+  assert.throws(
+    () => parseArgs(["day", "2026-08-20", "--since"]),
+    /--since requires a value/,
+  );
+  assert.throws(
+    () => parseArgs(["day", "2026-08-20", "--since", "not-a-date"]),
+    /--since requires a valid ISO timestamp/,
+  );
+  assert.throws(
+    () => parseArgs(["day", "2026-08-20", "--since", "01/02/2026"]),
+    /--since requires a valid ISO timestamp/,
+  );
+  assert.throws(
+    () => parseArgs(["day", "2026-08-20", "--since", "2026-02-30T00:00:00Z"]),
+    /--since requires a valid ISO timestamp/,
+  );
 });
 
 test("parseArgs treats an empty command and help aliases as help", () => {
@@ -1589,6 +1602,177 @@ test("source watermarks detect changes independent of cache mtime", () => {
   assert.equal(sourceWatermarksEqual(original, null), false);
 });
 
+test("refresh applies the normalized cutoff and records its collection scope", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-since-refresh-"));
+  const codexHome = resolve(root, "codex-home");
+  const sessionDirectory = resolve(codexHome, "sessions", "2026", "08", "20");
+  const outputPath = resolve(root, "snapshot.json");
+  const threadId = "12121212-1212-4121-8121-121212121212";
+  const tokenCount = (timestamp, turnId, total, last) => [
+    {
+      timestamp,
+      type: "event_msg",
+      payload: {
+        type: "task_started",
+        turn_id: turnId,
+        started_at: Date.parse(timestamp) / 1_000,
+      },
+    },
+    {
+      timestamp,
+      type: "turn_context",
+      payload: { turn_id: turnId, model: "gpt-5.6-luna", effort: "medium" },
+    },
+    {
+      timestamp: new Date(Date.parse(timestamp) + 1_000).toISOString(),
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        info: {
+          total_token_usage: {
+            input_tokens: total - 10,
+            cached_input_tokens: 10,
+            output_tokens: 10,
+            total_tokens: total,
+          },
+          last_token_usage: {
+            input_tokens: last - 10,
+            cached_input_tokens: 10,
+            output_tokens: 10,
+            total_tokens: last,
+          },
+          model_context_window: 128_000,
+        },
+      },
+    },
+  ];
+  try {
+    await mkdir(sessionDirectory, { recursive: true });
+    await writeFile(
+      resolve(sessionDirectory, `rollout-${threadId}.jsonl`),
+      [...tokenCount("2026-08-20T10:00:00.000Z", "turn-old", 100, 100),
+        ...tokenCount("2026-08-20T18:00:00.000Z", "turn-new", 200, 100)]
+        .map((row) => JSON.stringify(row))
+        .join("\n") + "\n",
+    );
+
+    const options = parseArgs([
+      "day",
+      "2026-08-20",
+      "--refresh",
+      "--since",
+      "2026-08-20T12:00:00-05:00",
+      "--static",
+      "--plain",
+      "--ascii",
+      "--tz",
+      "UTC",
+    ]);
+    options.input = outputPath;
+    options.codexHome = codexHome;
+    const output = await run(options);
+    const snapshot = JSON.parse(await readFile(outputPath, "utf8"));
+
+    assert.match(output, /100 TOKENS/);
+    assert.equal(snapshot.coverage.observedModelCalls, 1);
+    assert.deepEqual(snapshot.provenance.collection, {
+      since: "2026-08-20T17:00:00.000Z",
+      includeArchived: true,
+    });
+
+    const unfilteredOptions = parseArgs([
+      "day",
+      "2026-08-20",
+      "--static",
+      "--plain",
+      "--ascii",
+      "--tz",
+      "UTC",
+    ]);
+    unfilteredOptions.input = outputPath;
+    unfilteredOptions.codexHome = codexHome;
+    const unfilteredOutput = await run(unfilteredOptions);
+    const rebuilt = JSON.parse(await readFile(outputPath, "utf8"));
+    assert.match(unfilteredOutput, /200 TOKENS/);
+    assert.equal(rebuilt.coverage.observedModelCalls, 2);
+    assert.deepEqual(rebuilt.provenance.collection, {
+      since: null,
+      includeArchived: true,
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("unfiltered reads reject a cache with a filtered collection scope", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-scope-cache-"));
+  const snapshotPath = resolve(root, "filtered-snapshot.json");
+  try {
+    await writePrivateSnapshot(snapshotPath, {
+      schemaVersion: 2,
+      generatedAt: new Date().toISOString(),
+      provenance: {
+        collection: {
+          since: "2026-08-20T12:00:00.000Z",
+          includeArchived: true,
+        },
+      },
+      events: [{
+        timestamp: "2026-08-20T13:00:00.000Z",
+        project: "filtered",
+        threadId: "filtered-1",
+        model: "gpt-5.6-luna",
+        totalTokens: 100,
+        inputTokens: 90,
+        cachedInputTokens: 10,
+        outputTokens: 10,
+        rateCardCredits: 1,
+      }],
+      threads: [{ id: "filtered-1", project: "filtered" }],
+    });
+
+    await assert.rejects(
+      () => run(parseArgs([
+        "day",
+        "2026-08-20",
+        "--input",
+        snapshotPath,
+        "--no-refresh",
+        "--static",
+        "--plain",
+        "--ascii",
+        "--tz",
+        "UTC",
+      ])),
+      (error) => {
+        assert.match(error.message, /Snapshot collection scope does not match the requested filters/);
+        assert.match(error.message, /For --input, supply matching --since\/--no-archived filters/);
+        assert.match(error.message, /--refresh cannot be combined with --input/);
+        return true;
+      },
+    );
+    await assert.rejects(
+      () => run(parseArgs([
+        "day",
+        "2026-08-20",
+        "--input",
+        snapshotPath,
+        "--no-refresh",
+        "--since",
+        "2026-08-21T00:00:00.000Z",
+        "--static",
+        "--plain",
+        "--ascii",
+        "--tz",
+        "UTC",
+      ])),
+      /Snapshot collection scope does not match the requested filters/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("automatic loads check source watermarks regardless of cache age", () => {
   const now = 1_000_000;
   assert.equal(snapshotCacheIsFresh(now, now), true);
@@ -1929,6 +2113,111 @@ test("terminal shares preserve model and cache proportions when totals saturate"
   assert.match(output, /Uncached\s+50\.0%/);
   assert.match(output, /SDK\s+50\.0%/);
   assert.match(output, /Tool\s+50\.0%/);
+});
+
+test("filtered collection scope is visible in terminal and PNG renderers", () => {
+  const snapshot = {
+    generatedAt: "2026-08-20T20:00:00.000Z",
+    provenance: {
+      collection: {
+        since: "2026-08-20T12:00:00.000Z",
+        includeArchived: false,
+      },
+    },
+    events: [{
+      timestamp: "2026-08-20T13:00:00.000Z",
+      project: "scoped",
+      threadId: "scoped-1",
+      model: "gpt-5.6-luna",
+      inputTokens: 90,
+      cachedInputTokens: 10,
+      totalTokens: 100,
+      outputTokens: 10,
+      toolCalls: 0,
+      rateCardCredits: 1,
+    }],
+    threads: [{ id: "scoped-1", project: "scoped" }],
+    quotaObservations: [],
+  };
+  const events = snapshot.events;
+  const rows = aggregateProjects(snapshot, events, { rawProjects: true });
+  const bounds = multiDayBounds("2026-08-20", "UTC", 7);
+  const terminal = renderTerminal({
+    options: { plain: true, ascii: true, width: 120 },
+    snapshot,
+    bounds: dayBounds("2026-08-20", "UTC"),
+    events,
+    rows,
+    allRows: rows,
+  });
+  assert.match(
+    terminal,
+    /TRUNCATED HISTORY · before 2026-08-20T12:00:00\.000Z · archived sessions excluded/,
+  );
+
+  const trend = renderTrendPlain({
+    snapshot,
+    bounds,
+    options: { plain: true, width: 120 },
+  });
+  assert.match(trend, /TRUNCATED HISTORY/);
+
+  const trendSvg = renderTrendImage({
+    snapshot,
+    bounds,
+    options: { imageWidth: 900 },
+    projectRows: rows,
+  });
+  assert.match(trendSvg, /TRUNCATED HISTORY/);
+  assert.match(trendSvg, /<text[^>]*y="77"[^>]*>[^<]*TRUNCATED HISTORY/);
+
+  const cacheSvg = renderCacheReportImage({
+    snapshot,
+    bounds,
+    options: { imageWidth: 900 },
+  });
+  assert.match(cacheSvg, /TRUNCATED HISTORY/);
+});
+
+test("empty ranges with uncollected history are reported as not collected", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-since-empty-"));
+  const snapshotPath = resolve(root, "scoped-snapshot.json");
+  try {
+    await writePrivateSnapshot(snapshotPath, {
+      schemaVersion: 2,
+      generatedAt: "2026-08-20T20:00:00.000Z",
+      provenance: {
+        collection: {
+          since: "2026-08-20T12:00:00.000Z",
+          includeArchived: true,
+        },
+      },
+      events: [],
+      threads: [],
+    });
+    const runEmptyDay = (date) => run(parseArgs([
+      "day",
+      date,
+      "--input",
+      snapshotPath,
+      "--no-refresh",
+      "--since",
+      "2026-08-20T12:00:00.000Z",
+      "--static",
+      "--plain",
+      "--ascii",
+      "--tz",
+      "UTC",
+    ]));
+    const output = await runEmptyDay("2026-08-19");
+    assert.match(output, /not a verified zero/);
+    assert.match(output, /History: TRUNCATED HISTORY · before 2026-08-20T12:00:00\.000Z/);
+    const partialOutput = await runEmptyDay("2026-08-20");
+    assert.match(partialOutput, /not a verified zero/);
+    assert.doesNotMatch(partialOutput, /No model-call events found/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("terminal renderer moves the selected project cursor", () => {
@@ -4057,6 +4346,27 @@ test("cache report moves long timezone header metadata below the title", () => {
     shortZoneSvg,
     /<text x="868" y="77"[^>]*>Aug 9 – Aug 15, 2026 · UTC<\/text>/,
   );
+
+  const filteredLongZoneSvg = renderCacheReportImage({
+    snapshot: {
+      events: [],
+      provenance: {
+        collection: {
+          since: "2026-08-01T00:00:00.000Z",
+          includeArchived: false,
+        },
+      },
+    },
+    bounds: multiDayBounds("2026-08-15", "America/Argentina/Buenos_Aires", 7),
+    days: 7,
+    options: { imageWidth: 900 },
+  });
+  const filteredMetadata = filteredLongZoneSvg.match(
+    /<text x="868" y="77"[^>]*>([^<]+)<\/text>/,
+  )?.[1];
+  assert.ok(filteredMetadata);
+  assert.ok(textWidth(filteredMetadata, 14) <= 836);
+  assert.match(filteredMetadata, /…$/);
 
   const wideSvg = renderCacheReportImage({
     snapshot: { events: [] },

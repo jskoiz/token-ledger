@@ -26,6 +26,14 @@ import {
   writePrivateSnapshot,
 } from "../lib/token-ledger-snapshot.mjs";
 import {
+  collectionScope,
+  historyScopeLabel,
+  normalizeCollectionSince,
+  snapshotCollectionCutoffMs,
+  snapshotCollectionScope,
+  snapshotMatchesCollectionScope,
+} from "../lib/token-ledger-collection.mjs";
+import {
   SNAPSHOT_SCHEMA_VERSION,
   checkedFiniteAdd,
   checkedTokenAdd,
@@ -108,6 +116,7 @@ Usage:
 Common options:
   --static                  Print once instead of opening the dashboard
   --refresh                 Rebuild the local usage cache
+  --since <ISO timestamp>   Collect history at or after this timestamp
   --image-output <file>     Choose where to save a PNG
   --no-open                 Do not open a generated PNG
   -h, --help                Show this quick guide
@@ -142,6 +151,7 @@ Data and refresh:
   --refresh                  Rebuild the default snapshot from local Codex data
   --no-refresh               Use the cached snapshot without checking source files
   --codex-home <dir>         Codex data root used when refreshing
+  --since <ISO timestamp>    Collect history at or after this timestamp
   --no-archived              Skip archived sessions when refreshing
 
 Terminal output:
@@ -241,6 +251,7 @@ export function parseArgs(argv) {
     refresh: false,
     autoRefresh: true,
     codexHome: resolve(process.env.CODEX_HOME || `${homedir()}/.codex`),
+    since: null,
     includeArchived: true,
     timeZone: DEFAULT_TIME_ZONE,
     top: DEFAULT_TOP,
@@ -299,6 +310,10 @@ export function parseArgs(argv) {
       options.autoRefresh = false;
     } else if (argument === "--codex-home") {
       options.codexHome = resolve(readOption(argv, index, "--codex-home"));
+      index += 1;
+    } else if (argument === "--since") {
+      const value = readOption(argv, index, "--since");
+      options.since = new Date(normalizeCollectionSince(value));
       index += 1;
     } else if (argument === "--tz") {
       options.timeZone = readOption(argv, index, "--tz");
@@ -971,6 +986,37 @@ async function readSnapshot(snapshotPath) {
   return parsed;
 }
 
+function snapshotScopeMatchesOptions(snapshot, options) {
+  const requested = collectionScope(options);
+  const actual = snapshotCollectionScope(snapshot);
+  if (!actual) {
+    // Explicit snapshots are deliberate inputs. Preserve the existing
+    // fixture/export workflow when no collection filter was requested, while
+    // refusing to claim that an unknown snapshot satisfies a filter.
+    return requested.since === null && requested.includeArchived;
+  }
+  return snapshotMatchesCollectionScope(snapshot, requested);
+}
+
+function snapshotScopeError(snapshot, options) {
+  const requested = collectionScope(options);
+  const actual = snapshotCollectionScope(snapshot);
+  const describe = (scope) => {
+    if (!scope) return "unknown collection scope";
+    const since = scope.since === null ? "full history" : `since ${scope.since}`;
+    const archives = scope.includeArchived
+      ? "archived sessions included"
+      : "archived sessions excluded";
+    return `${since}; ${archives}`;
+  };
+  const remedy = options.inputExplicit
+    ? "For --input, supply matching --since/--no-archived filters or rebuild that file with the collector; --refresh cannot be combined with --input."
+    : "Rebuild it with --refresh.";
+  return new Error(
+    `Snapshot collection scope does not match the requested filters (requested ${describe(requested)}; found ${describe(actual)}). ${remedy}`,
+  );
+}
+
 async function refreshSnapshot(options) {
   if (!existsSync(options.codexHome)) {
     throw new Error(
@@ -989,7 +1035,7 @@ async function refreshSnapshot(options) {
         output: options.input,
         codexHome: options.codexHome,
         includeArchived: options.includeArchived,
-        since: null,
+        since: options.since,
       },
       ({ current, total }) => {
         process.stderr.write(`\rToken Ledger: scanned ${current}/${total} rollout files`);
@@ -1010,10 +1056,18 @@ async function refreshSnapshot(options) {
   } catch (error) {
     if (progressStarted) process.stderr.write("\n");
     if (error?.code === "ERR_SNAPSHOT_SIZE_LIMIT" && existsSync(options.input)) {
-      process.stderr.write(
-        "Token Ledger: refresh exceeded the safety limit; continuing with the previous cache, which may be stale.\n",
-      );
-      return readSnapshot(options.input);
+      try {
+        const previous = await readSnapshot(options.input);
+        if (snapshotScopeMatchesOptions(previous, options)) {
+          process.stderr.write(
+            "Token Ledger: refresh exceeded the safety limit; continuing with the previous cache, which may be stale.\n",
+          );
+          return previous;
+        }
+      } catch {
+        // Preserve the original refresh error when the previous cache cannot
+        // prove that it has the requested collection scope.
+      }
     }
     throw new Error(
       `Could not refresh local snapshot: ${safeErrorMessage(error, [options.input, options.codexHome])}`,
@@ -1087,15 +1141,22 @@ async function loadSnapshot(options) {
     }
     return refreshSnapshot(options);
   }
+  const cached = await readSnapshot(options.input);
+  if (!snapshotScopeMatchesOptions(cached, options)) {
+    if (options.inputExplicit || !options.autoRefresh) {
+      throw snapshotScopeError(cached, options);
+    }
+    return refreshSnapshot(options);
+  }
+
   if (!options.autoRefresh || options.inputExplicit) {
-    return readSnapshot(options.input);
+    return cached;
   }
 
   if (!shouldCheckSourceFreshness(options)) {
-    return readSnapshot(options.input);
+    return cached;
   }
 
-  const snapshot = await readSnapshot(options.input);
   const { sourceInventory, sourceWatermarksEqual } = await import(
     "../lib/token-ledger-importer.mjs"
   );
@@ -1110,10 +1171,10 @@ async function loadSnapshot(options) {
       `Could not inspect local Codex source: ${safeErrorMessage(error, [options.codexHome])}`,
     );
   }
-  if (!sourceWatermarksEqual(snapshot.sourceWatermark, inventory.watermark)) {
+  if (!sourceWatermarksEqual(cached.sourceWatermark, inventory.watermark)) {
     return refreshSnapshot(options);
   }
-  return snapshot;
+  return cached;
 }
 
 async function render(
@@ -1196,10 +1257,12 @@ async function render(
     totalTokens > 0 ? (row.totalTokens / totalTokens) * 100 : 0,
   );
   const chart = runYouPlot(rows, options, dateLabel, unit).trimEnd();
+  const historyScope = historyScopeLabel(snapshot);
 
   const header = [
     `Token Ledger · ${dateLabel} · ${bounds.timeZone}`,
     `${compact(totalTokens)} tokens · ${summary.threadIds.size.toLocaleString()} threads · ${summary.calls.toLocaleString()} calls · ${compact(summary.outputTokens)} output`,
+    ...(historyScope ? [`History: ${historyScope}`] : []),
     `Source: ${sourceLabel(options.input, snapshot)}`,
     "",
     chart,
@@ -1244,6 +1307,22 @@ function rangeDescription(options, bounds) {
   return bounds.dateString;
 }
 
+function emptyRangeMessage(options, snapshot, bounds) {
+  const range = rangeDescription(options, bounds);
+  const cutoffMs = snapshotCollectionCutoffMs(snapshot);
+  const hasUncollectedHistory =
+    Number.isFinite(cutoffMs) && bounds.start.getTime() < cutoffMs;
+  const lines = [
+    hasUncollectedHistory
+      ? `No model-call events were collected for ${range} (${bounds.timeZone}); history before the snapshot cutoff is outside this snapshot and is not a verified zero.`
+      : `No model-call events found for ${range} (${bounds.timeZone}).`,
+  ];
+  const scope = historyScopeLabel(snapshot);
+  if (scope) lines.push(`History: ${scope}`);
+  lines.push(`Source: ${sourceLabel(options.input, snapshot)}`);
+  return lines.join("\n");
+}
+
 export async function run(options, { nowMs } = {}) {
   const hasInjectedNow = nowMs !== undefined;
   const now = new Date(hasInjectedNow ? nowMs : Date.now());
@@ -1263,10 +1342,7 @@ export async function run(options, { nowMs } = {}) {
   const writingImage = options.view === "trend" && options.image;
   const writingEmptyCacheReport = writingImage && options.cacheRate;
   if (events.length === 0 && !writingEmptyCacheReport) {
-    return [
-      `No model-call events found for ${rangeDescription(options, bounds)} (${bounds.timeZone}).`,
-      `Source: ${sourceLabel(options.input, snapshot)}`,
-    ].join("\n");
+    return emptyRangeMessage(options, snapshot, bounds);
   }
   const allRows = options.cacheRate
     ? []
@@ -1359,11 +1435,7 @@ async function runInteractive(options) {
   const analysis = buildRangeAnalysis(snapshot, bounds, { includeTrend: false });
   const events = filterDayEvents(snapshot, bounds, analysis);
   if (events.length === 0) {
-    process.stdout.write([
-      `No model-call events found for ${rangeDescription(options, bounds)} (${bounds.timeZone}).`,
-      `Source: ${sourceLabel(options.input, snapshot)}`,
-      "",
-    ].join("\n"));
+    process.stdout.write(`${emptyRangeMessage(options, snapshot, bounds)}\n`);
     return;
   }
   const allRows = aggregateProjects(snapshot, events, options, analysis);

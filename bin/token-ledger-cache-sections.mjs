@@ -13,9 +13,11 @@ import {
   svgRect,
   svgText,
   textWidth,
+  truncateText,
   CACHE_IMAGE_COLORS as COLORS,
   TREND_IMAGE_MODEL_COLORS,
 } from "./token-ledger-image-primitives.mjs";
+import { historyScopeLabel } from "../lib/token-ledger-collection.mjs";
 
 function percent(value) {
   if (!Number.isFinite(value)) return "—";
@@ -207,11 +209,17 @@ function createCacheReportContext({ snapshot, bounds, days, options, analysis })
     ...footerItems.map((item) => item.qualifiers.length),
   );
   const headerTitle = "TOKEN LEDGER · CACHE REPORT";
-  const headerMetadata = `${periodLabel(bounds)} · ${bounds.timeZone}`;
+  const history = historyScopeLabel(snapshot);
+  const headerMetadata = [periodLabel(bounds), bounds.timeZone, history]
+    .filter(Boolean)
+    .join(" · ");
   const headerTitleWidth = textWidth(headerTitle, 27, 800) -
     0.27 * (headerTitle.length - 1);
   const headerMetadataFits = headerTitleWidth + textWidth(headerMetadata, 14) + 24 <=
     contentRight - outer;
+  const renderedHeaderMetadata = textWidth(headerMetadata, 14) <= contentRight - outer
+    ? headerMetadata
+    : truncateText(headerMetadata, contentRight - outer, 14);
   const ratePlotTop = 320;
   const ratePlotHeight = 270;
   const ratePlotBottom = ratePlotTop + ratePlotHeight;
@@ -243,7 +251,7 @@ function createCacheReportContext({ snapshot, bounds, days, options, analysis })
     footerItems,
     qualifierLineCount,
     headerTitle,
-    headerMetadata,
+    headerMetadata: renderedHeaderMetadata,
     headerMetadataFits,
     ratePlotTop,
     ratePlotHeight,

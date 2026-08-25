@@ -17,6 +17,7 @@ import {
   usageThreadIds,
 } from "../lib/token-ledger-usage.mjs";
 import { sanitizeTerminalText } from "../lib/token-ledger-terminal-text.mjs";
+import { historyScopeLabel } from "../lib/token-ledger-collection.mjs";
 
 const RESET = "\u001b[0m";
 const PRIMARY_STYLE = [38, 2, 255, 255, 255];
@@ -662,7 +663,7 @@ function snapshotLine(freshness, enabled) {
   return `${colorize("SNAPSHOT", ACCENT_STYLE, enabled)} ${colorize("·", SECONDARY_STYLE, enabled)} ${colorize(detail, SECONDARY_STYLE, enabled)}`;
 }
 
-function headerLines(stats, bounds, frameWidth, options, enabled, freshness) {
+function headerLines(stats, bounds, frameWidth, options, enabled, freshness, snapshot) {
   const left = colorize("TOKEN LEDGER", TITLE_STYLE, enabled);
   const date = colorize(
     dateLabel(bounds, options.range, options.rollingLabel),
@@ -682,6 +683,10 @@ function headerLines(stats, bounds, frameWidth, options, enabled, freshness) {
   const separator = colorize("·", SECONDARY_STYLE, enabled);
   const join = ` ${separator} `;
   const alignHeader = (line) => fit(` ${line}`, frameWidth);
+  const history = historyScopeLabel(snapshot);
+  const appendHistory = (lines) => history
+    ? [...lines, alignHeader(colorize(history, SECONDARY_STYLE, enabled))]
+    : lines;
   const fullLine = [
     left,
     date,
@@ -694,7 +699,7 @@ function headerLines(stats, bounds, frameWidth, options, enabled, freshness) {
   if (visibleLength(fullLine) < frameWidth) {
     const lines = [alignHeader(fullLine)];
     if (isRollingRange(options.range)) lines.push(alignHeader(snapshotLine(freshness, enabled)));
-    return lines;
+    return appendHistory(lines);
   }
 
   const compactDate = dateLabel(bounds, options.range, options.rollingLabel)
@@ -719,7 +724,7 @@ function headerLines(stats, bounds, frameWidth, options, enabled, freshness) {
   if (visibleLength(compactLine) < frameWidth) {
     const lines = [alignHeader(compactLine)];
     if (isRollingRange(options.range)) lines.push(alignHeader(snapshotLine(freshness, enabled)));
-    return lines;
+    return appendHistory(lines);
   }
 
   const minimalTitle = colorize(frameWidth >= 45 ? "LEDGER" : "L", TITLE_STYLE, enabled);
@@ -734,7 +739,7 @@ function headerLines(stats, bounds, frameWidth, options, enabled, freshness) {
   ].join(" ");
   const lines = [alignHeader(minimalLine)];
   if (isRollingRange(options.range)) lines.push(alignHeader(snapshotLine(freshness, enabled)));
-  return lines;
+  return appendHistory(lines);
 }
 
 export function renderTerminal({
@@ -758,7 +763,7 @@ export function renderTerminal({
   const left = panelLines(rows, allRows, stats.totalTokens, leftWidth, options, enabled);
   const right = sideBySide ? sidebarLines(stats, sideWidth, enabled, options, quota) : null;
   const lines = [
-    ...headerLines(stats, bounds, frameWidth, options, enabled, snapshotFreshness),
+    ...headerLines(stats, bounds, frameWidth, options, enabled, snapshotFreshness, snapshot),
     ...panel(left, right, leftWidth, sideWidth, enabled, options.ascii),
   ];
   if (!sideBySide) {
