@@ -48,6 +48,7 @@
     "benchmark:refresh": "node tools/benchmark-importer.mjs"
   },
   "devDependencies": {
+    "@eslint/js": "9.39.4",
     "@oxlint/plugins": "1.79.0",
     "eslint": "9.39.4",
     "oxlint": "1.79.0"

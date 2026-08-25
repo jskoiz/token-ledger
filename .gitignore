@@ -18,3 +18,8 @@ npm-debug.log*
 /outputs/
 /work/
 *.tgz
+
+# default report images are local root artifacts; use --image-output for tracked paths
+/token-ledger-report-*.png
+/token-ledger-cache-report-*.png
+/token-ledger-trend-*.png

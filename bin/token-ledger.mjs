@@ -4,7 +4,6 @@ import { spawnSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import {
   mkdir,
-  stat,
 } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, resolve } from "node:path";
@@ -14,12 +13,12 @@ import {
   MODEL_COLORS as TERMINAL_MODEL_COLORS,
   renderTerminal,
 } from "./token-ledger-terminal.mjs";
-import { buildUsageTrend, multiDayBounds } from "./token-ledger-trend.mjs";
 import {
-  renderTrendImage,
-  writeTrendPng,
-} from "./token-ledger-trend-image.mjs";
-import { renderCacheReportImage } from "./token-ledger-cache-image.mjs";
+  buildRangeAnalysis,
+  buildUsageTrend,
+  multiDayBounds,
+  priorPeriodBounds,
+} from "./token-ledger-trend.mjs";
 import { renderTrendCombo } from "./token-ledger-trend-terminal.mjs";
 import { startInteractive } from "./token-ledger-tui.mjs";
 import {
@@ -27,12 +26,29 @@ import {
   writePrivateSnapshot,
 } from "../lib/token-ledger-snapshot.mjs";
 import {
+  collectionScope,
+  historyScopeLabel,
+  normalizeCollectionSince,
+  snapshotCollectionCutoffMs,
+  snapshotCollectionScope,
+  snapshotMatchesCollectionScope,
+} from "../lib/token-ledger-collection.mjs";
+import {
   SNAPSHOT_SCHEMA_VERSION,
+  checkedFiniteAdd,
+  checkedTokenAdd,
+  isNonNegativeFiniteValue,
+  nonNegativeFiniteValue,
+  tokenValue,
+  MAX_SAFE_TOKEN_COUNT,
   usageBuckets,
   usageBucketsInRange,
   usageCallCount,
   usageThreadIds,
 } from "../lib/token-ledger-usage.mjs";
+import { sanitizeTerminalText } from "../lib/token-ledger-terminal-text.mjs";
+
+export { sanitizeTerminalText };
 
 export const DEFAULT_SNAPSHOT = resolve(
   homedir(),
@@ -55,6 +71,38 @@ const MODEL_COLORS = {
   other: TERMINAL_MODEL_COLORS.other,
 };
 
+function createSharedTokenScale() {
+  return {
+    scale: 1,
+    totalTokens: 0,
+    targets: new Set(),
+  };
+}
+
+function addSharedTokenContribution(state, contribution, targets) {
+  const tokens = tokenValue(contribution, { allowFractional: true });
+  if (!(tokens > 0)) return;
+  const scaledTokens = tokens / state.scale;
+  for (const target of targets) {
+    state.targets.add(target);
+    target.totalTokens += scaledTokens;
+  }
+  state.totalTokens += scaledTokens;
+  const scaleFactor = Math.max(
+    1,
+    state.totalTokens / MAX_SAFE_TOKEN_COUNT,
+  );
+  if (scaleFactor === 1) return;
+  for (const target of state.targets) {
+    target.totalTokens /= scaleFactor;
+    if (target.totalTokens >= MAX_SAFE_TOKEN_COUNT - 2) {
+      target.totalTokens = MAX_SAFE_TOKEN_COUNT;
+    }
+  }
+  state.totalTokens = MAX_SAFE_TOKEN_COUNT;
+  state.scale *= scaleFactor;
+}
+
 export function usage() {
   return `Token Ledger
 
@@ -68,6 +116,7 @@ Usage:
 Common options:
   --static                  Print once instead of opening the dashboard
   --refresh                 Rebuild the local usage cache
+  --since <ISO timestamp>   Collect history at or after this timestamp
   --image-output <file>     Choose where to save a PNG
   --no-open                 Do not open a generated PNG
   -h, --help                Show this quick guide
@@ -102,6 +151,7 @@ Data and refresh:
   --refresh                  Rebuild the default snapshot from local Codex data
   --no-refresh               Use the cached snapshot without checking source files
   --codex-home <dir>         Codex data root used when refreshing
+  --since <ISO timestamp>    Collect history at or after this timestamp
   --no-archived              Skip archived sessions when refreshing
 
 Terminal output:
@@ -201,6 +251,7 @@ export function parseArgs(argv) {
     refresh: false,
     autoRefresh: true,
     codexHome: resolve(process.env.CODEX_HOME || `${homedir()}/.codex`),
+    since: null,
     includeArchived: true,
     timeZone: DEFAULT_TIME_ZONE,
     top: DEFAULT_TOP,
@@ -259,6 +310,10 @@ export function parseArgs(argv) {
       options.autoRefresh = false;
     } else if (argument === "--codex-home") {
       options.codexHome = resolve(readOption(argv, index, "--codex-home"));
+      index += 1;
+    } else if (argument === "--since") {
+      const value = readOption(argv, index, "--since");
+      options.since = new Date(normalizeCollectionSince(value));
       index += 1;
     } else if (argument === "--tz") {
       options.timeZone = readOption(argv, index, "--tz");
@@ -529,13 +584,6 @@ export function rolling24hBounds(value = new Date(), timeZone = DEFAULT_TIME_ZON
   return rollingDurationBounds(value, timeZone, 1);
 }
 
-export function sanitizeTerminalText(value) {
-  return String(value ?? "")
-    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "")
-    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
-    .replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ");
-}
-
 function cleanLabel(value, fallback) {
   const label = sanitizeTerminalText(value)
     .replace(/\s+/g, " ")
@@ -605,7 +653,7 @@ function displayLabel(value) {
   return `${label.slice(0, 14)}…${label.slice(-13)}`;
 }
 
-export function oneOffProjects(snapshot) {
+export function oneOffProjects(snapshot, events = null) {
   const threadIdsByProject = new Map();
   const add = (project, threadId) => {
     if (!project || !threadId) return;
@@ -614,7 +662,7 @@ export function oneOffProjects(snapshot) {
     ids.add(threadId);
     threadIdsByProject.set(normalizedProject, ids);
   };
-  for (const bucket of usageBuckets(snapshot)) {
+  for (const bucket of events ?? usageBuckets(snapshot)) {
     for (const threadId of usageThreadIds(bucket)) add(bucket.project, threadId);
   }
   for (const thread of snapshot.threads ?? []) add(thread.project, thread.id);
@@ -636,17 +684,23 @@ function modelLabel(value) {
   return model;
 }
 
-export function filterDayEvents(snapshot, bounds) {
+export function filterDayEvents(snapshot, bounds, analysis = null) {
+  if (analysis !== null) return analysis.currentEvents;
   const start = bounds.start.getTime();
   const end = bounds.end.getTime();
   return usageBucketsInRange(snapshot, start, end);
 }
 
-export function aggregateProjects(snapshot, events, options = {}) {
-  const singletonProjects = options.rawProjects ? new Set() : oneOffProjects(snapshot);
+export function aggregateProjects(snapshot, events, options = {}, analysis = null) {
+  const singletonProjects = options.rawProjects
+    ? new Set()
+    : oneOffProjects(snapshot, analysis?.allEvents);
   const grouped = new Map();
+  const sharedTokenScale = createSharedTokenScale();
 
   for (const event of events) {
+    if (event?.invalidTokenRecord === true) continue;
+    const allowFractional = event?.rangeAllocationEstimated === true;
     const rawProject = cleanLabel(event.project, "Unlabelled activity");
     const project =
       !options.rawProjects && singletonProjects.has(rawProject)
@@ -666,15 +720,33 @@ export function aggregateProjects(snapshot, events, options = {}) {
         knownCreditTokens: 0,
         models: new Map(),
       };
-    row.totalTokens += Number(event.totalTokens) || 0;
-    row.outputTokens += Number(event.outputTokens) || 0;
-    row.reasoningTokens += Number(event.reasoningTokens) || 0;
-    row.toolCalls += Number(event.toolCalls) || 0;
-    row.events += usageCallCount(event);
+    row.outputTokens = checkedTokenAdd(
+      row.outputTokens,
+      tokenValue(event.outputTokens, { allowFractional }),
+      { allowFractional },
+    );
+    row.reasoningTokens = checkedTokenAdd(
+      row.reasoningTokens,
+      tokenValue(event.reasoningTokens, { allowFractional }),
+      { allowFractional },
+    );
+    row.toolCalls = checkedTokenAdd(
+      row.toolCalls,
+      tokenValue(event.toolCalls, { allowFractional }),
+      { allowFractional },
+    );
+    row.events = checkedTokenAdd(row.events, usageCallCount(event), {
+      allowFractional,
+    });
     for (const threadId of usageThreadIds(event)) row.threadIds.add(threadId);
-    if (event.rateCardCredits !== null && Number.isFinite(Number(event.rateCardCredits))) {
-      row.rateCardCredits += Number(event.rateCardCredits);
-      row.knownCreditTokens += Number(event.totalTokens) || 0;
+    const credits = event.rateCardCredits;
+    if (isNonNegativeFiniteValue(credits)) {
+      row.rateCardCredits = checkedFiniteAdd(row.rateCardCredits, credits);
+      row.knownCreditTokens = checkedTokenAdd(
+        row.knownCreditTokens,
+        tokenValue(event.totalTokens, { allowFractional }),
+        { allowFractional },
+      );
     }
 
     const model = modelLabel(event.model);
@@ -684,10 +756,19 @@ export function aggregateProjects(snapshot, events, options = {}) {
       events: 0,
       rateCardCredits: 0,
     };
-    modelRow.totalTokens += Number(event.totalTokens) || 0;
-    modelRow.events += usageCallCount(event);
-    if (event.rateCardCredits !== null && Number.isFinite(Number(event.rateCardCredits))) {
-      modelRow.rateCardCredits += Number(event.rateCardCredits);
+    addSharedTokenContribution(
+      sharedTokenScale,
+      tokenValue(event.totalTokens, { allowFractional }),
+      [row, modelRow],
+    );
+    modelRow.events = checkedTokenAdd(modelRow.events, usageCallCount(event), {
+      allowFractional,
+    });
+    if (isNonNegativeFiniteValue(credits)) {
+      modelRow.rateCardCredits = checkedFiniteAdd(
+        modelRow.rateCardCredits,
+        credits,
+      );
     }
     row.models.set(model, modelRow);
     grouped.set(project, row);
@@ -709,19 +790,38 @@ export function aggregateProjects(snapshot, events, options = {}) {
     });
 }
 
-function totalSummary(events) {
-  return events.reduce(
+function totalSummary(events, projectRows) {
+  const summary = events.reduce(
     (summary, event) => {
-      summary.totalTokens += Number(event.totalTokens) || 0;
-      summary.outputTokens += Number(event.outputTokens) || 0;
-      summary.toolCalls += Number(event.toolCalls) || 0;
-      summary.calls += usageCallCount(event);
+      if (event?.invalidTokenRecord === true) return summary;
+      const allowFractional = event?.rangeAllocationEstimated === true;
+      summary.outputTokens = checkedTokenAdd(
+        summary.outputTokens,
+        tokenValue(event.outputTokens, { allowFractional }),
+        { allowFractional },
+      );
+      summary.toolCalls = checkedTokenAdd(
+        summary.toolCalls,
+        tokenValue(event.toolCalls, { allowFractional }),
+        { allowFractional },
+      );
+      summary.calls = checkedTokenAdd(summary.calls, usageCallCount(event), {
+        allowFractional,
+      });
       for (const threadId of usageThreadIds(event)) {
         summary.threadIds.add(threadId);
       }
-      if (event.rateCardCredits !== null && Number.isFinite(Number(event.rateCardCredits))) {
-        summary.rateCardCredits += Number(event.rateCardCredits);
-        summary.knownCreditTokens += Number(event.totalTokens) || 0;
+      const credits = event.rateCardCredits;
+      if (isNonNegativeFiniteValue(credits)) {
+        summary.rateCardCredits = checkedFiniteAdd(
+          summary.rateCardCredits,
+          nonNegativeFiniteValue(credits),
+        );
+        summary.knownCreditTokens = checkedTokenAdd(
+          summary.knownCreditTokens,
+          tokenValue(event.totalTokens, { allowFractional }),
+          { allowFractional },
+        );
       }
       return summary;
     },
@@ -735,6 +835,11 @@ function totalSummary(events) {
       threadIds: new Set(),
     },
   );
+  summary.totalTokens = projectRows.reduce(
+    (sum, row) => sum + row.totalTokens,
+    0,
+  );
+  return summary;
 }
 
 function compact(value, digits = 2) {
@@ -819,7 +924,7 @@ function runYouPlot(rows, options, dateLabel, unit) {
   const chartInput = [
     "project\tvalue",
     ...rows.map(
-      (row) => `${row.displayProject.replace(/[\t\r\n]+/g, " ")}\t${chartNumber(row.totalTokens, unit.divisor)}`,
+      (row) => `${sanitizeTerminalText(row.displayProject).replace(/[\t\r\n]+/g, " ")}\t${chartNumber(row.totalTokens, unit.divisor)}`,
     ),
   ].join("\n");
   const terminalWidth = Number(process.stdout.columns) || 100;
@@ -881,6 +986,37 @@ async function readSnapshot(snapshotPath) {
   return parsed;
 }
 
+function snapshotScopeMatchesOptions(snapshot, options) {
+  const requested = collectionScope(options);
+  const actual = snapshotCollectionScope(snapshot);
+  if (!actual) {
+    // Explicit snapshots are deliberate inputs. Preserve the existing
+    // fixture/export workflow when no collection filter was requested, while
+    // refusing to claim that an unknown snapshot satisfies a filter.
+    return requested.since === null && requested.includeArchived;
+  }
+  return snapshotMatchesCollectionScope(snapshot, requested);
+}
+
+function snapshotScopeError(snapshot, options) {
+  const requested = collectionScope(options);
+  const actual = snapshotCollectionScope(snapshot);
+  const describe = (scope) => {
+    if (!scope) return "unknown collection scope";
+    const since = scope.since === null ? "full history" : `since ${scope.since}`;
+    const archives = scope.includeArchived
+      ? "archived sessions included"
+      : "archived sessions excluded";
+    return `${since}; ${archives}`;
+  };
+  const remedy = options.inputExplicit
+    ? "For --input, supply matching --since/--no-archived filters or rebuild that file with the collector; --refresh cannot be combined with --input."
+    : "Rebuild it with --refresh.";
+  return new Error(
+    `Snapshot collection scope does not match the requested filters (requested ${describe(requested)}; found ${describe(actual)}). ${remedy}`,
+  );
+}
+
 async function refreshSnapshot(options) {
   if (!existsSync(options.codexHome)) {
     throw new Error(
@@ -899,7 +1035,7 @@ async function refreshSnapshot(options) {
         output: options.input,
         codexHome: options.codexHome,
         includeArchived: options.includeArchived,
-        since: null,
+        since: options.since,
       },
       ({ current, total }) => {
         process.stderr.write(`\rToken Ledger: scanned ${current}/${total} rollout files`);
@@ -920,19 +1056,23 @@ async function refreshSnapshot(options) {
   } catch (error) {
     if (progressStarted) process.stderr.write("\n");
     if (error?.code === "ERR_SNAPSHOT_SIZE_LIMIT" && existsSync(options.input)) {
-      process.stderr.write(
-        "Token Ledger: refresh exceeded the safety limit; continuing with the previous cache, which may be stale.\n",
-      );
-      return readSnapshot(options.input);
+      try {
+        const previous = await readSnapshot(options.input);
+        if (snapshotScopeMatchesOptions(previous, options)) {
+          process.stderr.write(
+            "Token Ledger: refresh exceeded the safety limit; continuing with the previous cache, which may be stale.\n",
+          );
+          return previous;
+        }
+      } catch {
+        // Preserve the original refresh error when the previous cache cannot
+        // prove that it has the requested collection scope.
+      }
     }
     throw new Error(
       `Could not refresh local snapshot: ${safeErrorMessage(error, [options.input, options.codexHome])}`,
     );
   }
-}
-
-export function snapshotNeedsRefresh(snapshotMtimeMs, latestJsonlMtimeMs) {
-  return latestJsonlMtimeMs > snapshotMtimeMs;
 }
 
 export function snapshotCacheIsFresh(
@@ -949,14 +1089,10 @@ export function snapshotCacheIsFresh(
 
 export function shouldCheckSourceFreshness(
   options = {},
-  snapshotMtimeMs,
-  nowMs = Date.now(),
 ) {
-  // PNG reports are expected to reflect every completed local call. Checking
-  // source mtimes is much cheaper than parsing the rollouts again; the full
-  // collector only runs when one of those sources actually changed.
-  return Boolean(options.view === "trend" && options.image) ||
-    !snapshotCacheIsFresh(snapshotMtimeMs, nowMs);
+  // The source manifest is cheap to stat and is the cache's validity anchor.
+  // The full collector only runs when the persisted watermark changes.
+  return options.autoRefresh !== false && options.inputExplicit !== true;
 }
 
 function snapshotAgeLabel(ageMs) {
@@ -1005,26 +1141,28 @@ async function loadSnapshot(options) {
     }
     return refreshSnapshot(options);
   }
+  const cached = await readSnapshot(options.input);
+  if (!snapshotScopeMatchesOptions(cached, options)) {
+    if (options.inputExplicit || !options.autoRefresh) {
+      throw snapshotScopeError(cached, options);
+    }
+    return refreshSnapshot(options);
+  }
+
   if (!options.autoRefresh || options.inputExplicit) {
-    return readSnapshot(options.input);
+    return cached;
   }
 
-  let snapshotStat;
-  try {
-    snapshotStat = await stat(options.input);
-  } catch (error) {
-    throw new Error(
-      `Could not inspect snapshot ${safeDisplayLabel(options.input, "snapshot")}: ${safeErrorMessage(error, [options.input])}`,
-    );
-  }
-  if (!shouldCheckSourceFreshness(options, snapshotStat.mtimeMs)) {
-    return readSnapshot(options.input);
+  if (!shouldCheckSourceFreshness(options)) {
+    return cached;
   }
 
-  const { latestSourceModifiedAt } = await import("../lib/token-ledger-importer.mjs");
-  let latestSourceMtimeMs;
+  const { sourceInventory, sourceWatermarksEqual } = await import(
+    "../lib/token-ledger-importer.mjs"
+  );
+  let inventory;
   try {
-    latestSourceMtimeMs = await latestSourceModifiedAt(
+    inventory = await sourceInventory(
       options.codexHome,
       options.includeArchived,
     );
@@ -1033,13 +1171,13 @@ async function loadSnapshot(options) {
       `Could not inspect local Codex source: ${safeErrorMessage(error, [options.codexHome])}`,
     );
   }
-  if (snapshotNeedsRefresh(snapshotStat.mtimeMs, latestSourceMtimeMs)) {
+  if (!sourceWatermarksEqual(cached.sourceWatermark, inventory.watermark)) {
     return refreshSnapshot(options);
   }
-  return readSnapshot(options.input);
+  return cached;
 }
 
-function render(
+async function render(
   options,
   snapshot,
   bounds,
@@ -1048,18 +1186,26 @@ function render(
   allRows,
   freshness,
   reportTimeMs,
+  analysis,
 ) {
   if (options.view === "trend") {
     if (options.image && options.cacheRate) {
+      const { renderCacheReportImage } = await import(
+        "./token-ledger-cache-image.mjs"
+      );
       return renderCacheReportImage({
         snapshot,
         bounds,
         days: options.trendDays,
         options,
+        analysis,
       });
     }
-    const trend = buildUsageTrend(snapshot, bounds);
+    const trend = buildUsageTrend(snapshot, bounds, { analysis });
     if (options.image) {
+      const { renderTrendImage } = await import(
+        "./token-ledger-trend-image.mjs"
+      );
       return renderTrendImage({
         snapshot,
         bounds,
@@ -1067,6 +1213,7 @@ function render(
         days: options.trendDays,
         options: { ...options, reportTimeMs },
         projectRows: allRows,
+        analysis,
       });
     }
     return renderTrendCombo({
@@ -1075,6 +1222,7 @@ function render(
       trend,
       days: options.trendDays,
       options,
+      analysis,
     });
   }
   if (!options.legacyPlot) {
@@ -1089,7 +1237,7 @@ function render(
     });
   }
   const enabled = !options.plain && !process.env.NO_COLOR && Boolean(process.stdout.isTTY);
-  const summary = totalSummary(events);
+  const summary = totalSummary(events, allRows);
   const totalTokens = summary.totalTokens;
   const dateLabel = options.range === "rolling24h"
     ? "last 24 hours"
@@ -1109,10 +1257,12 @@ function render(
     totalTokens > 0 ? (row.totalTokens / totalTokens) * 100 : 0,
   );
   const chart = runYouPlot(rows, options, dateLabel, unit).trimEnd();
+  const historyScope = historyScopeLabel(snapshot);
 
   const header = [
     `Token Ledger · ${dateLabel} · ${bounds.timeZone}`,
     `${compact(totalTokens)} tokens · ${summary.threadIds.size.toLocaleString()} threads · ${summary.calls.toLocaleString()} calls · ${compact(summary.outputTokens)} output`,
+    ...(historyScope ? [`History: ${historyScope}`] : []),
     `Source: ${sourceLabel(options.input, snapshot)}`,
     "",
     chart,
@@ -1125,7 +1275,7 @@ function render(
       summary.rateCardCredits > 0 && row.rateCardCredits > 0
         ? ` · ${percent((row.rateCardCredits / summary.rateCardCredits) * 100)} credits`
         : "";
-    return `${String(index + 1).padStart(2, " ")}  ${row.displayProject} · ${compact(row.totalTokens)} · ${percent(shares[index])} · ${row.threads.toLocaleString()} threads${knownCreditShare}\n    ${modelMix(row, enabled)}`;
+    return `${String(index + 1).padStart(2, " ")}  ${sanitizeTerminalText(row.displayProject)} · ${compact(row.totalTokens)} · ${percent(shares[index])} · ${row.threads.toLocaleString()} threads${knownCreditShare}\n    ${modelMix(row, enabled)}`;
   });
 
   return `${header.join("\n")}\n\n${details.join("\n")}`;
@@ -1157,23 +1307,46 @@ function rangeDescription(options, bounds) {
   return bounds.dateString;
 }
 
+function emptyRangeMessage(options, snapshot, bounds) {
+  const range = rangeDescription(options, bounds);
+  const cutoffMs = snapshotCollectionCutoffMs(snapshot);
+  const hasUncollectedHistory =
+    Number.isFinite(cutoffMs) && bounds.start.getTime() < cutoffMs;
+  const lines = [
+    hasUncollectedHistory
+      ? `No model-call events were collected for ${range} (${bounds.timeZone}); history before the snapshot cutoff is outside this snapshot and is not a verified zero.`
+      : `No model-call events found for ${range} (${bounds.timeZone}).`,
+  ];
+  const scope = historyScopeLabel(snapshot);
+  if (scope) lines.push(`History: ${scope}`);
+  lines.push(`Source: ${sourceLabel(options.input, snapshot)}`);
+  return lines.join("\n");
+}
+
 export async function run(options, { nowMs } = {}) {
   const hasInjectedNow = nowMs !== undefined;
   const now = new Date(hasInjectedNow ? nowMs : Date.now());
   const bounds = boundsForOptions(options, now);
   const snapshot = await loadSnapshot(options);
-  const events = filterDayEvents(snapshot, bounds);
+  const analysis = buildRangeAnalysis(
+    snapshot,
+    bounds,
+    {
+      priorBounds: options.view === "trend"
+        ? priorPeriodBounds(bounds, options.trendDays)
+        : null,
+      includeTrend: options.view === "trend" && !options.cacheRate,
+    },
+  );
+  const events = filterDayEvents(snapshot, bounds, analysis);
   const writingImage = options.view === "trend" && options.image;
   const writingEmptyCacheReport = writingImage && options.cacheRate;
   if (events.length === 0 && !writingEmptyCacheReport) {
-    return [
-      `No model-call events found for ${rangeDescription(options, bounds)} (${bounds.timeZone}).`,
-      `Source: ${sourceLabel(options.input, snapshot)}`,
-    ].join("\n");
+    return emptyRangeMessage(options, snapshot, bounds);
   }
   const allRows = options.cacheRate
     ? []
-    : aggregateProjects(snapshot, events, options);
+    : aggregateProjects(snapshot, events, options, analysis);
   const rows = allRows.slice(0, options.top);
   const outputPath = writingImage
     ? options.imageOutput ??
@@ -1194,7 +1367,7 @@ export async function run(options, { nowMs } = {}) {
   const verifiedSourceTimeMs = options.autoRefresh && !options.inputExplicit
     ? reportTimeMs
     : undefined;
-  const output = render(
+  const output = await render(
     options,
     snapshot,
     bounds,
@@ -1206,10 +1379,12 @@ export async function run(options, { nowMs } = {}) {
       reportTimeMs,
     ),
     verifiedSourceTimeMs,
+    analysis,
   );
   if (writingImage) {
     await mkdir(dirname(outputPath), { recursive: true });
     process.stderr.write(`Token Ledger: encoding ${imageLabel} PNG…\n`);
+    const { writeTrendPng } = await import("./token-ledger-trend-image.mjs");
     await writeTrendPng(output, outputPath);
     process.stderr.write(`Token Ledger: finished ${imageLabel} PNG.\n`);
     const lines = [
@@ -1257,16 +1432,13 @@ function shouldUseInteractive(options) {
 async function runInteractive(options) {
   const bounds = boundsForOptions(options);
   const snapshot = await loadSnapshot(options);
-  const events = filterDayEvents(snapshot, bounds);
+  const analysis = buildRangeAnalysis(snapshot, bounds, { includeTrend: false });
+  const events = filterDayEvents(snapshot, bounds, analysis);
   if (events.length === 0) {
-    process.stdout.write([
-      `No model-call events found for ${rangeDescription(options, bounds)} (${bounds.timeZone}).`,
-      `Source: ${sourceLabel(options.input, snapshot)}`,
-      "",
-    ].join("\n"));
+    process.stdout.write(`${emptyRangeMessage(options, snapshot, bounds)}\n`);
     return;
   }
-  const allRows = aggregateProjects(snapshot, events, options);
+  const allRows = aggregateProjects(snapshot, events, options, analysis);
   await startInteractive({
     options,
     snapshot,

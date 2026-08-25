@@ -36,9 +36,18 @@ The main options are:
 
 - `--static` prints once instead of opening the terminal dashboard.
 - `--refresh` rebuilds the local usage cache.
+- `--since <ISO timestamp>` refreshes only history at or after the cutoff.
 - `--image-output <file>` chooses where to save a PNG.
 - `--no-open` writes a PNG without opening it.
 - `--help-all` shows the complete command and option reference.
+
+When invoked from the checkout root, default report images are local
+repository-root artifacts and are ignored by Git: `token-ledger-report-<period>.png`,
+`token-ledger-cache-report-<period>.png`, and
+`token-ledger-trend-<period>.png`. Default image paths are resolved from the
+current working directory; use `--image-output <file>` when invoking the CLI
+elsewhere or when you want to choose an intentional destination, such as a
+tracked image under `docs/`.
 
 `week` covers seven local calendar days ending on the selected day. `1d` is a
 rolling 24-hour view ending when the command starts. In a TTY, the project
@@ -80,13 +89,32 @@ If even the coarsest bounded representation exceeds the hard limit, Token
 Ledger preserves the previous cache and asks you to reduce the source with
 `--no-archived` or the collector's `--since` option. It never replaces the
 production cache with an oversized or partial file. On a normal default-path
-run, a snapshot whose mtime is in the past and less than one hour old skips the
-source walk. An exact-hour or future mtime is not fresh; an older snapshot is
-checked against local source mtimes before it is reused or rebuilt.
+run, the collector validates a bounded source watermark after scanning and
+retries if local sources changed during the scan. Automatic reuse compares that
+persisted watermark with the current local source manifest, so a later
+cache-file mtime cannot hide an append, replacement, truncation, or newly
+created rollout. The cache age shown in reports is an age label only;
+`--no-refresh` explicitly bypasses the source check.
+`--since <ISO timestamp>` excludes model-call events and quota observations
+before the normalized cutoff. `--no-archived` excludes `archived_sessions`;
+either choice is recorded in snapshot provenance, and terminal and PNG output
+label the result `TRUNCATED HISTORY`. A range before a `--since` cutoff is
+reported as not collected, not as a verified zero.
+
+The default-path cache is reused only when its collection scope matches the
+current `--since` and archive policy. An incompatible cache is rebuilt during
+normal operation; `--no-refresh` reports the mismatch instead of silently
+reading it as complete. The persisted source watermark is checked before
+reusing a stale snapshot, and collection retries if local sources change during
+the scan. A later cache-file mtime cannot hide an append, replacement,
+truncation, or newly created rollout.
 
 ```bash
 # Force a rebuild from CODEX_HOME or ~/.codex
 tledger week --refresh
+
+# Keep only history from this timestamp onward
+tledger week --refresh --since 2026-08-01T00:00:00Z
 
 # Read the existing default snapshot without a source-freshness check
 tledger week --no-refresh
@@ -96,8 +124,9 @@ tledger week --input /path/to/token-ledger-snapshot-v2.json.gz
 ```
 
 `--refresh` rebuilds the default snapshot and cannot be combined with
-`--input` in this checkout. `--no-archived` excludes `archived_sessions` when a
-refresh occurs. The collector can also be run directly:
+`--input` in this checkout. `--since` and `--no-archived` apply when a refresh
+occurs, and their collection scope must match a reusable cache. The collector
+can also be run directly:
 
 ```bash
 node lib/token-ledger-importer.mjs --output /path/to/token-ledger-snapshot-v2.json.gz
@@ -165,11 +194,16 @@ Ledger does not invent a newer percentage from token counts.
 
 The exported snapshot contains token metadata, model/use-type labels, project
 labels, and display titles. It omits message bodies, reasoning text, tool
-arguments/results, credential fields, and full local paths. Display titles and
-project labels are user-written or local metadata and should be reviewed before
-sharing. Normal successful dashboard output is privacy-reduced, but diagnostics
-or explicit PNG writes may echo configured snapshot, Codex, or output path
-labels.
+arguments/results, credential fields, and full local paths. Path-like source
+labels become a neutral `local` category, local path tokens in titles and other
+labels are redacted, and unrelated user-written title text may remain. Normal
+successful dashboard output is privacy-reduced, but diagnostics or explicit
+PNG writes may echo configured snapshot, Codex, or output path labels.
+
+The state database is optional attribution enrichment rather than the additive
+usage source. Missing, incompatible, locked, or corrupt state metadata does not
+prevent rollout token collection; the snapshot records its normalized status in
+`metadata.stateDatabase` without exporting the database path or raw error text.
 
 ## What is estimated
 
