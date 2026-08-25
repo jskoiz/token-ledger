@@ -4,7 +4,6 @@ import { spawnSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import {
   mkdir,
-  stat,
 } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, resolve } from "node:path";
@@ -1022,10 +1021,6 @@ async function refreshSnapshot(options) {
   }
 }
 
-export function snapshotNeedsRefresh(snapshotMtimeMs, latestJsonlMtimeMs) {
-  return latestJsonlMtimeMs > snapshotMtimeMs;
-}
-
 export function snapshotCacheIsFresh(
   snapshotMtimeMs,
   nowMs = Date.now(),
@@ -1040,14 +1035,10 @@ export function snapshotCacheIsFresh(
 
 export function shouldCheckSourceFreshness(
   options = {},
-  snapshotMtimeMs,
-  nowMs = Date.now(),
 ) {
-  // PNG reports are expected to reflect every completed local call. Checking
-  // source mtimes is much cheaper than parsing the rollouts again; the full
-  // collector only runs when one of those sources actually changed.
-  return Boolean(options.view === "trend" && options.image) ||
-    !snapshotCacheIsFresh(snapshotMtimeMs, nowMs);
+  // The source manifest is cheap to stat and is the cache's validity anchor.
+  // The full collector only runs when the persisted watermark changes.
+  return options.autoRefresh !== false && options.inputExplicit !== true;
 }
 
 function snapshotAgeLabel(ageMs) {
@@ -1100,22 +1091,17 @@ async function loadSnapshot(options) {
     return readSnapshot(options.input);
   }
 
-  let snapshotStat;
-  try {
-    snapshotStat = await stat(options.input);
-  } catch (error) {
-    throw new Error(
-      `Could not inspect snapshot ${safeDisplayLabel(options.input, "snapshot")}: ${safeErrorMessage(error, [options.input])}`,
-    );
-  }
-  if (!shouldCheckSourceFreshness(options, snapshotStat.mtimeMs)) {
+  if (!shouldCheckSourceFreshness(options)) {
     return readSnapshot(options.input);
   }
 
-  const { latestSourceModifiedAt } = await import("../lib/token-ledger-importer.mjs");
-  let latestSourceMtimeMs;
+  const snapshot = await readSnapshot(options.input);
+  const { sourceInventory, sourceWatermarksEqual } = await import(
+    "../lib/token-ledger-importer.mjs"
+  );
+  let inventory;
   try {
-    latestSourceMtimeMs = await latestSourceModifiedAt(
+    inventory = await sourceInventory(
       options.codexHome,
       options.includeArchived,
     );
@@ -1124,10 +1110,10 @@ async function loadSnapshot(options) {
       `Could not inspect local Codex source: ${safeErrorMessage(error, [options.codexHome])}`,
     );
   }
-  if (snapshotNeedsRefresh(snapshotStat.mtimeMs, latestSourceMtimeMs)) {
+  if (!sourceWatermarksEqual(snapshot.sourceWatermark, inventory.watermark)) {
     return refreshSnapshot(options);
   }
-  return readSnapshot(options.input);
+  return snapshot;
 }
 
 async function render(
