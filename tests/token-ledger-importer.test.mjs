@@ -2051,7 +2051,7 @@ test("bounded scans match the sequential reference across collector fixtures", a
   }
 });
 
-test("worker failure aborts queued scans and removes the temporary spool", async () => {
+test("pruning a queued rollout mid-scan retries the collection and removes the temporary spool", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
   try {
     const rolloutDirectory = resolve(root, "sessions", "2026", "08", "23");
@@ -2077,29 +2077,96 @@ test("worker failure aborts queued scans and removes the temporary spool", async
       .filter((entry) => entry.startsWith(spoolPrefix))
       .sort();
     let removed = false;
-    await assert.rejects(
-      () =>
-        collectUsage(
-          {
-            output: resolve(root, "snapshot.json"),
-            codexHome: root,
-            includeArchived: false,
-            since: null,
-          },
-          ({ current }) => {
-            if (current === 1 && !removed) {
-              removed = true;
-              if (existsSync(paths[4])) rmSync(paths[4]);
-            }
-          },
-        ),
-      /ENOENT/,
+    const snapshot = await collectUsage(
+      {
+        output: resolve(root, "snapshot.json"),
+        codexHome: root,
+        includeArchived: false,
+        since: null,
+      },
+      ({ current }) => {
+        if (current === 1 && !removed) {
+          removed = true;
+          if (existsSync(paths[4])) rmSync(paths[4]);
+        }
+      },
     );
     const after = (await readdir(tmpdir()))
       .filter((entry) => entry.startsWith(spoolPrefix))
       .sort();
     assert.deepEqual(after, before);
     assert.equal(removed, true);
+    assert.equal(snapshot.coverage.filesScanned, 4);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("deeply nested rollout records fall back to the standard parser", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
+  try {
+    const rolloutDirectory = resolve(root, "sessions", "2026", "08", "23");
+    await mkdir(rolloutDirectory, { recursive: true });
+    const depth = 10_000;
+    const nested = `{"a":${"[".repeat(depth)}${"]".repeat(depth)}}`;
+    await writeFile(
+      resolve(
+        rolloutDirectory,
+        "rollout-00000000-0000-4000-8000-000000000001.jsonl",
+      ),
+      `${nested}\n`,
+    );
+
+    const snapshot = await collectUsageSequential({
+      output: resolve(root, "snapshot.json"),
+      codexHome: root,
+      includeArchived: false,
+      since: null,
+    });
+    assert.equal(snapshot.coverage.filesScanned, 1);
+    assert.equal(snapshot.coverage.parseErrors, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("rejected async progress callbacks fail collection cleanly", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
+  try {
+    const rolloutDirectory = resolve(root, "sessions", "2026", "08", "23");
+    await mkdir(rolloutDirectory, { recursive: true });
+    const ignored = JSON.stringify({
+      type: "event_msg",
+      payload: { type: "agent_message", body: "ignored" },
+    });
+    for (let index = 0; index < 2; index += 1) {
+      const suffix = String(index + 1).padStart(12, "0");
+      await writeFile(
+        resolve(rolloutDirectory, `rollout-00000000-0000-4000-8000-${suffix}.jsonl`),
+        `${ignored}\n`,
+      );
+    }
+    const options = {
+      output: resolve(root, "snapshot.json"),
+      codexHome: root,
+      includeArchived: false,
+      since: null,
+    };
+
+    await assert.rejects(
+      () =>
+        collectUsage(options, async ({ current }) => {
+          if (current === 1) throw new Error("progress callback failed");
+        }),
+      /progress callback failed/,
+    );
+    await assert.rejects(
+      () =>
+        collectUsageSequential(options, async ({ current }) => {
+          if (current === 1) throw new Error("progress callback failed");
+        }),
+      /progress callback failed/,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
