@@ -16,6 +16,7 @@ import {
   usageCallCount,
   usageThreadIds,
 } from "../lib/token-ledger-usage.mjs";
+import { sanitizeTerminalText } from "../lib/token-ledger-terminal-text.mjs";
 
 const RESET = "\u001b[0m";
 const PRIMARY_STYLE = [38, 2, 255, 255, 255];
@@ -45,7 +46,7 @@ function colorize(value, code, enabled) {
 }
 
 function stripAnsi(value) {
-  return String(value).replace(/\u001b\[[0-9;]*m/g, "");
+  return sanitizeTerminalText(value);
 }
 
 function visibleLength(value) {
@@ -128,7 +129,7 @@ function modelColor(model) {
 }
 
 function usageTypeLabel(value) {
-  const words = String(value || "unknown")
+  const words = sanitizeTerminalText(value || "unknown")
     .trim()
     .replace(/[_-]+/g, " ")
     .split(/\s+/)
@@ -144,7 +145,12 @@ function usageTypeLabel(value) {
 }
 
 function displayProject(row) {
-  return row.displayProject || row.project || "Unlabelled activity";
+  const label = sanitizeTerminalText(
+    row.displayProject || row.project || "Unlabelled activity",
+  )
+    .replace(/\s+/g, " ")
+    .trim();
+  return label || "Unlabelled activity";
 }
 
 function isRollingRange(range) {
@@ -214,7 +220,9 @@ function usageTypeTotals(events) {
   let totalTokens = 0;
   for (const event of events) {
     if (event?.invalidTokenRecord === true) continue;
-    const key = String(event.useType || "unknown").trim().toLowerCase() || "unknown";
+    const key = sanitizeTerminalText(event.useType || "unknown")
+      .trim()
+      .toLowerCase() || "unknown";
     const allowFractional = event.rangeAllocationEstimated === true;
     const tokens = tokenValue(event.totalTokens, { allowFractional });
     const scaledTokens = tokens / scale;

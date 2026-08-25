@@ -1,4 +1,5 @@
 import { buildBurnDayBins, buildUsageTrend, trendModelLabel } from "./token-ledger-trend.mjs";
+import { chooseBinSize } from "./token-ledger-image-layout.mjs";
 import {
   MAX_SAFE_TOKEN_COUNT,
   checkedTokenAdd,
@@ -7,6 +8,9 @@ import {
   usageBuckets,
   usageCallCount,
 } from "../lib/token-ledger-usage.mjs";
+import { sanitizeTerminalText } from "../lib/token-ledger-terminal-text.mjs";
+
+export { chooseBinSize } from "./token-ledger-image-layout.mjs";
 
 const RESET = "\u001b[0m";
 const PRIMARY_STYLE = [38, 2, 255, 255, 255];
@@ -125,6 +129,8 @@ const MODEL_ORDER = [
   "Unknown",
 ];
 
+const ATTRIBUTION_MODEL_ORDER = ["Luna", "Sol", "Terra"];
+
 function colorsEnabled(options = {}) {
   return options.forceColor ??
     (!options.plain && !process.env.NO_COLOR && Boolean(process.stdout.isTTY));
@@ -135,7 +141,7 @@ function colorize(value, style, enabled) {
 }
 
 function stripAnsi(value) {
-  return String(value).replace(/\u001b\[[0-9;]*m/g, "");
+  return sanitizeTerminalText(value);
 }
 
 function visibleLength(value) {
@@ -278,21 +284,6 @@ function localDateLabel(dateString, timeZone) {
   })
     .format(date)
     .toUpperCase();
-}
-
-export function chooseBinSize(days, width, { minBinWidth = 1, preferDaily = false } = {}) {
-  const rangeDays = Number(days);
-  const plotWidth = Math.max(1, Number(width) || 1);
-  const minimumBinWidth = Math.max(1, Number(minBinWidth) || 1);
-  const maxBinCount = Math.max(1, Math.floor(plotWidth / minimumBinWidth));
-  const preferredBinSize = preferDaily
-    ? 1
-    : rangeDays <= 14
-      ? 1
-      : plotWidth >= 120
-        ? 2
-        : 3;
-  return Math.max(preferredBinSize, Math.ceil(rangeDays / maxBinCount));
 }
 
 function sortedModelEntries(values) {
@@ -504,9 +495,26 @@ function frameLine(content, width) {
   return `│${fit(content, width - 2)}│`;
 }
 
+function wrapAttributionEntries(prefix, entries, width) {
+  const lines = [];
+  let line = prefix;
+  for (const entry of entries) {
+    const separator = line === prefix ? " · " : "   ";
+    const candidate = `${line}${separator}${entry}`;
+    if (visibleLength(candidate) <= width) {
+      line = candidate;
+      continue;
+    }
+    lines.push(line);
+    line = entry;
+  }
+  lines.push(line);
+  return lines;
+}
+
 function formatAttribution(trend, enabled, width, percentMode) {
   const rows = new Map((trend.models ?? []).map((row) => [row.model, row]));
-  const entries = ["Luna", "Sol"]
+  const entries = ATTRIBUTION_MODEL_ORDER
     .map((model) => {
       const row = rows.get(model);
       if (!row || !(row.tokensPerBurnPoint > 0)) return null;
@@ -516,30 +524,20 @@ function formatAttribution(trend, enabled, width, percentMode) {
     })
     .filter(Boolean);
   if (!entries.length) return [];
-  if (percentMode) {
-    const valueLine = colorize(
-      `Observed burn rate · ${entries.join("   ")}`,
-      SECONDARY_STYLE,
-      enabled,
-    );
-    const method = colorize(
-      `Columns sum to observed meter drops; model split via rate-card credit weights (card ${trend.rateCardAsOf}).`,
-      SECONDARY_STYLE,
-      enabled,
-    );
-    return [fit(valueLine, width - 2), fit(method, width - 2)];
-  }
-  const valueLine = colorize(
-    `ESTIMATE ONLY · quota attribution lens · ${entries.join("   ")}`,
-    SECONDARY_STYLE,
-    enabled,
+  const prefix = percentMode
+    ? "Observed burn rate"
+    : "ESTIMATE ONLY · quota attribution lens";
+  const valueLines = wrapAttributionEntries(prefix, entries, width - 2).map(
+    (line) => fit(colorize(line, SECONDARY_STYLE, enabled), width - 2),
   );
   const method = colorize(
-    `Rate-card/token weights, ${trend.rateCardAsOf}; separate from actual-token bars and not official quota math.`,
+    percentMode
+      ? `Columns sum to observed meter drops; model split via rate-card credit weights (card ${trend.rateCardAsOf}).`
+      : `Rate-card/token weights, ${trend.rateCardAsOf}; separate from actual-token bars and not official quota math.`,
     SECONDARY_STYLE,
     enabled,
   );
-  return [fit(valueLine, width - 2), fit(method, width - 2)];
+  return [...valueLines, fit(method, width - 2)];
 }
 
 function drainLabelLine(burnBins, plotWidth, leftWidth, rightWidth, enabled) {
@@ -586,6 +584,7 @@ export function renderTrendCombo({
   // and shows the observed drop per column in a label row instead.
   const meterUsable = Boolean(trend.available && burn.totalPercent > 0);
   const percentMode = Boolean(options.drain) && meterUsable;
+  const meterAvailable = Boolean(trend.available && (trend.points ?? []).length > 0);
   const barBins = percentMode ? burn.bins : actual.bins;
   const binTotal = (bin) => (percentMode ? bin.totalPercent : bin.totalTokens);
   const maxLeft = niceCeiling(
@@ -663,7 +662,7 @@ export function renderTrendCombo({
     `┌${"─".repeat(frameWidth - 2)}┐`,
     frameLine(
       colorize(
-        `TOKEN LEDGER · ${percentMode ? "OBSERVED LIMIT DRAIN + WEEKLY METER" : "ACTUAL TOKENS + WEEKLY QUOTA"} · ${localDateLabel(bounds.startDateString, bounds.timeZone)} – ${localDateLabel(bounds.endDateString, bounds.timeZone)} · ${days}D`,
+        `TOKEN LEDGER · ${percentMode ? "OBSERVED LIMIT DRAIN + WEEKLY METER" : meterAvailable ? "ACTUAL TOKENS + WEEKLY QUOTA" : "ACTUAL TOKENS"} · ${localDateLabel(bounds.startDateString, bounds.timeZone)} – ${localDateLabel(bounds.endDateString, bounds.timeZone)} · ${days}D`,
         PRIMARY_STYLE,
         enabled,
       ),
@@ -673,9 +672,9 @@ export function renderTrendCombo({
       colorize(
         percentMode
           ? "BARS = observed limit % consumed per day by model · LINE = meter remaining · one percent scale"
-          : meterUsable
+          : meterAvailable
             ? "BARS = actual token quantity by model · LINE = meter remaining · -% row = observed drain per column"
-            : "BARS = actual token quantity by model · LINE = observed remaining quota · separate scales",
+            : "BARS = actual token quantity by model · no account-wide weekly meter observed",
         SECONDARY_STYLE,
         enabled,
       ),
@@ -691,7 +690,9 @@ export function renderTrendCombo({
         ? percent(leftValue)
         : compact(leftValue)
       : "";
-    const rightLabel = axisRows.includes(row) ? `${Math.round(rightValue)}%` : "";
+    const rightLabel = meterAvailable && axisRows.includes(row)
+      ? `${Math.round(rightValue)}%`
+      : "";
     const content = chart[row]
       .map(({ char, style }) => colorize(char, style, enabled))
       .join("");
@@ -741,8 +742,12 @@ export function renderTrendCombo({
     const rightLegendWidth = innerWidth - 2 - leftLegendWidth;
     lines.push(frameLine(`${fit(legend[index], leftLegendWidth)}  ${fit(legend[index + 1] ?? "", rightLegendWidth)}`, frameWidth));
   }
-  lines.push(frameLine(colorize("LINE · OBSERVED WEEKLY QUOTA REMAINING · RIGHT AXIS", LINE_STYLE, enabled), frameWidth));
-  lines.push(frameLine(colorize("↟ reset marker returns the line to 100%; it never rises within a cycle", SECONDARY_STYLE, enabled), frameWidth));
+  if (meterAvailable) {
+    lines.push(frameLine(colorize("LINE · OBSERVED WEEKLY QUOTA REMAINING · RIGHT AXIS", LINE_STYLE, enabled), frameWidth));
+    lines.push(frameLine(colorize("↟ reset marker returns the line to 100%; it never rises within a cycle", SECONDARY_STYLE, enabled), frameWidth));
+  } else {
+    lines.push(frameLine(colorize("NO ACCOUNT-WIDE WEEKLY METER OBSERVED", SECONDARY_STYLE, enabled), frameWidth));
+  }
   for (const line of formatAttribution(trend, enabled, frameWidth, percentMode)) {
     lines.push(frameLine(line, frameWidth));
   }

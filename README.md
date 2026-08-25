@@ -40,6 +40,14 @@ The main options are:
 - `--no-open` writes a PNG without opening it.
 - `--help-all` shows the complete command and option reference.
 
+When invoked from the checkout root, default report images are local
+repository-root artifacts and are ignored by Git: `token-ledger-report-<period>.png`,
+`token-ledger-cache-report-<period>.png`, and
+`token-ledger-trend-<period>.png`. Default image paths are resolved from the
+current working directory; use `--image-output <file>` when invoking the CLI
+elsewhere or when you want to choose an intentional destination, such as a
+tracked image under `docs/`.
+
 `week` covers seven local calendar days ending on the selected day. `1d` is a
 rolling 24-hour view ending when the command starts. In a TTY, the project
 dashboard is interactive. `j`/`k` select a project; `q`, `Q`, `Esc`, or
@@ -165,11 +173,11 @@ Ledger does not invent a newer percentage from token counts.
 
 The exported snapshot contains token metadata, model/use-type labels, project
 labels, and display titles. It omits message bodies, reasoning text, tool
-arguments/results, credential fields, and full local paths. Display titles and
-project labels are user-written or local metadata and should be reviewed before
-sharing. Normal successful dashboard output is privacy-reduced, but diagnostics
-or explicit PNG writes may echo configured snapshot, Codex, or output path
-labels.
+arguments/results, credential fields, and full local paths. Path-like source
+labels become a neutral `local` category, local path tokens in titles and other
+labels are redacted, and unrelated user-written title text may remain. Normal
+successful dashboard output is privacy-reduced, but diagnostics or explicit
+PNG writes may echo configured snapshot, Codex, or output path labels.
 
 ## What is estimated
 

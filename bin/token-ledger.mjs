@@ -15,11 +15,6 @@ import {
   renderTerminal,
 } from "./token-ledger-terminal.mjs";
 import { buildUsageTrend, multiDayBounds } from "./token-ledger-trend.mjs";
-import {
-  renderTrendImage,
-  writeTrendPng,
-} from "./token-ledger-trend-image.mjs";
-import { renderCacheReportImage } from "./token-ledger-cache-image.mjs";
 import { renderTrendCombo } from "./token-ledger-trend-terminal.mjs";
 import { startInteractive } from "./token-ledger-tui.mjs";
 import {
@@ -39,6 +34,9 @@ import {
   usageCallCount,
   usageThreadIds,
 } from "../lib/token-ledger-usage.mjs";
+import { sanitizeTerminalText } from "../lib/token-ledger-terminal-text.mjs";
+
+export { sanitizeTerminalText };
 
 export const DEFAULT_SNAPSHOT = resolve(
   homedir(),
@@ -567,13 +565,6 @@ export function rolling24hBounds(value = new Date(), timeZone = DEFAULT_TIME_ZON
   return rollingDurationBounds(value, timeZone, 1);
 }
 
-export function sanitizeTerminalText(value) {
-  return String(value ?? "")
-    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "")
-    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
-    .replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ");
-}
-
 function cleanLabel(value, fallback) {
   const label = sanitizeTerminalText(value)
     .replace(/\s+/g, " ")
@@ -911,7 +902,7 @@ function runYouPlot(rows, options, dateLabel, unit) {
   const chartInput = [
     "project\tvalue",
     ...rows.map(
-      (row) => `${row.displayProject.replace(/[\t\r\n]+/g, " ")}\t${chartNumber(row.totalTokens, unit.divisor)}`,
+      (row) => `${sanitizeTerminalText(row.displayProject).replace(/[\t\r\n]+/g, " ")}\t${chartNumber(row.totalTokens, unit.divisor)}`,
     ),
   ].join("\n");
   const terminalWidth = Number(process.stdout.columns) || 100;
@@ -1131,7 +1122,7 @@ async function loadSnapshot(options) {
   return readSnapshot(options.input);
 }
 
-function render(
+async function render(
   options,
   snapshot,
   bounds,
@@ -1143,6 +1134,9 @@ function render(
 ) {
   if (options.view === "trend") {
     if (options.image && options.cacheRate) {
+      const { renderCacheReportImage } = await import(
+        "./token-ledger-cache-image.mjs"
+      );
       return renderCacheReportImage({
         snapshot,
         bounds,
@@ -1152,6 +1146,9 @@ function render(
     }
     const trend = buildUsageTrend(snapshot, bounds);
     if (options.image) {
+      const { renderTrendImage } = await import(
+        "./token-ledger-trend-image.mjs"
+      );
       return renderTrendImage({
         snapshot,
         bounds,
@@ -1217,7 +1214,7 @@ function render(
       summary.rateCardCredits > 0 && row.rateCardCredits > 0
         ? ` · ${percent((row.rateCardCredits / summary.rateCardCredits) * 100)} credits`
         : "";
-    return `${String(index + 1).padStart(2, " ")}  ${row.displayProject} · ${compact(row.totalTokens)} · ${percent(shares[index])} · ${row.threads.toLocaleString()} threads${knownCreditShare}\n    ${modelMix(row, enabled)}`;
+    return `${String(index + 1).padStart(2, " ")}  ${sanitizeTerminalText(row.displayProject)} · ${compact(row.totalTokens)} · ${percent(shares[index])} · ${row.threads.toLocaleString()} threads${knownCreditShare}\n    ${modelMix(row, enabled)}`;
   });
 
   return `${header.join("\n")}\n\n${details.join("\n")}`;
@@ -1286,7 +1283,7 @@ export async function run(options, { nowMs } = {}) {
   const verifiedSourceTimeMs = options.autoRefresh && !options.inputExplicit
     ? reportTimeMs
     : undefined;
-  const output = render(
+  const output = await render(
     options,
     snapshot,
     bounds,
@@ -1302,6 +1299,7 @@ export async function run(options, { nowMs } = {}) {
   if (writingImage) {
     await mkdir(dirname(outputPath), { recursive: true });
     process.stderr.write(`Token Ledger: encoding ${imageLabel} PNG…\n`);
+    const { writeTrendPng } = await import("./token-ledger-trend-image.mjs");
     await writeTrendPng(output, outputPath);
     process.stderr.write(`Token Ledger: finished ${imageLabel} PNG.\n`);
     const lines = [

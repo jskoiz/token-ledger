@@ -1010,6 +1010,106 @@ test("coverage preserves unknown totals after safe-counter saturation", async ()
   }
 });
 
+test("imported quota observations retain account and named scope", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
+  const timestamp = "2026-08-18T10:00:00.000Z";
+  const resetsAt = Date.parse("2026-08-24T00:00:00.000Z") / 1_000;
+  const quotaRecord = (limitId, limitName, usedPercent) => ({
+    timestamp,
+    type: "event_msg",
+    payload: {
+      type: "token_count",
+      rate_limits: Object.assign(
+        {
+          primary: {
+            window_minutes: 10_080,
+            used_percent: usedPercent,
+            resets_at: resetsAt,
+          },
+          limit_id: limitId,
+        },
+        limitName ? { limit_name: limitName } : {},
+      ),
+    },
+  });
+
+  try {
+    const rolloutDirectory = resolve(root, "sessions", "2026", "08", "18");
+    await mkdir(rolloutDirectory, { recursive: true });
+    await writeFile(
+      resolve(rolloutDirectory, "rollout-scopes.jsonl"),
+      serialize([
+        ...turnStart(timestamp, "turn-1"),
+        quotaRecord("account-weekly", null, 20),
+        quotaRecord("named-luna", "Luna", 40),
+        tokenCount(timestamp, 100, 100),
+      ]),
+    );
+
+    const snapshot = await collectUsage({
+      output: resolve(root, "snapshot.json"),
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+    const account = snapshot.quotaObservations.find(
+      (quota) => quota.limitName === null,
+    );
+    const named = snapshot.quotaObservations.find(
+      (quota) => quota.limitName === "Luna",
+    );
+    assert.equal(account.scope, "account");
+    assert.equal(named.scope, "named");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("named-only quota observations do not establish complete history", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
+  const eventTimestamp = "2026-08-19T10:00:00.000Z";
+  const quotaTimestamp = "2026-08-20T10:00:00.000Z";
+  const resetsAt = Date.parse("2026-08-27T00:00:00.000Z") / 1_000;
+  try {
+    const rolloutDirectory = resolve(root, "sessions", "2026", "08", "19");
+    await mkdir(rolloutDirectory, { recursive: true });
+    await writeFile(
+      resolve(rolloutDirectory, "rollout-named-only.jsonl"),
+      serialize([
+        ...turnStart(eventTimestamp, "turn-1"),
+        tokenCount(eventTimestamp, 100, 100),
+        {
+          timestamp: quotaTimestamp,
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            rate_limits: {
+              primary: {
+                window_minutes: 10_080,
+                used_percent: 40,
+                resets_at: resetsAt,
+              },
+              limit_id: "named-luna",
+              limit_name: "Luna",
+            },
+          },
+        },
+      ]),
+    );
+
+    const snapshot = await collectUsage({
+      output: resolve(root, "snapshot.json"),
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+    assert.equal(snapshot.quotaObservations[0].scope, "named");
+    assert.equal(snapshot.coverage.completeSinceWindowStart, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("unchanged quota readings retain their full observed span", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
   const threadId = "89898989-8989-4989-8989-898989898989";

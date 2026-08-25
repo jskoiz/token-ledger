@@ -1,8 +1,7 @@
 import {
   creditsForUsage,
-  FAST_MODE_MULTIPLIER,
   RATE_CARD_AS_OF,
-} from "./token-ledger-rates.mjs";
+} from "../lib/token-ledger-rates.mjs";
 import {
   MAX_SAFE_TOKEN_COUNT,
   checkedFiniteAdd,
@@ -192,6 +191,13 @@ export function weeklyQuotaObservations(snapshot = {}) {
   );
   if (accountScoped.length) {
     observations = accountScoped;
+  } else if (
+    observations.some(
+      (observation) => observation.scope === "named",
+    )
+  ) {
+    // Explicitly named-only input has no account-wide meter to report.
+    observations = [];
   } else if (observations.some((observation) => observation.limitKey)) {
     const groups = new Map();
     for (const observation of observations) {
@@ -203,8 +209,9 @@ export function weeklyQuotaObservations(snapshot = {}) {
     const accountWide = [...groups.values()].filter((group) =>
       group.every((observation) => !observation.limitName),
     );
-    const pool = accountWide.length ? accountWide : [...groups.values()];
-    observations = pool.sort((left, right) => right.length - left.length)[0];
+    observations = accountWide.length
+      ? accountWide.sort((left, right) => right.length - left.length)[0]
+      : [];
   } else {
     const accountWide = observations.filter(
       (observation) => !observation.limitName,
@@ -312,10 +319,8 @@ export function eventCredits(event) {
   // Recompute from token components first so the current rate card applies;
   // snapshots can carry credits stored under an outdated card. Fast-mode
   // turns (service tier "priority") debit the limit at a higher rate.
-  const multiplier =
-    event.serviceTier === "priority" ? FAST_MODE_MULTIPLIER : 1;
-  const computed = creditsForUsage(event.model, event);
-  if (Number.isFinite(computed) && computed >= 0) return computed * multiplier;
+  const computed = creditsForUsage(event.model, event, event.serviceTier);
+  if (Number.isFinite(computed) && computed >= 0) return computed;
   const stored = Number(event.rateCardCredits);
   if (event.rateCardCredits !== null && event.rateCardCredits !== undefined) {
     // Stored credits from current snapshots already include the fast-mode
