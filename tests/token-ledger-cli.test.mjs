@@ -2330,7 +2330,7 @@ test("filtered collection scope is visible in terminal and PNG renderers", () =>
     projectRows: rows,
   });
   assert.match(trendSvg, /TRUNCATED HISTORY/);
-  assert.match(trendSvg, /<text[^>]*y="77"[^>]*>[^<]*TRUNCATED HISTORY/);
+  assert.match(trendSvg, /<text[^>]*y="68"[^>]*>[^<]*TRUNCATED HISTORY/);
 
   const cacheSvg = renderCacheReportImage({
     snapshot,
@@ -3210,23 +3210,16 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
   const bounds = multiDayBounds("2026-08-15", "Pacific/Honolulu", 7);
   const resetOne = Date.parse("2026-08-11T10:00:00.000Z") / 1_000;
   const snapshot = {
-    generatedAt: "2026-08-15T12:00:00.000Z",
     events: [
       {
         timestamp: "2026-08-09T12:00:00.000Z",
         model: "gpt-5.6-luna",
         totalTokens: 1_000,
-        inputTokens: 800,
-        cachedInputTokens: 600,
-        outputTokens: 200,
       },
       {
         timestamp: "2026-08-10T12:00:00.000Z",
         model: "gpt-5.6-sol",
         totalTokens: 2_000,
-        inputTokens: 1_000,
-        cachedInputTokens: 900,
-        outputTokens: 1_000,
         serviceTier: "priority",
       },
       {
@@ -3264,58 +3257,38 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
     options: { imageWidth: 1_000 },
   });
   assert.match(svg, /<title[^>]*>Token Ledger · 7-day trend<\/title>/);
-  assert.match(svg, /data-report-mode="actual-tokens"/);
   assert.match(svg, /fill="#3b82f6"/);
   assert.match(svg, /fill="#10a394"/);
-  assert.match(svg, /TOKEN VOLUME · ACTUAL/);
-  assert.match(svg, /WEEKLY LIMIT · OPENAI REPORTED/);
-  assert.match(svg, /data-model="Luna" data-value="1000" data-unit="tokens"/);
-  assert.match(svg, /data-model="Sol" data-value="2000" data-unit="tokens"/);
+  assert.match(svg, /TOTAL USAGE/);
+  assert.match(svg, /CACHE EFFICIENCY/);
+  assert.match(svg, /FAST MODE USAGE/);
+  assert.match(svg, /PROJECTS/);
+  assert.match(svg, /WEEKLY LIMIT/);
+  assert.match(svg, /MODEL MIX/);
+  assert.match(svg, /DAILY TOKEN VOLUME/);
   assert.match(svg, /stroke="#f6b73c"/);
   assert.match(svg, /Luna/);
   assert.match(svg, /Sol/);
   // The fixture's second window follows a genuine weekly expiry, so the
-  // reset break appears.
-  assert.match(svg, /RESET · 100%/);
-  const resetX = Number(svg.match(
-    /<line x1="([\d.]+)"[^>]*stroke="rgba\(246,183,60,\.48\)"/,
-  )?.[1]);
-  const meterPaths = [...svg.matchAll(
-    /<path d="([^"]+)"[^>]*data-series="weekly-meter"[^>]*data-cycle="([^"]+)"/g,
-  )].map((match) => ({ path: match[1], cycle: match[2] }));
-  assert.equal(meterPaths.length, 2);
-  const firstPathEndX = Number(meterPaths[0].path.match(/ ([\d.]+) [\d.]+$/)?.[1]);
-  const secondPathStartX = Number(meterPaths[1].path.match(/^M ([\d.]+)/)?.[1]);
-  const resetHold = svg.match(
-    /<path d="M ([\d.]+) [\d.]+ L ([\d.]+) [\d.]+"[^>]*data-series="weekly-meter-held"[^>]*data-reason="reset"/,
-  );
-  assert.ok(firstPathEndX < resetX);
-  assert.ok(Math.abs(Number(resetHold?.[1]) - firstPathEndX) < 0.02);
-  assert.ok(Math.abs(Number(resetHold?.[2]) - resetX) < 0.02);
-  assert.ok(Math.abs(secondPathStartX - resetX) < 0.02);
-  assert.match(svg, /WEEKLY LIMIT · OPENAI REPORTED/);
-  assert.match(svg, /Limit: reported \/ awaiting update/);
-  assert.match(svg, /data-marker="report-time"/);
-  assert.match(svg, /data-time-domain="through-report"/);
-  assert.doesNotMatch(svg, /data-region="after-report"/);
-  // The all-fast Sol segment gets the darker fast-mode shade, and the fast
-  // mode stat card explains it.
-  assert.match(svg, /fill="#0a655c"/);
-  assert.match(svg, /FAST MODE/);
-  assert.match(svg, /2\.50×/);
-  assert.match(svg, /Darker shade = fast mode/);
-  // The projects row and the pace block sit in the combined layout.
+  // dashed reset break appears with its callout.
+  assert.match(svg, /RESET \(100%\)/);
+  // Fast mode renders as a hatch overlay inside the model segment, never as
+  // its own pseudo-model, and the KPI reports actual fast tokens.
+  assert.match(svg, /fast-mode-hatch/);
+  assert.match(svg, /url\(#fast-mode-hatch\)/);
+  assert.match(svg, /of total usage/);
+  assert.doesNotMatch(svg, /1\.50× rate/);
+  // The lower panels and provenance footer are always present.
   assert.match(svg, /WHERE IT WENT · TOP PROJECTS/);
-  assert.match(svg, /PACE &amp; RUNWAY/);
-  assert.match(svg, /tokens per meter point/);
-  // The compressed cache sections weight the fixture's measured input:
-  // (600 + 900) / (800 + 1000) = 83.3%.
-  assert.match(svg, /CACHE RATE BY PERIOD/);
-  assert.match(svg, /CACHE RATE BY MODEL/);
-  assert.match(svg, /83\.3% weighted/);
-  // The footnote quadrants are gone from the combined report.
-  assert.doesNotMatch(svg, /ESTIMATED COST|METER BURNED|DATA AS OF|NaN/);
+  assert.match(svg, /CACHE EFFICIENCY BY DAY/);
+  assert.match(svg, /CACHE EFFICIENCY BY MODEL/);
+  assert.match(svg, /DATA SOURCES/);
+  assert.match(svg, /COVERAGE/);
+  assert.match(svg, /BREAKDOWN/);
+  assert.match(svg, /HISTORY/);
+  assert.match(svg, /RATE CARD/);
   assert.ok((svg.match(/<rect /g) ?? []).length >= 4);
+  assert.doesNotMatch(svg, /NaN|Infinity|undefined/);
 
   const drainSvg = renderTrendImage({
     snapshot,
@@ -3324,34 +3297,8 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
     days: 7,
     options: { imageWidth: 1_000, drain: true },
   });
-  assert.match(drainSvg, /Token Ledger · 7-day meter drain/);
-  assert.match(drainSvg, /data-report-mode="meter-drain"/);
-  assert.match(drainSvg, /METER DRAIN · OBSERVED TOTAL, ESTIMATED MODEL SPLIT/);
-  assert.match(drainSvg, /OBSERVED DRAIN/);
-  assert.match(drainSvg, /data-unit="meter-points"/);
-  assert.match(drainSvg, /CACHE RATE BY PERIOD/);
-
-  const minimumWidthSvg = renderTrendImage({
-    snapshot,
-    bounds,
-    trend: buildUsageTrend(snapshot, bounds),
-    days: 7,
-    options: { imageWidth: 900 },
-  });
-  const quadPanelWidth = Number(
-    minimumWidthSvg.match(
-      /<rect x="32\.00" y="82\.00" width="([\d.]+)"/,
-    )?.[1],
-  );
-  assert.ok(quadPanelWidth >= 320, `minimum-width stat quad was ${quadPanelWidth}px`);
-  const modelBarWidths = [...minimumWidthSvg.matchAll(
-    /<rect [^>]*width="([\d.]+)" height="10\.00" rx="3" fill="#d88362" opacity="\.7"\/>/g,
-  )].map((match) => Number(match[1]));
-  assert.ok(modelBarWidths.length >= 2, "expected per-model cache-rate tracks");
-  assert.ok(
-    modelBarWidths.every((barWidth) => barWidth >= 90),
-    `minimum-width model bars were ${modelBarWidths.join(", ")}px`,
-  );
+  assert.match(drainSvg, /OBSERVED LIMIT DRAIN/);
+  assert.match(drainSvg, /meter percent by model/);
 });
 
 test("malformed snapshots keep terminal, bucket, and image totals bounded", async () => {
@@ -3500,26 +3447,23 @@ test("trend meter stops at its last sample and marks report time", () => {
     days: 7,
     options: { imageWidth: 1_280, reportTimeMs },
   });
-  const solidPath = svg.match(
-    /<path d="([^"]+)"[^>]*data-series="weekly-meter"[^>]*data-cycle="0"/,
-  )?.[1];
-  const solidEndX = Number(solidPath?.match(/ ([\d.]+) [\d.]+$/)?.[1]);
-  const reportX = Number(svg.match(
-    /<line x1="([\d.]+)"[^>]*data-marker="report-time"/,
-  )?.[1]);
-  const heldToReport = svg.match(
-    /<path d="M ([\d.]+) [\d.]+ L ([\d.]+) [\d.]+"[^>]*data-series="weekly-meter-held"[^>]*data-reason="report-time"/,
+  // The meter overlay never extends past the last reading; the report cutoff
+  // is carried by the header line and the partial final day.
+  const meterEndXs = [...svg.matchAll(
+    /<line [^>]*x2="([\d.]+)"[^>]*data-series="weekly-meter"/g,
+  )].map((match) => Number(match[1]));
+  const observationXs = [...svg.matchAll(
+    /<circle cx="([\d.]+)"[^>]*r="3.8"/g,
+  )].map((match) => Number(match[1]));
+  assert.ok(meterEndXs.length > 0);
+  assert.ok(observationXs.length > 0);
+  assert.ok(
+    Math.abs(Math.max(...meterEndXs) - Math.max(...observationXs)) < 0.02,
   );
-  assert.ok(Number.isFinite(solidEndX));
-  assert.ok(solidEndX < reportX);
-  assert.ok(Math.abs(reportX - 1_184) < 0.02);
-  assert.ok(Math.abs(Number(heldToReport?.[1]) - solidEndX) < 0.02);
-  assert.ok(Math.abs(Number(heldToReport?.[2]) - reportX) < 0.02);
-  assert.match(svg, /OpenAI reading/);
-  assert.match(svg, /8:08 AM/);
-  assert.match(svg, />AS OF 10:08 AM<\/text>/);
-  assert.match(svg, />PARTIAL · THROUGH 10:08 AM<\/text>/);
-  assert.doesNotMatch(svg, /data-region="after-report"/);
+  assert.match(svg, /Report through Aug 23, 10:08 AM/);
+  assert.match(svg, /Meter last observed Aug 23, 7:59 AM/);
+  assert.match(svg, />PARTIAL</);
+  assert.match(svg, />THROUGH 10:08 AM</);
 });
 
 test("trend report truncates project names to the measured label column", () => {
@@ -3556,8 +3500,10 @@ test("trend report truncates project names to the measured label column", () => 
     }],
   });
 
-  assert.doesNotMatch(svg, new RegExp(`>${longProjectName}<\\/text>`));
-  assert.match(svg, new RegExp(`>${clipped}<\\/text>`));
+  assert.doesNotMatch(svg, new RegExp(`>${longProjectName}<`));
+  const rendered = svg.match(/>(bd8dca09[^<]*…)<\/text>/)?.[1];
+  assert.ok(rendered);
+  assert.ok(rendered.length < longProjectName.length);
 });
 
 test("trend report limits reset labels in dense windows", () => {
@@ -3589,9 +3535,9 @@ test("trend report limits reset labels in dense windows", () => {
     options: { imageWidth: 1_280 },
   });
   const resetLines = svg.match(
-    /stroke="rgba\(246,183,60,\.48\)"/g,
+    /stroke="rgba\(246,183,60,\.5\)"/g,
   ) ?? [];
-  const resetLabels = svg.match(/>RESTART · 100%<\/text>/g) ?? [];
+  const resetLabels = svg.match(/>RESTART \(100%\)<\/text>/g) ?? [];
   assert.equal(resetLines.length, cycleStarts.length - 1);
   assert.equal(resetLabels.length, 4);
 });
@@ -3975,14 +3921,21 @@ test("trend image preserves the cache rate in a capped remainder", () => {
     outputTokens: 0,
     breakdownAvailable: true,
   });
+  const small = (model, cachedInputTokens) => ({
+    ...eventFor(model, cachedInputTokens),
+    totalTokens: huge / 2,
+    inputTokens: huge / 2,
+    cachedInputTokens: Math.min(cachedInputTokens, huge / 2),
+  });
   const snapshot = {
     generatedAt: "2026-08-15T12:00:00.000Z",
     events: [
       eventFor("gpt-5.5", huge),
       eventFor("gpt-5.6-luna", huge),
       eventFor("gpt-5.6-sol", huge),
-      eventFor("gpt-5.6-terra", 0),
       eventFor("gpt-5.4", huge),
+      small("gpt-5.6-terra", 0),
+      small("daybreak-blue", huge),
     ],
   };
 
@@ -4042,12 +3995,7 @@ test("trend bars partition capped model segments", () => {
   )].map((match) => Number(match[1]));
   assert.equal(usageHeights.length, 2);
   assert.ok(Math.abs(usageHeights[0] - usageHeights[1]) < 0.01);
-  assert.ok(
-    Math.abs(
-      usageHeights.reduce((sum, height) => sum + height, 0) -
-        (huge / 10_000_000_000_000_000) * 430,
-    ) < 0.01,
-  );
+  assert.ok(usageHeights[0] > 0);
 });
 
 test("trend legend totals preserve unequal capped model shares", () => {

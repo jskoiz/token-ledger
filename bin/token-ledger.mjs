@@ -19,6 +19,10 @@ import {
   multiDayBounds,
   priorPeriodBounds,
 } from "./token-ledger-trend.mjs";
+import {
+  buildTrendReportViewModel,
+  resolveEffectiveEnd,
+} from "./token-ledger-report-data.mjs";
 import { renderTrendCombo } from "./token-ledger-trend-terminal.mjs";
 import { renderCostTerminal } from "./token-ledger-cost-terminal.mjs";
 import { startInteractive } from "./token-ledger-tui.mjs";
@@ -1126,9 +1130,15 @@ export function snapshotFreshness(snapshot = {}, nowMs = Date.now()) {
   };
 }
 
-async function loadSnapshot(options) {
+// Resolve the snapshot together with the evidence available for its report
+// cutoff. A cache can be readable without being current, so callers must keep
+// this status separate from the age label shown in terminal output.
+export async function loadSnapshot(options) {
   if (options.refresh) {
-    return refreshSnapshot(options);
+    return {
+      snapshot: await refreshSnapshot(options),
+      sourceStatus: "verified-current",
+    };
   }
   if (!existsSync(options.input)) {
     if (options.inputExplicit || !options.autoRefresh) {
@@ -1136,22 +1146,31 @@ async function loadSnapshot(options) {
         `Snapshot not found: ${safeDisplayLabel(options.input, "snapshot")}`,
       );
     }
-    return refreshSnapshot(options);
+    return {
+      snapshot: await refreshSnapshot(options),
+      sourceStatus: "verified-current",
+    };
   }
   const cached = await readSnapshot(options.input);
   if (!snapshotScopeMatchesOptions(cached, options)) {
     if (options.inputExplicit || !options.autoRefresh) {
       throw snapshotScopeError(cached, options);
     }
-    return refreshSnapshot(options);
+    return {
+      snapshot: await refreshSnapshot(options),
+      sourceStatus: "verified-current",
+    };
   }
 
-  if (!options.autoRefresh || options.inputExplicit) {
-    return cached;
+  if (options.inputExplicit) {
+    return { snapshot: cached, sourceStatus: "explicit-snapshot" };
+  }
+  if (!options.autoRefresh) {
+    return { snapshot: cached, sourceStatus: "unchecked-cache" };
   }
 
   if (!shouldCheckSourceFreshness(options)) {
-    return cached;
+    return { snapshot: cached, sourceStatus: "unchecked-cache" };
   }
 
   const { sourceInventory, sourceWatermarksEqual } = await import(
@@ -1169,9 +1188,16 @@ async function loadSnapshot(options) {
     );
   }
   if (!sourceWatermarksEqual(cached.sourceWatermark, inventory.watermark)) {
-    return refreshSnapshot(options);
+    try {
+      return {
+        snapshot: await refreshSnapshot(options),
+        sourceStatus: "verified-current",
+      };
+    } catch {
+      return { snapshot: cached, sourceStatus: "stale-fallback" };
+    }
   }
-  return cached;
+  return { snapshot: cached, sourceStatus: "verified-current" };
 }
 
 async function render(
@@ -1182,7 +1208,7 @@ async function render(
   rows,
   allRows,
   freshness,
-  reportTimeMs,
+  report = {},
   analysis,
 ) {
   if (options.view === "cost") {
@@ -1211,9 +1237,16 @@ async function render(
         bounds,
         trend,
         days: options.trendDays,
-        options: { ...options, reportTimeMs },
-        projectRows: allRows,
-        analysis,
+        options,
+        viewModel: buildTrendReportViewModel({
+          snapshot,
+          bounds,
+          days: options.trendDays,
+          reportTimeMs: report.reportTimeMs ?? null,
+          sourceStatus: report.sourceStatus ?? "unchecked-cache",
+          projectRows: allRows,
+          events,
+        }),
       });
     }
     return renderTrendCombo({
@@ -1326,7 +1359,7 @@ export async function run(options, { nowMs } = {}) {
   const hasInjectedNow = nowMs !== undefined;
   const now = new Date(hasInjectedNow ? nowMs : Date.now());
   const bounds = boundsForOptions(options, now);
-  const snapshot = await loadSnapshot(options);
+  const { snapshot, sourceStatus } = await loadSnapshot(options);
   const analysis = buildRangeAnalysis(
     snapshot,
     bounds,
@@ -1337,9 +1370,24 @@ export async function run(options, { nowMs } = {}) {
       includeTrend: options.view === "trend" && !options.cacheRate,
     },
   );
-  const events = filterDayEvents(snapshot, bounds, analysis);
+  let events = filterDayEvents(snapshot, bounds, analysis);
   const writingImage = options.view === "trend" && options.image;
   const writingEmptyCacheReport = writingImage && options.cacheRate;
+  const reportTimeMs = hasInjectedNow ? now.getTime() : Date.now();
+  if (writingImage && !options.cacheRate) {
+    const effectiveEndMs = resolveEffectiveEnd({
+      snapshot,
+      bounds,
+      reportTimeMs,
+      sourceStatus,
+    });
+    // Keep the terminal aggregation and the report's project breakdown on the
+    // same captured event window. The report view model independently applies
+    // the same bound to raw snapshot events for its other panels.
+    events = events.filter(
+      (event) => new Date(event.timestamp).getTime() < effectiveEndMs,
+    );
+  }
   if (events.length === 0 && !writingEmptyCacheReport) {
     return emptyRangeMessage(options, snapshot, bounds);
   }
@@ -1362,10 +1410,6 @@ export async function run(options, { nowMs } = {}) {
   if (writingImage) {
     process.stderr.write(`Token Ledger: generating ${imageLabel} PNG…\n`);
   }
-  const reportTimeMs = hasInjectedNow ? now.getTime() : Date.now();
-  const verifiedSourceTimeMs = options.autoRefresh && !options.inputExplicit
-    ? reportTimeMs
-    : undefined;
   const output = await render(
     options,
     snapshot,
@@ -1377,7 +1421,7 @@ export async function run(options, { nowMs } = {}) {
       snapshot,
       reportTimeMs,
     ),
-    verifiedSourceTimeMs,
+    { sourceStatus, reportTimeMs },
     analysis,
   );
   if (writingImage) {
@@ -1431,7 +1475,7 @@ function shouldUseInteractive(options) {
 
 async function runInteractive(options) {
   const bounds = boundsForOptions(options);
-  const snapshot = await loadSnapshot(options);
+  const { snapshot } = await loadSnapshot(options);
   const analysis = buildRangeAnalysis(snapshot, bounds, { includeTrend: false });
   const events = filterDayEvents(snapshot, bounds, analysis);
   if (events.length === 0) {
