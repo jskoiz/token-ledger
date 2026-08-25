@@ -46,6 +46,7 @@ import {
   SNAPSHOT_SCHEMA_VERSION,
   checkedFiniteAdd,
   checkedTokenAdd,
+  scaledOutputTokens,
   tokenValue,
   MAX_SAFE_TOKEN_COUNT,
   usageBuckets,
@@ -795,11 +796,6 @@ function totalSummary(events, projectRows) {
     (summary, event) => {
       if (event?.invalidTokenRecord === true) return summary;
       const allowFractional = event?.rangeAllocationEstimated === true;
-      summary.outputTokens = checkedTokenAdd(
-        summary.outputTokens,
-        tokenValue(event.outputTokens, { allowFractional }),
-        { allowFractional },
-      );
       summary.toolCalls = checkedTokenAdd(
         summary.toolCalls,
         tokenValue(event.toolCalls, { allowFractional }),
@@ -839,6 +835,7 @@ function totalSummary(events, projectRows) {
     (sum, row) => sum + row.totalTokens,
     0,
   );
+  summary.outputTokens = scaledOutputTokens(events, summary.totalTokens);
   return summary;
 }
 
