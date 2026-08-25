@@ -44,7 +44,8 @@
     "verify:release": "node tools/verify-release.mjs",
     "prepublishOnly": "npm test && npm run verify:release",
     "lint:eslint": "eslint .",
-    "lint:oxlint": "oxlint"
+    "lint:oxlint": "oxlint",
+    "benchmark:refresh": "node tools/benchmark-importer.mjs"
   },
   "devDependencies": {
     "@eslint/js": "9.39.4",
