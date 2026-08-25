@@ -1970,8 +1970,8 @@ test("quota burn keeps unrated usage out of credit-share mode after saturation",
   );
 
   assert.equal(quota.shareBasis, "tokens");
-  assert.equal(quota.displayedSharePercent, 100);
-  assert.equal(quota.estimatedDisplayedBurnPercent, 20);
+  assert.ok(Math.abs(quota.displayedSharePercent - 100 / 3) < 1e-12);
+  assert.ok(Math.abs(quota.estimatedDisplayedBurnPercent - 20 / 3) < 1e-12);
 });
 
 test("trend burn keeps rated token and credit scales aligned", () => {
@@ -2012,6 +2012,47 @@ test("trend burn keeps rated token and credit scales aligned", () => {
   assert.equal(interval.method, "mixed");
   assert.equal(interval.contributions.Luna, 20);
   assert.equal(interval.contributions.Sol, 10);
+});
+
+test("trend model attribution preserves shared token proportions", () => {
+  const huge = Number.MAX_SAFE_INTEGER;
+  const bounds = multiDayBounds("2026-08-02", "UTC", 2);
+  const snapshot = {
+    events: [
+      {
+        timestamp: "2026-08-01T01:00:00.000Z",
+        model: "gpt-5.6-luna",
+        totalTokens: huge,
+        rateCardCredits: 1,
+      },
+      {
+        timestamp: "2026-08-01T02:00:00.000Z",
+        model: "gpt-5.6-luna",
+        totalTokens: huge,
+        rateCardCredits: 1,
+      },
+      {
+        timestamp: "2026-08-01T03:00:00.000Z",
+        model: "gpt-5.6-sol",
+        totalTokens: huge,
+        rateCardCredits: null,
+      },
+    ],
+    quotaObservations: [{
+      timestamp: "2026-08-02T00:00:00.000Z",
+      usedPercent: 30,
+      windowMinutes: 10_080,
+      resetsAt: Date.parse("2026-08-08T00:00:00.000Z") / 1_000,
+    }],
+  };
+
+  const models = buildUsageTrend(snapshot, bounds).models;
+  const luna = models.find((model) => model.model === "Luna");
+  const sol = models.find((model) => model.model === "Sol");
+  assert.ok(luna && sol);
+  assert.ok(
+    Math.abs(luna.tokensPerBurnPoint - sol.tokensPerBurnPoint) < 1e-9,
+  );
 });
 
 test("compact totals promote values that round to 1000 of a unit", () => {

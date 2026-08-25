@@ -442,15 +442,27 @@ function durationDayShares(startMs, endMs, timeZone) {
 
 function tokenTotalsByModel(events) {
   const totals = new Map();
+  let scale = 1;
+  let totalTokens = 0;
   for (const event of events) {
     if (event?.invalidTokenRecord === true) continue;
     const allowFractional = event.rangeAllocationEstimated === true;
     const tokens = tokenValue(event.totalTokens, { allowFractional });
     if (!(tokens > 0)) continue;
     const model = trendModelLabel(event.model);
-    totals.set(model, checkedTokenAdd(totals.get(model) ?? 0, tokens, {
-      allowFractional,
-    }));
+    const contribution = tokens / scale;
+    const nextTotal = totalTokens + contribution;
+    const scaleFactor = Math.max(1, nextTotal / MAX_SAFE_TOKEN_COUNT);
+    if (scaleFactor > 1) {
+      for (const [modelName, value] of totals) {
+        totals.set(modelName, value / scaleFactor);
+      }
+      totalTokens /= scaleFactor;
+      scale *= scaleFactor;
+    }
+    const scaledContribution = contribution / scaleFactor;
+    totals.set(model, (totals.get(model) ?? 0) + scaledContribution);
+    totalTokens += scaledContribution;
   }
   return totals;
 }

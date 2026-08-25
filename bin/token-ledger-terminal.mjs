@@ -308,28 +308,43 @@ export function quotaCycleSummary(snapshot = {}, displayedEvents = []) {
     };
   }
 
-  const sumUsage = (events) =>
-    events.reduce(
-      (acc, event) => {
-        if (event?.invalidTokenRecord === true) return acc;
-        const allowFractional = event.rangeAllocationEstimated === true;
-        const tokens = tokenValue(event.totalTokens, { allowFractional });
-        acc.tokens = checkedTokenAdd(acc.tokens, tokens, { allowFractional });
-        const credits = eventCredits(event);
-        if (Number.isFinite(credits) && credits >= 0) {
-          acc.credits = checkedFiniteAdd(acc.credits, credits);
-          acc.ratedTokens = checkedTokenAdd(
-            acc.ratedTokens,
-            tokens,
-            { allowFractional },
-          );
-        } else if (tokens > 0) {
-          acc.hasUnrated = true;
-        }
-        return acc;
-      },
-      { tokens: 0, credits: 0, ratedTokens: 0, hasUnrated: false },
-    );
+  const sumUsage = (events, initialScale = 1) => {
+    const acc = {
+      tokens: 0,
+      credits: 0,
+      ratedTokens: 0,
+      hasUnrated: false,
+      scale: Number.isFinite(initialScale) && initialScale >= 1
+        ? initialScale
+        : 1,
+    };
+    for (const event of events) {
+      if (event?.invalidTokenRecord === true) continue;
+      const allowFractional = event.rangeAllocationEstimated === true;
+      const tokens = tokenValue(event.totalTokens, { allowFractional });
+      const contribution = tokens / acc.scale;
+      const nextTokens = acc.tokens + contribution;
+      const scaleFactor = Math.max(
+        1,
+        nextTokens / MAX_SAFE_TOKEN_COUNT,
+      );
+      if (scaleFactor > 1) {
+        acc.tokens /= scaleFactor;
+        acc.ratedTokens /= scaleFactor;
+        acc.scale *= scaleFactor;
+      }
+      const scaledContribution = contribution / scaleFactor;
+      acc.tokens += scaledContribution;
+      const credits = eventCredits(event);
+      if (Number.isFinite(credits) && credits >= 0) {
+        acc.credits = checkedFiniteAdd(acc.credits, credits);
+        acc.ratedTokens += scaledContribution;
+      } else if (tokens > 0) {
+        acc.hasUnrated = true;
+      }
+    }
+    return acc;
+  };
   const cycleEndMs = observedThroughMs + 1;
   const cycle = sumUsage(
     usageBucketsInRange(snapshot, windowStartMs, cycleEndMs),
@@ -340,6 +355,7 @@ export function quotaCycleSummary(snapshot = {}, displayedEvents = []) {
       windowStartMs,
       cycleEndMs,
     ),
+    cycle.scale,
   );
   const usedPercent = Math.min(100, Math.max(0, Number(observation.usedPercent) || 0));
   // The weekly meter weights usage by model, token type, and fast mode;
