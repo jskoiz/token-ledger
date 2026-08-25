@@ -14,7 +14,12 @@ import {
   MODEL_COLORS as TERMINAL_MODEL_COLORS,
   renderTerminal,
 } from "./token-ledger-terminal.mjs";
-import { buildUsageTrend, multiDayBounds } from "./token-ledger-trend.mjs";
+import {
+  buildRangeAnalysis,
+  buildUsageTrend,
+  multiDayBounds,
+  priorPeriodBounds,
+} from "./token-ledger-trend.mjs";
 import { renderTrendCombo } from "./token-ledger-trend-terminal.mjs";
 import { startInteractive } from "./token-ledger-tui.mjs";
 import {
@@ -596,7 +601,7 @@ function displayLabel(value) {
   return `${label.slice(0, 14)}…${label.slice(-13)}`;
 }
 
-export function oneOffProjects(snapshot) {
+export function oneOffProjects(snapshot, events = null) {
   const threadIdsByProject = new Map();
   const add = (project, threadId) => {
     if (!project || !threadId) return;
@@ -605,7 +610,7 @@ export function oneOffProjects(snapshot) {
     ids.add(threadId);
     threadIdsByProject.set(normalizedProject, ids);
   };
-  for (const bucket of usageBuckets(snapshot)) {
+  for (const bucket of events ?? usageBuckets(snapshot)) {
     for (const threadId of usageThreadIds(bucket)) add(bucket.project, threadId);
   }
   for (const thread of snapshot.threads ?? []) add(thread.project, thread.id);
@@ -627,14 +632,17 @@ function modelLabel(value) {
   return model;
 }
 
-export function filterDayEvents(snapshot, bounds) {
+export function filterDayEvents(snapshot, bounds, analysis = null) {
+  if (analysis !== null) return analysis.currentEvents;
   const start = bounds.start.getTime();
   const end = bounds.end.getTime();
   return usageBucketsInRange(snapshot, start, end);
 }
 
-export function aggregateProjects(snapshot, events, options = {}) {
-  const singletonProjects = options.rawProjects ? new Set() : oneOffProjects(snapshot);
+export function aggregateProjects(snapshot, events, options = {}, analysis = null) {
+  const singletonProjects = options.rawProjects
+    ? new Set()
+    : oneOffProjects(snapshot, analysis?.allEvents);
   const grouped = new Map();
 
   for (const event of events) {
@@ -1039,6 +1047,7 @@ async function render(
   allRows,
   freshness,
   reportTimeMs,
+  analysis,
 ) {
   if (options.view === "trend") {
     if (options.image && options.cacheRate) {
@@ -1050,9 +1059,10 @@ async function render(
         bounds,
         days: options.trendDays,
         options,
+        analysis,
       });
     }
-    const trend = buildUsageTrend(snapshot, bounds);
+    const trend = buildUsageTrend(snapshot, bounds, { analysis });
     if (options.image) {
       const { renderTrendImage } = await import(
         "./token-ledger-trend-image.mjs"
@@ -1064,6 +1074,7 @@ async function render(
         days: options.trendDays,
         options: { ...options, reportTimeMs },
         projectRows: allRows,
+        analysis,
       });
     }
     return renderTrendCombo({
@@ -1072,6 +1083,7 @@ async function render(
       trend,
       days: options.trendDays,
       options,
+      analysis,
     });
   }
   if (!options.legacyPlot) {
@@ -1159,7 +1171,17 @@ export async function run(options, { nowMs } = {}) {
   const now = new Date(hasInjectedNow ? nowMs : Date.now());
   const bounds = boundsForOptions(options, now);
   const snapshot = await loadSnapshot(options);
-  const events = filterDayEvents(snapshot, bounds);
+  const analysis = buildRangeAnalysis(
+    snapshot,
+    bounds,
+    {
+      priorBounds: options.view === "trend"
+        ? priorPeriodBounds(bounds, options.trendDays)
+        : null,
+      includeTrend: options.view === "trend" && !options.cacheRate,
+    },
+  );
+  const events = filterDayEvents(snapshot, bounds, analysis);
   const writingImage = options.view === "trend" && options.image;
   const writingEmptyCacheReport = writingImage && options.cacheRate;
   if (events.length === 0 && !writingEmptyCacheReport) {
@@ -1170,7 +1192,7 @@ export async function run(options, { nowMs } = {}) {
   }
   const allRows = options.cacheRate
     ? []
-    : aggregateProjects(snapshot, events, options);
+    : aggregateProjects(snapshot, events, options, analysis);
   const rows = allRows.slice(0, options.top);
   const outputPath = writingImage
     ? options.imageOutput ??
@@ -1203,6 +1225,7 @@ export async function run(options, { nowMs } = {}) {
       reportTimeMs,
     ),
     verifiedSourceTimeMs,
+    analysis,
   );
   if (writingImage) {
     await mkdir(dirname(outputPath), { recursive: true });
@@ -1255,7 +1278,8 @@ function shouldUseInteractive(options) {
 async function runInteractive(options) {
   const bounds = boundsForOptions(options);
   const snapshot = await loadSnapshot(options);
-  const events = filterDayEvents(snapshot, bounds);
+  const analysis = buildRangeAnalysis(snapshot, bounds, { includeTrend: false });
+  const events = filterDayEvents(snapshot, bounds, analysis);
   if (events.length === 0) {
     process.stdout.write([
       `No model-call events found for ${rangeDescription(options, bounds)} (${bounds.timeZone}).`,
@@ -1264,7 +1288,7 @@ async function runInteractive(options) {
     ].join("\n"));
     return;
   }
-  const allRows = aggregateProjects(snapshot, events, options);
+  const allRows = aggregateProjects(snapshot, events, options, analysis);
   await startInteractive({
     options,
     snapshot,

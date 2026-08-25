@@ -3,6 +3,7 @@ import { Buffer } from "node:buffer";
 import {
   buildBurnDayBins,
   buildUsageTrend,
+  priorPeriodBounds,
   weeklyQuotaObservations,
 } from "./token-ledger-trend.mjs";
 import { FAST_MODE_MULTIPLIER } from "../lib/token-ledger-rates.mjs";
@@ -219,11 +220,12 @@ function labelEvery(binCount) {
   return 3;
 }
 
-function fallbackProjectRows(snapshot, bounds) {
+function fallbackProjectRows(snapshot, bounds, events = null) {
   const startMs = bounds.start.getTime();
   const endMs = bounds.end.getTime();
   const totals = new Map();
-  for (const event of usageBucketsInRange(snapshot, startMs, endMs)) {
+  const sourceEvents = events ?? usageBucketsInRange(snapshot, startMs, endMs);
+  for (const event of sourceEvents) {
     const timestampMs = new Date(event.timestamp).getTime();
     if (!Number.isFinite(timestampMs)) continue;
     const tokens = Math.max(0, Number(event.totalTokens) || 0);
@@ -245,11 +247,13 @@ function fallbackProjectRows(snapshot, bounds) {
 export function renderTrendImage({
   snapshot,
   bounds,
-  trend = buildUsageTrend(snapshot, bounds),
+  trend: providedTrend = null,
   days = bounds.rangeDays ?? 7,
   options = {},
   projectRows = null,
+  analysis = null,
 }) {
+  const trend = providedTrend ?? analysis?.trend ?? buildUsageTrend(snapshot, bounds, { analysis });
   const width = Math.max(900, Math.min(2_400, Number(options.imageWidth) || 1_280));
   const outer = 32;
   const plotLeft = 96;
@@ -263,6 +267,7 @@ export function renderTrendImage({
   const actual = buildActualTokenBins(snapshot, bounds, days, plotWidth, {
     minBinWidth: MIN_BAR_WIDTH,
     preferDaily: true,
+    events: analysis?.currentEvents,
   });
   const burn = buildBurnDayBins(trend, bounds, { days, binSize: actual.binSize });
   const meterUsable = Boolean(trend.available && burn.totalPercent > 0);
@@ -289,19 +294,11 @@ export function renderTrendImage({
     .map(([model, value]) => ({ model, tokens: value }));
 
   // Prior-period per-model totals feed the delta chips.
-  const priorBounds = {
-    ...bounds,
-    startDateString: shiftCalendarDate(bounds.startDateString, -days),
-    endDateString: shiftCalendarDate(bounds.endDateString, -days),
-    start: zonedMidnight(
-      shiftCalendarDate(bounds.startDateString, -days),
-      bounds.timeZone,
-    ),
-    end: bounds.start,
-  };
+  const priorBounds = priorPeriodBounds(bounds, days);
   const priorTotals = buildActualTokenBins(snapshot, priorBounds, days, plotWidth, {
     minBinWidth: MIN_BAR_WIDTH,
     preferDaily: true,
+    events: analysis?.priorEvents,
   }).totals;
 
   const latestQuotaPoint = [...(trend.points ?? [])]
@@ -318,7 +315,11 @@ export function renderTrendImage({
   );
   const latestResetsAtSec = weeklyObservationsAll.at(-1)?.resetsAt ?? null;
 
-  const rows = projectRows ?? fallbackProjectRows(snapshot, bounds);
+  const rows = projectRows ?? fallbackProjectRows(
+    snapshot,
+    bounds,
+    analysis?.currentEvents,
+  );
 
   // Cache bins share the trend chart's bin size so both charts' columns stay
   // vertically aligned.
@@ -328,6 +329,7 @@ export function renderTrendImage({
     days,
     plotWidth,
     actual.binSize,
+    analysis?.currentEvents,
   );
   const hasCache = cacheData.inputTokens > 0;
   const cacheModelRows = (() => {
