@@ -11,6 +11,7 @@ import {
   MAX_SAFE_TOKEN_COUNT,
   checkedFiniteAdd,
   checkedTokenAdd,
+  scaledOutputTokens,
   tokenValue,
   usageBucketsInRange,
   usageCallCount,
@@ -399,18 +400,7 @@ function summary(events, projectRows) {
   const threadIds = new Set(
     events.flatMap((event) => usageThreadIds(event)),
   );
-  const outputTokens = events.reduce(
-    (sum, event) => {
-      if (event?.invalidTokenRecord === true) return sum;
-      const allowFractional = event.rangeAllocationEstimated === true;
-      return checkedTokenAdd(
-        sum,
-        tokenValue(event.outputTokens, { allowFractional }),
-        { allowFractional },
-      );
-    },
-    0,
-  );
+  const outputTokens = scaledOutputTokens(events, totalTokens);
   const cacheTotals = { inputTokens: 0, cachedInputTokens: 0, scale: 1 };
   for (const event of events) {
     if (event?.invalidTokenRecord === true) continue;

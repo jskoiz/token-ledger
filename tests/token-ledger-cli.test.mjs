@@ -72,9 +72,16 @@ import {
   renderTrendImage,
   writeTrendPng,
 } from "../bin/token-ledger-trend-image.mjs";
-import { buildCacheReportData } from "../bin/token-ledger-cache-data.mjs";
+import {
+  buildCacheReportData,
+  priorPeriodSummary,
+} from "../bin/token-ledger-cache-data.mjs";
 import { renderCacheReportImage } from "../bin/token-ledger-cache-image.mjs";
-import { splitUsageBucketsAtBoundaries } from "../lib/token-ledger-usage.mjs";
+import {
+  MAX_SAFE_TOKEN_COUNT,
+  scaledOutputTokens,
+  splitUsageBucketsAtBoundaries,
+} from "../lib/token-ledger-usage.mjs";
 import {
   textWidth,
   truncateText,
@@ -5904,4 +5911,81 @@ test("the report command writes the dashboard image by default", () => {
     () => parseArgs(["report", "7d", "--cache-rate", "--drain"]),
     /--cache-rate cannot be combined with --drain/,
   );
+});
+
+test("prior events stay unindexed when no prior range is requested", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+  const snapshot = {
+    events: [{
+      timestamp: "2026-08-05T12:00:00.000Z",
+      project: "prior",
+      model: "gpt-5.6-luna",
+      totalTokens: 1_500,
+      inputTokens: 1_000,
+      cachedInputTokens: 500,
+      callCount: 1,
+    }],
+    quotaObservations: [],
+  };
+  const analysis = buildRangeAnalysis(snapshot, bounds, { includeTrend: false });
+  assert.equal(analysis.priorEvents, null);
+
+  const viaAnalysis = priorPeriodSummary(
+    snapshot,
+    bounds,
+    7,
+    analysis.priorEvents ?? null,
+  );
+  const viaSnapshot = priorPeriodSummary(snapshot, bounds, 7, null);
+  assert.deepEqual(viaAnalysis, viaSnapshot);
+  assert.ok(viaSnapshot.eventCount > 0);
+  assert.notDeepEqual(viaAnalysis, priorPeriodSummary(snapshot, bounds, 7, []));
+});
+
+test("output totals scale with the shared overall total when usage saturates", () => {
+  const events = [
+    {
+      totalTokens: MAX_SAFE_TOKEN_COUNT,
+      inputTokens: MAX_SAFE_TOKEN_COUNT,
+      outputTokens: 0,
+    },
+    {
+      totalTokens: MAX_SAFE_TOKEN_COUNT,
+      inputTokens: 0,
+      outputTokens: MAX_SAFE_TOKEN_COUNT,
+    },
+  ];
+  const output = scaledOutputTokens(events, MAX_SAFE_TOKEN_COUNT);
+  assert.ok(Math.abs(output / MAX_SAFE_TOKEN_COUNT - 0.5) < 1e-9);
+
+  assert.equal(scaledOutputTokens([{ totalTokens: 100, outputTokens: 40 }], 100), 40);
+});
+
+test("cost renderer bounds the model column for oversized labels", () => {
+  const output = renderCostTerminal({
+    events: [
+      {
+        model: `custom-${"x".repeat(500_000)}`,
+        totalTokens: 1_000,
+        inputTokens: 1_000,
+        cachedInputTokens: 0,
+        outputTokens: 0,
+      },
+      {
+        model: "gpt-5.6-sol",
+        totalTokens: 101_000,
+        inputTokens: 100_000,
+        cachedInputTokens: 0,
+        outputTokens: 1_000,
+        callCount: 1,
+      },
+    ],
+    bounds: weekBounds("2026-08-23", "UTC"),
+    basis: "api-usd",
+  });
+  const longestLine = Math.max(
+    ...output.split("\n").map((line) => line.length),
+  );
+  assert.ok(longestLine < 160);
+  assert.match(output, /…/);
 });

@@ -95,3 +95,15 @@ test("duration shares advance by local calendar boundaries", () => {
   assert.deepEqual([...apiaShares.keys()], ["2011-12-29", "2011-12-31"]);
   assert.deepEqual([...apiaShares.values()], [0.5, 0.5]);
 });
+
+test("three-digit years keep four-digit calendar date strings", () => {
+  const boundary = localDateBoundary("0999-01-02", "UTC");
+  assert.equal(boundary.toISOString(), "0999-01-02T00:00:00.000Z");
+  assert.equal(localDate(boundary.getTime(), "UTC"), "0999-01-02");
+
+  const day = dayBounds("0999-01-02", "UTC");
+  assert.equal(hoursBetween(day), 24);
+
+  const trend = multiDayBounds("0999-01-02", "UTC", 1);
+  assert.equal(localDate(trend.start.getTime(), trend.timeZone), "0999-01-02");
+});

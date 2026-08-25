@@ -283,3 +283,28 @@ test("collector snapshots and trend attribution share the purchased-credit card"
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("API USD pricing prefers the preserved occurrence model", () => {
+  const usage = {
+    model: "gpt-5.6-luna",
+    rateCardModel: "gpt-5.6-sol",
+    totalTokens: 210_000,
+    inputTokens: 200_000,
+    cachedInputTokens: 50_000,
+    cacheWriteInputTokens: 25_000,
+    outputTokens: 10_000,
+    reasoningTokens: 5_000,
+    callCount: 1,
+  };
+  const attributed = apiUsdForUsage(usage);
+  const occurrence = apiUsdForUsage({
+    ...usage,
+    model: "gpt-5.6-sol",
+    rateCardModel: undefined,
+  });
+  assert.equal(attributed.amount, occurrence.amount);
+  assert.equal(attributed.amount, 0.845);
+
+  const origin = apiUsdForUsage({ ...usage, rateCardModel: undefined });
+  assert.notEqual(attributed.amount, origin.amount);
+});
