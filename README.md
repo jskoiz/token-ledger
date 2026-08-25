@@ -182,6 +182,11 @@ labels are redacted, and unrelated user-written title text may remain. Normal
 successful dashboard output is privacy-reduced, but diagnostics or explicit
 PNG writes may echo configured snapshot, Codex, or output path labels.
 
+The state database is optional attribution enrichment rather than the additive
+usage source. Missing, incompatible, locked, or corrupt state metadata does not
+prevent rollout token collection; the snapshot records its normalized status in
+`metadata.stateDatabase` without exporting the database path or raw error text.
+
 ## What is estimated
 
 Credit values use the hardcoded rate card dated **2026-08-17**. Cached input is
