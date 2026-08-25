@@ -10,6 +10,12 @@ import { FAST_MODE_MULTIPLIER } from "../lib/token-ledger-rates.mjs";
 import { buildActualTokenBins } from "./token-ledger-trend-terminal.mjs";
 import { buildCacheReportData } from "./token-ledger-cache-data.mjs";
 import {
+  checkedTokenAdd,
+  tokenValue,
+  usageBucketsInRange,
+  MAX_SAFE_TOKEN_COUNT,
+} from "../lib/token-ledger-usage.mjs";
+import {
   compact,
   escapeXml,
   fastShade,
@@ -22,7 +28,6 @@ import {
   TREND_IMAGE_MODEL_COLORS,
   FAST_MODE_LABEL_COLOR,
 } from "./token-ledger-image-primitives.mjs";
-import { usageBucketsInRange } from "../lib/token-ledger-usage.mjs";
 
 export {
   TREND_IMAGE_MODEL_COLORS,
@@ -224,16 +229,29 @@ function fallbackProjectRows(snapshot, bounds, events = null) {
   const startMs = bounds.start.getTime();
   const endMs = bounds.end.getTime();
   const totals = new Map();
+  let scale = 1;
+  let totalTokens = 0;
   const sourceEvents = events ?? usageBucketsInRange(snapshot, startMs, endMs);
   for (const event of sourceEvents) {
+    if (event?.invalidTokenRecord === true) continue;
     const timestampMs = new Date(event.timestamp).getTime();
     if (!Number.isFinite(timestampMs)) continue;
-    const tokens = Math.max(0, Number(event.totalTokens) || 0);
+    const allowFractional = event.rangeAllocationEstimated === true;
+    const tokens = tokenValue(event.totalTokens, { allowFractional });
     if (!(tokens > 0)) continue;
     const project = String(event.project || "Unlabelled activity")
       .replace(/[\t\r\n]+/g, " ")
       .trim() || "Unlabelled activity";
-    totals.set(project, (totals.get(project) ?? 0) + tokens);
+    const scaledTokens = tokens / scale;
+    totals.set(project, (totals.get(project) ?? 0) + scaledTokens);
+    totalTokens += scaledTokens;
+    const scaleFactor = Math.max(1, totalTokens / MAX_SAFE_TOKEN_COUNT);
+    if (scaleFactor === 1) continue;
+    for (const [projectName, value] of totals) {
+      totals.set(projectName, value / scaleFactor);
+    }
+    totalTokens = MAX_SAFE_TOKEN_COUNT;
+    scale *= scaleFactor;
   }
   return [...totals.entries()]
     .map(([project, totalTokens]) => ({
@@ -280,9 +298,12 @@ export function renderTrendImage({
   );
   const hasLine = Boolean(trend.available && (trend.points ?? []).length > 0);
 
-  const totalTokens = [...actual.totals.values()].reduce((sum, value) => sum + value, 0);
+  const totalTokens = [...actual.totals.values()].reduce(
+    (sum, value) => checkedTokenAdd(sum, value, { allowFractional: true }),
+    0,
+  );
   const fastTokens = [...(actual.fastTotals?.values() ?? [])].reduce(
-    (sum, value) => sum + value,
+    (sum, value) => checkedTokenAdd(sum, value, { allowFractional: true }),
     0,
   );
   const hasFast = !percentMode && fastTokens > 0;
@@ -295,11 +316,12 @@ export function renderTrendImage({
 
   // Prior-period per-model totals feed the delta chips.
   const priorBounds = priorPeriodBounds(bounds, days);
-  const priorTotals = buildActualTokenBins(snapshot, priorBounds, days, plotWidth, {
+  const priorActual = buildActualTokenBins(snapshot, priorBounds, days, plotWidth, {
     minBinWidth: MIN_BAR_WIDTH,
     preferDaily: true,
     events: analysis?.priorEvents,
-  }).totals;
+  });
+  const priorTotals = priorActual.totals;
 
   const latestQuotaPoint = [...(trend.points ?? [])]
     .filter(
@@ -337,7 +359,10 @@ export function renderTrendImage({
     const models = cacheData.models;
     if (models.length <= 4) return models;
     const rest = models.slice(3);
-    const restInput = rest.reduce((sum, model) => sum + model.inputTokens, 0);
+    const restInput = rest.reduce(
+      (sum, model) => sum + model.inputTokens,
+      0,
+    );
     const restCached = rest.reduce(
       (sum, model) => sum + model.cachedInputTokens,
       0,
@@ -346,7 +371,9 @@ export function renderTrendImage({
       model: `${rest.length} other models`,
       inputTokens: restInput,
       cachedInputTokens: restCached,
-      rate: restInput > 0 ? (restCached / restInput) * 100 : null,
+      rate: restInput > 0
+        ? (restCached / restInput) * 100
+        : null,
       muted: true,
     }];
   })();
@@ -576,7 +603,8 @@ export function renderTrendImage({
     const priorValue = priorTotals.get(model) ?? 0;
     let chip = null;
     if (priorValue >= 1_000_000) {
-      const ratio = tokens / priorValue;
+      const ratio =
+        (tokens / priorValue) * ((actual.scale ?? 1) / (priorActual.scale ?? 1));
       const delta = (ratio - 1) * 100;
       chip = {
         text: ratio >= 5
@@ -1024,9 +1052,12 @@ export function renderTrendImage({
   const segmentLabels = [];
   for (const { bin, centerX, x } of barGeometry) {
     const entries = sortedModelEntries(bin.values);
+    const segmentTotal = entries.reduce((sum, [, value]) => sum + value, 0);
+    const partitionTotal = segmentTotal > 0 ? segmentTotal : binTotalOf(bin);
+    const barHeight = (binTotalOf(bin) / maxBar) * plotHeight;
     let y = plotBottom;
     for (const [model, value] of entries) {
-      const segmentHeight = (value / maxBar) * plotHeight;
+      const segmentHeight = (value / partitionTotal) * barHeight;
       y -= segmentHeight;
       if (segmentHeight <= 0.4) continue;
       const baseColor = styleForModel(model);
@@ -1683,7 +1714,12 @@ export function renderTrendImage({
   }));
   const topRows = rows.slice(0, 3);
   const restRows = rows.slice(3);
-  const topTokens = topRows.reduce((sum, row) => sum + row.totalTokens, 0);
+  const topTokens = topRows.reduce(
+    (sum, row) => checkedTokenAdd(sum, row.totalTokens, {
+      allowFractional: true,
+    }),
+    0,
+  );
   const topShare = totalTokens > 0
     ? percent((topTokens / totalTokens) * 100)
     : "—";
@@ -1718,7 +1754,12 @@ export function renderTrendImage({
       name: restRows.length === 1
         ? (restRows[0].displayProject ?? restRows[0].project)
         : `${restRows.length} other projects`,
-      tokens: restRows.reduce((sum, row) => sum + row.totalTokens, 0),
+      tokens: restRows.reduce(
+        (sum, row) => checkedTokenAdd(sum, row.totalTokens, {
+          allowFractional: true,
+        }),
+        0,
+      ),
       fill: COLORS.remainderBar,
       muted: true,
     });

@@ -28,6 +28,12 @@ import {
 } from "../lib/token-ledger-snapshot.mjs";
 import {
   SNAPSHOT_SCHEMA_VERSION,
+  checkedFiniteAdd,
+  checkedTokenAdd,
+  isNonNegativeFiniteValue,
+  nonNegativeFiniteValue,
+  tokenValue,
+  MAX_SAFE_TOKEN_COUNT,
   usageBuckets,
   usageBucketsInRange,
   usageCallCount,
@@ -57,6 +63,38 @@ const MODEL_COLORS = {
   "gpt-5.4": TERMINAL_MODEL_COLORS.gpt,
   other: TERMINAL_MODEL_COLORS.other,
 };
+
+function createSharedTokenScale() {
+  return {
+    scale: 1,
+    totalTokens: 0,
+    targets: new Set(),
+  };
+}
+
+function addSharedTokenContribution(state, contribution, targets) {
+  const tokens = tokenValue(contribution, { allowFractional: true });
+  if (!(tokens > 0)) return;
+  const scaledTokens = tokens / state.scale;
+  for (const target of targets) {
+    state.targets.add(target);
+    target.totalTokens += scaledTokens;
+  }
+  state.totalTokens += scaledTokens;
+  const scaleFactor = Math.max(
+    1,
+    state.totalTokens / MAX_SAFE_TOKEN_COUNT,
+  );
+  if (scaleFactor === 1) return;
+  for (const target of state.targets) {
+    target.totalTokens /= scaleFactor;
+    if (target.totalTokens >= MAX_SAFE_TOKEN_COUNT - 2) {
+      target.totalTokens = MAX_SAFE_TOKEN_COUNT;
+    }
+  }
+  state.totalTokens = MAX_SAFE_TOKEN_COUNT;
+  state.scale *= scaleFactor;
+}
 
 export function usage() {
   return `Token Ledger
@@ -644,8 +682,11 @@ export function aggregateProjects(snapshot, events, options = {}, analysis = nul
     ? new Set()
     : oneOffProjects(snapshot, analysis?.allEvents);
   const grouped = new Map();
+  const sharedTokenScale = createSharedTokenScale();
 
   for (const event of events) {
+    if (event?.invalidTokenRecord === true) continue;
+    const allowFractional = event?.rangeAllocationEstimated === true;
     const rawProject = cleanLabel(event.project, "Unlabelled activity");
     const project =
       !options.rawProjects && singletonProjects.has(rawProject)
@@ -665,15 +706,33 @@ export function aggregateProjects(snapshot, events, options = {}, analysis = nul
         knownCreditTokens: 0,
         models: new Map(),
       };
-    row.totalTokens += Number(event.totalTokens) || 0;
-    row.outputTokens += Number(event.outputTokens) || 0;
-    row.reasoningTokens += Number(event.reasoningTokens) || 0;
-    row.toolCalls += Number(event.toolCalls) || 0;
-    row.events += usageCallCount(event);
+    row.outputTokens = checkedTokenAdd(
+      row.outputTokens,
+      tokenValue(event.outputTokens, { allowFractional }),
+      { allowFractional },
+    );
+    row.reasoningTokens = checkedTokenAdd(
+      row.reasoningTokens,
+      tokenValue(event.reasoningTokens, { allowFractional }),
+      { allowFractional },
+    );
+    row.toolCalls = checkedTokenAdd(
+      row.toolCalls,
+      tokenValue(event.toolCalls, { allowFractional }),
+      { allowFractional },
+    );
+    row.events = checkedTokenAdd(row.events, usageCallCount(event), {
+      allowFractional,
+    });
     for (const threadId of usageThreadIds(event)) row.threadIds.add(threadId);
-    if (event.rateCardCredits !== null && Number.isFinite(Number(event.rateCardCredits))) {
-      row.rateCardCredits += Number(event.rateCardCredits);
-      row.knownCreditTokens += Number(event.totalTokens) || 0;
+    const credits = event.rateCardCredits;
+    if (isNonNegativeFiniteValue(credits)) {
+      row.rateCardCredits = checkedFiniteAdd(row.rateCardCredits, credits);
+      row.knownCreditTokens = checkedTokenAdd(
+        row.knownCreditTokens,
+        tokenValue(event.totalTokens, { allowFractional }),
+        { allowFractional },
+      );
     }
 
     const model = modelLabel(event.model);
@@ -683,10 +742,19 @@ export function aggregateProjects(snapshot, events, options = {}, analysis = nul
       events: 0,
       rateCardCredits: 0,
     };
-    modelRow.totalTokens += Number(event.totalTokens) || 0;
-    modelRow.events += usageCallCount(event);
-    if (event.rateCardCredits !== null && Number.isFinite(Number(event.rateCardCredits))) {
-      modelRow.rateCardCredits += Number(event.rateCardCredits);
+    addSharedTokenContribution(
+      sharedTokenScale,
+      tokenValue(event.totalTokens, { allowFractional }),
+      [row, modelRow],
+    );
+    modelRow.events = checkedTokenAdd(modelRow.events, usageCallCount(event), {
+      allowFractional,
+    });
+    if (isNonNegativeFiniteValue(credits)) {
+      modelRow.rateCardCredits = checkedFiniteAdd(
+        modelRow.rateCardCredits,
+        credits,
+      );
     }
     row.models.set(model, modelRow);
     grouped.set(project, row);
@@ -708,19 +776,38 @@ export function aggregateProjects(snapshot, events, options = {}, analysis = nul
     });
 }
 
-function totalSummary(events) {
-  return events.reduce(
+function totalSummary(events, projectRows) {
+  const summary = events.reduce(
     (summary, event) => {
-      summary.totalTokens += Number(event.totalTokens) || 0;
-      summary.outputTokens += Number(event.outputTokens) || 0;
-      summary.toolCalls += Number(event.toolCalls) || 0;
-      summary.calls += usageCallCount(event);
+      if (event?.invalidTokenRecord === true) return summary;
+      const allowFractional = event?.rangeAllocationEstimated === true;
+      summary.outputTokens = checkedTokenAdd(
+        summary.outputTokens,
+        tokenValue(event.outputTokens, { allowFractional }),
+        { allowFractional },
+      );
+      summary.toolCalls = checkedTokenAdd(
+        summary.toolCalls,
+        tokenValue(event.toolCalls, { allowFractional }),
+        { allowFractional },
+      );
+      summary.calls = checkedTokenAdd(summary.calls, usageCallCount(event), {
+        allowFractional,
+      });
       for (const threadId of usageThreadIds(event)) {
         summary.threadIds.add(threadId);
       }
-      if (event.rateCardCredits !== null && Number.isFinite(Number(event.rateCardCredits))) {
-        summary.rateCardCredits += Number(event.rateCardCredits);
-        summary.knownCreditTokens += Number(event.totalTokens) || 0;
+      const credits = event.rateCardCredits;
+      if (isNonNegativeFiniteValue(credits)) {
+        summary.rateCardCredits = checkedFiniteAdd(
+          summary.rateCardCredits,
+          nonNegativeFiniteValue(credits),
+        );
+        summary.knownCreditTokens = checkedTokenAdd(
+          summary.knownCreditTokens,
+          tokenValue(event.totalTokens, { allowFractional }),
+          { allowFractional },
+        );
       }
       return summary;
     },
@@ -734,6 +821,11 @@ function totalSummary(events) {
       threadIds: new Set(),
     },
   );
+  summary.totalTokens = projectRows.reduce(
+    (sum, row) => sum + row.totalTokens,
+    0,
+  );
+  return summary;
 }
 
 function compact(value, digits = 2) {
@@ -1098,7 +1190,7 @@ async function render(
     });
   }
   const enabled = !options.plain && !process.env.NO_COLOR && Boolean(process.stdout.isTTY);
-  const summary = totalSummary(events);
+  const summary = totalSummary(events, allRows);
   const totalTokens = summary.totalTokens;
   const dateLabel = options.range === "rolling24h"
     ? "last 24 hours"

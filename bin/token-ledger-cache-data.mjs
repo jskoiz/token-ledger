@@ -8,6 +8,9 @@ import {
 import { chooseBinSize } from "./token-ledger-image-layout.mjs";
 import { shiftCalendarDate } from "./token-ledger-image-primitives.mjs";
 import {
+  MAX_SAFE_TOKEN_COUNT,
+  checkedTokenAdd,
+  checkedTokenPartitionAdd,
   splitUsageBucketsAtBoundaries,
   usageBuckets,
   usageBucketsInRange,
@@ -108,48 +111,6 @@ function scaleToFiniteSum(values) {
     : 1;
 }
 
-function scaleInputTokens(target, factor) {
-  target.inputTokens *= factor;
-  target.cachedInputTokens *= factor;
-  target.uncachedInputTokens *= factor;
-}
-
-function scaleAggregateTokens(target, factor) {
-  if (Number.isFinite(target.totalTokens)) target.totalTokens *= factor;
-  if (Number.isFinite(target.detailedTokens)) {
-    target.detailedTokens *= factor;
-  }
-  scaleInputTokens(target, factor);
-}
-
-function scaleBreakdown(breakdown, factor) {
-  return {
-    ...breakdown,
-    totalTokens: breakdown.totalTokens * factor,
-    inputTokens: breakdown.inputTokens * factor,
-    cachedInputTokens: breakdown.cachedInputTokens * factor,
-    uncachedInputTokens: breakdown.uncachedInputTokens * factor,
-  };
-}
-
-function tokenAdditionRatio(target, totalContribution, inputContribution) {
-  const totalRatio = Number.isFinite(target.totalTokens)
-    ? target.totalTokens / MAX_FINITE_NUMBER +
-      totalContribution / MAX_FINITE_NUMBER
-    : 0;
-  const inputRatio = target.inputTokens / MAX_FINITE_NUMBER +
-    inputContribution / MAX_FINITE_NUMBER;
-  return Math.max(totalRatio, inputRatio);
-}
-
-function tokenAdditionOverflows(target, totalContribution, inputContribution) {
-  return (
-    (Number.isFinite(target.totalTokens) &&
-      !Number.isFinite(target.totalTokens + totalContribution)) ||
-    !Number.isFinite(target.inputTokens + inputContribution)
-  );
-}
-
 function safeModelLabel(value) {
   const model = primitiveString(value);
   return model === null ? "Unknown" : trendModelLabel(model);
@@ -232,32 +193,101 @@ function emptyAggregate() {
     inputEventCount: 0,
     totalTokens: 0,
     detailedTokens: 0,
+    unknownBreakdownTokens: 0,
     inputTokens: 0,
     cachedInputTokens: 0,
     uncachedInputTokens: 0,
   };
 }
 
-function addInput(target, breakdown, inputCallCount) {
-  const factor = scaleToFiniteSum([
-    target.inputTokens,
-    breakdown.inputTokens,
-  ]);
-  if (factor < 1) {
-    scaleInputTokens(target, factor);
-    breakdown = scaleBreakdown(breakdown, factor);
-  }
-  target.inputTokens += breakdown.inputTokens;
-  target.cachedInputTokens += breakdown.cachedInputTokens;
-  target.cachedInputTokens = Math.min(
-    target.inputTokens,
-    target.cachedInputTokens,
+const INPUT_SCALE = Symbol("cacheInputScale");
+
+function inputScale(target) {
+  return Number.isFinite(target[INPUT_SCALE]) && target[INPUT_SCALE] >= 1
+    ? target[INPUT_SCALE]
+    : 1;
+}
+
+function setInputScale(target, scale) {
+  Object.defineProperty(target, INPUT_SCALE, {
+    configurable: true,
+    enumerable: false,
+    value: scale,
+    writable: true,
+  });
+}
+
+function addInputTotals(target, inputTokens, cachedInputTokens, sourceScale = 1) {
+  const targetScale = inputScale(target);
+  const normalizedSourceScale = Number.isFinite(sourceScale) && sourceScale >= 1
+    ? sourceScale
+    : 1;
+  const commonScale = Math.max(targetScale, normalizedSourceScale);
+  const targetRatio = targetScale / commonScale;
+  const sourceRatio = normalizedSourceScale / commonScale;
+  const input = Number.isFinite(inputTokens) && inputTokens >= 0
+    ? inputTokens
+    : 0;
+  const cached = Math.min(
+    input,
+    Number.isFinite(cachedInputTokens) && cachedInputTokens >= 0
+      ? cachedInputTokens
+      : 0,
   );
+  const nextInput = target.inputTokens * targetRatio + input * sourceRatio;
+  const nextCached =
+    target.cachedInputTokens * targetRatio + cached * sourceRatio;
+  const scaleFactor = Math.max(
+    1,
+    nextInput / MAX_SAFE_TOKEN_COUNT,
+    nextCached / MAX_SAFE_TOKEN_COUNT,
+  );
+  target.inputTokens = nextInput / scaleFactor;
+  target.cachedInputTokens = nextCached / scaleFactor;
   target.uncachedInputTokens = Math.max(
     0,
     target.inputTokens - target.cachedInputTokens,
   );
-  target.inputEventCount += inputCallCount;
+  setInputScale(target, commonScale * scaleFactor);
+}
+
+function alignInputScale(target, commonScale) {
+  const currentScale = inputScale(target);
+  if (currentScale === commonScale) return;
+  const ratio = currentScale / commonScale;
+  target.inputTokens *= ratio;
+  target.cachedInputTokens *= ratio;
+  target.uncachedInputTokens = Math.max(
+    0,
+    target.inputTokens - target.cachedInputTokens,
+  );
+  setInputScale(target, commonScale);
+}
+
+function boundedTokenValue(value) {
+  return Number.isFinite(value) && value >= 0
+    ? Math.min(value, MAX_SAFE_TOKEN_COUNT)
+    : 0;
+}
+
+function addBoundedTokens(current, contribution) {
+  const sum = boundedTokenValue(current) + boundedTokenValue(contribution);
+  return Number.isFinite(sum) && sum <= MAX_SAFE_TOKEN_COUNT
+    ? sum
+    : MAX_SAFE_TOKEN_COUNT;
+}
+
+function addInput(target, breakdown, inputCallCount) {
+  addInputTotals(
+    target,
+    breakdown.inputTokens,
+    breakdown.cachedInputTokens,
+  );
+  target.inputEventCount = checkedTokenAdd(
+    target.inputEventCount,
+    inputCallCount,
+    { allowFractional: true },
+  );
 }
 
 function finalizeAggregate(aggregate) {
@@ -266,16 +296,20 @@ function finalizeAggregate(aggregate) {
     aggregate.inputTokens - aggregate.cachedInputTokens,
   );
   const measurementCoveragePercent = aggregate.totalTokens > 0
-    ? (aggregate.detailedTokens / aggregate.totalTokens) * 100
+    ? (aggregate.detailedTokens /
+        (aggregate.detailedTokens + aggregate.unknownBreakdownTokens)) *
+      100
     : aggregate.eventCount > 0
       ? (aggregate.detailedEventCount / aggregate.eventCount) * 100
       : null;
-  return {
+  const finalized = {
     ...aggregate,
     uncachedInputTokens,
     rate: rateFor(aggregate.inputTokens, aggregate.cachedInputTokens),
     measurementCoveragePercent,
   };
+  setInputScale(finalized, inputScale(aggregate));
+  return finalized;
 }
 
 function accumulateRange(
@@ -289,8 +323,6 @@ function accumulateRange(
   const endMs = bounds.end.getTime();
   const totals = emptyAggregate();
   const modelTotals = new Map();
-  // One shared scale keeps rates, shares, and coverage proportional everywhere.
-  const tokenScale = { value: 1 };
   const dateFormatter = bins === null
     ? null
     : localDateFormatter(bounds.timeZone);
@@ -317,63 +349,53 @@ function accumulateRange(
     ) {
       continue;
     }
-    let { breakdown } = parsed;
+    const { breakdown } = parsed;
     const dateString = dateFormatter === null
       ? null
       : localDateString(parsed.timestampMs, dateFormatter);
     const binIndex = dateString === null ? null : dateIndexByString.get(dateString);
     const bin = binIndex === undefined || binIndex === null ? null : bins[binIndex];
-    const existingModelAggregate = breakdown.detailed && breakdown.inputTokens > 0
-      ? modelTotals.get(parsed.model)
-      : null;
-    const targets = [totals];
-    if (bin) targets.push(bin);
-    if (existingModelAggregate) targets.push(existingModelAggregate);
-    const scale = tokenScale.value;
-    const inputContribution = breakdown.detailed ? breakdown.inputTokens : 0;
-    const totalContribution = breakdown.totalTokens * scale;
-    const scaledInputContribution = inputContribution * scale;
-    const overflowRatio = Math.max(
-      ...targets.map((target) =>
-        tokenAdditionRatio(
-          target,
-          totalContribution,
-          scaledInputContribution,
-        )),
-    );
-    const directOverflow = targets.some((target) =>
-      tokenAdditionOverflows(
-        target,
-        totalContribution,
-        scaledInputContribution,
-      ));
-    if (overflowRatio > 1 || directOverflow) {
-      const factor = SCALE_HEADROOM / Math.max(1, overflowRatio);
-      scaleAggregateTokens(totals, factor);
-      for (const bin of bins ?? []) scaleAggregateTokens(bin, factor);
-      for (const model of modelTotals.values()) {
-        scaleAggregateTokens(model, factor);
-      }
-      tokenScale.value *= factor;
-    }
-    breakdown = scaleBreakdown(breakdown, tokenScale.value);
-
     const callCount = usageCallCount(event);
     const detailedCallCount = usageDetailedCallCount(event);
     const inputCallCount = usageInputCallCount(event);
-    totals.eventCount += callCount;
-    totals.totalTokens += breakdown.totalTokens;
+    totals.eventCount = checkedTokenAdd(totals.eventCount, callCount, {
+      allowFractional: true,
+    });
+    totals.totalTokens = addBoundedTokens(
+      totals.totalTokens,
+      breakdown.totalTokens,
+    );
     if (bin) {
-      bin.eventCount += callCount;
-      bin.totalTokens += breakdown.totalTokens;
+      bin.eventCount = checkedTokenAdd(bin.eventCount, callCount, {
+        allowFractional: true,
+      });
+      bin.totalTokens = addBoundedTokens(bin.totalTokens, breakdown.totalTokens);
+    }
+    checkedTokenPartitionAdd(
+      totals,
+      boundedTokenValue(breakdown.totalTokens),
+      { detailed: breakdown.detailed },
+    );
+    if (bin) {
+      checkedTokenPartitionAdd(
+        bin,
+        boundedTokenValue(breakdown.totalTokens),
+        { detailed: breakdown.detailed },
+      );
     }
     if (!breakdown.detailed) continue;
 
-    totals.detailedEventCount += detailedCallCount;
-    totals.detailedTokens += breakdown.totalTokens;
+    totals.detailedEventCount = checkedTokenAdd(
+      totals.detailedEventCount,
+      detailedCallCount,
+      { allowFractional: true },
+    );
     if (bin) {
-      bin.detailedEventCount += detailedCallCount;
-      bin.detailedTokens += breakdown.totalTokens;
+      bin.detailedEventCount = checkedTokenAdd(
+        bin.detailedEventCount,
+        detailedCallCount,
+        { allowFractional: true },
+      );
     }
     if (!(breakdown.inputTokens > 0)) continue;
 
@@ -389,6 +411,19 @@ function accumulateRange(
     };
     addInput(modelAggregate, breakdown, inputCallCount);
     modelTotals.set(model, modelAggregate);
+  }
+
+  const commonScale = Math.max(
+    inputScale(totals),
+    ...[...modelTotals.values()].map(inputScale),
+    ...(bins ?? []).map(inputScale),
+  );
+  alignInputScale(totals, commonScale);
+  for (const model of modelTotals.values()) {
+    alignInputScale(model, commonScale);
+  }
+  for (const bin of bins ?? []) {
+    alignInputScale(bin, commonScale);
   }
 
   const summary = finalizeAggregate(totals);

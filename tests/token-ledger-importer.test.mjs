@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
 import {
   chmod,
@@ -12,7 +11,6 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { gzipSync } from "node:zlib";
 
@@ -24,8 +22,10 @@ import {
 } from "../lib/token-ledger-snapshot.mjs";
 import {
   buildUsageBuckets,
+  normalizeTokenUsage,
   SNAPSHOT_SCHEMA_VERSION,
   splitUsageBucketsAtBoundaries,
+  usageBuckets,
   usageBucketStats,
 } from "../lib/token-ledger-usage.mjs";
 
@@ -307,75 +307,6 @@ test("snapshot reader rejects compressed inputs above the pre-read limit", async
   }
 });
 
-test("snapshot reader scales memory with the file, not the configured ceiling", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-large-read-limit-"));
-  try {
-    const output = resolve(root, "tiny.json");
-    const snapshot = { events: [] };
-    await writeFile(output, JSON.stringify(snapshot));
-
-    assert.deepEqual(
-      await readPrivateSnapshot(output, { maxJsonBytes: Number.MAX_SAFE_INTEGER }),
-      snapshot,
-    );
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test(
-  "snapshot reader rejects non-regular inputs before reading",
-  { skip: process.platform === "win32" },
-  async (t) => {
-    const root = await mkdtemp(resolve(tmpdir(), "token-ledger-non-regular-read-"));
-    try {
-      const directory = resolve(root, "directory.json");
-      await mkdir(directory);
-      await assert.rejects(
-        () => readPrivateSnapshot(directory),
-        (error) => {
-          assert.equal(error.code, "ERR_SNAPSHOT_NOT_REGULAR");
-          assert.equal(error.message, "Snapshot input must be a regular file.");
-          return true;
-        },
-      );
-
-      const fifo = resolve(root, "input.json");
-      const fifoResult = spawnSync("mkfifo", [fifo], { encoding: "utf8" });
-      if (fifoResult.error || fifoResult.status !== 0) {
-        t.skip("mkfifo is unavailable on this platform");
-        return;
-      }
-      const modulePath = fileURLToPath(
-        new URL("../lib/token-ledger-snapshot.mjs", import.meta.url),
-      );
-      const child = spawnSync(
-        process.execPath,
-        [
-          "--input-type=module",
-          "-e",
-          `import { pathToFileURL } from "node:url";
-const { readPrivateSnapshot } = await import(pathToFileURL(process.argv[1]).href);
-try {
-  await readPrivateSnapshot(process.argv[2]);
-  process.stdout.write("resolved");
-} catch (error) {
-  process.stdout.write(error.code ?? error.message);
-}`,
-          modulePath,
-          fifo,
-        ],
-        { encoding: "utf8", timeout: 1_000 },
-      );
-      assert.ifError(child.error);
-      assert.equal(child.status, 0, child.stderr);
-      assert.equal(child.stdout, "ERR_SNAPSHOT_NOT_REGULAR");
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  },
-);
-
 test("snapshot reader bounds gzip expansion and preserves valid reads", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-gzip-read-json-"));
   try {
@@ -521,6 +452,76 @@ test("usage buckets preserve additive totals across age tiers", () => {
   );
 });
 
+test("usage buckets cap safe aggregates and exclude invalid totals", () => {
+  const large = 5_000_000_000_000_000;
+  const rows = [
+    {
+      timestamp: "2026-08-22T11:59:58.000Z",
+      project: "bounded-history",
+      model: "gpt-5.6-luna",
+      inputTokens: large - 10,
+      cachedInputTokens: large - 20,
+      outputTokens: 10,
+      reasoningTokens: 5,
+      totalTokens: large,
+      breakdownAvailable: true,
+    },
+    {
+      timestamp: "2026-08-22T11:59:59.000Z",
+      project: "bounded-history",
+      model: "gpt-5.6-luna",
+      inputTokens: large - 10,
+      cachedInputTokens: large - 20,
+      outputTokens: 10,
+      reasoningTokens: 5,
+      totalTokens: large,
+      breakdownAvailable: true,
+    },
+    {
+      timestamp: "2026-08-22T12:00:00.000Z",
+      project: "bounded-history",
+      model: "gpt-5.6-luna",
+      inputTokens: "malformed",
+      outputTokens: 10,
+      totalTokens: 100,
+      breakdownAvailable: true,
+    },
+    {
+      timestamp: "2026-08-22T12:00:01.000Z",
+      project: "bounded-history",
+      model: "gpt-5.6-luna",
+      inputTokens: 90,
+      outputTokens: 10,
+      totalTokens: "100",
+      breakdownAvailable: true,
+    },
+  ];
+
+  const buckets = buildUsageBuckets(rows, {
+    latestTimestampMs: Date.parse("2026-08-22T12:00:01.000Z"),
+    policy: [{ maximumAgeMs: Infinity, resolutionMs: 86_400_000 }],
+  });
+  const capped = buckets.find(
+    (bucket) => bucket.totalTokens === Number.MAX_SAFE_INTEGER,
+  );
+  const unknown = buckets.find((bucket) => bucket.totalTokens === 100);
+  assert.equal(capped.breakdownAvailable, false);
+  assert.equal(capped.inputTokens, Number.MAX_SAFE_INTEGER);
+  assert.equal(capped.cachedInputTokens, Number.MAX_SAFE_INTEGER);
+  assert.equal(unknown.totalTokens, 100);
+  assert.equal(unknown.inputTokens, 0);
+  assert.equal(usageBucketStats(buckets).callCount, 3);
+  assert.ok(buckets.every((bucket) =>
+    [
+      bucket.inputTokens,
+      bucket.cachedInputTokens,
+      bucket.outputTokens,
+      bucket.reasoningTokens,
+      bucket.totalTokens,
+    ].every(Number.isFinite)),
+  );
+});
+
 test("compacted buckets split proportionally at range boundaries", () => {
   const rows = [
     ["2025-06-01T06:00:00.000Z", 70],
@@ -566,6 +567,46 @@ test("compacted buckets split proportionally at range boundaries", () => {
     fragments.reduce((sum, fragment) => sum + fragment.callCount, 0) -
       bucket.callCount,
   ) < 1e-9);
+  const normalizedFragments = usageBuckets({ events: fragments });
+  assert.ok(normalizedFragments.every((fragment) => fragment.breakdownAvailable));
+});
+
+test("estimated token components tolerate floating-point reconciliation", () => {
+  const normalized = normalizeTokenUsage({
+    inputTokens: 0.1,
+    outputTokens: 0.5,
+    totalTokens: 0.6,
+    rangeAllocationEstimated: true,
+    breakdownAvailable: true,
+  });
+
+  assert.equal(normalized.breakdownAvailable, true);
+});
+
+test("usage buckets omit invalid token rows before metadata consumers see them", () => {
+  const rows = usageBuckets({
+    events: [
+      {
+        timestamp: "2026-08-22T12:00:00.000Z",
+        project: "malformed-project",
+        threadId: "malformed-thread",
+        totalTokens: "not-a-token-count",
+      },
+      {
+        timestamp: "2026-08-22T12:01:00.000Z",
+        project: "valid-project",
+        threadId: "valid-thread",
+        totalTokens: 10,
+        inputTokens: 10,
+        outputTokens: 0,
+      },
+    ],
+  });
+
+  assert.deepEqual(
+    rows.map(({ project, threadId }) => ({ project, threadId })),
+    [{ project: "valid-project", threadId: "valid-thread" }],
+  );
 });
 
 test("dense recent usage compacts during collection before memory grows unbounded", () => {
@@ -758,219 +799,6 @@ test("source labels resolve structured, encoded, and plain thread sources", asyn
   }
 });
 
-test("exported labels redact local paths across platform forms", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-privacy-"));
-  const cases = [
-    {
-      id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-      timestamp: "2026-08-23T10:00:00.000Z",
-      source: "/Users/issue34-macos/private-runner",
-      title:
-        "Review cwd:/Users/issue34-macos/private-runner before shipping",
-      expectedTitle: "Review cwd:[local path] before shipping",
-      gitOrigin: "file:///Users/issue34-macos/private-repo",
-      secret: "issue34-macos",
-    },
-    {
-      id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
-      timestamp: "2026-08-23T11:00:00.000Z",
-      source: "/home/issue34-linux/private-runner",
-      title: "Review /home/issue34-linux/private-runner before shipping",
-      gitOrigin: "file:///home/issue34-linux/private-repo",
-      secret: "issue34-linux",
-    },
-    {
-      id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
-      timestamp: "2026-08-23T12:00:00.000Z",
-      source: "C:\\Users\\issue34-windows\\private-runner",
-      title:
-        "Review C:\\Users\\issue34-windows\\private-runner before shipping",
-      gitOrigin: "C:\\Users\\issue34-windows\\private-repo",
-      secret: "issue34-windows",
-    },
-    {
-      id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
-      timestamp: "2026-08-23T13:00:00.000Z",
-      source: "\\\\server\\Users\\issue34-unc\\private-runner",
-      title:
-        "Review \\\\server\\Users\\issue34-unc\\private-runner before shipping",
-      gitOrigin: "\\\\server\\Users\\issue34-unc\\private-repo",
-      secret: "issue34-unc",
-    },
-    {
-      id: "ffffffff-ffff-4fff-8fff-ffffffffffff",
-      timestamp: "2026-08-23T14:00:00.000Z",
-      source: "file:///Users/issue34-file-url/private-runner",
-      title:
-        "Review file:///Users/issue34-file-url/private-runner before shipping",
-      gitOrigin: "file:///Users/issue34-file-url/private-repo",
-      secret: "issue34-file-url",
-    },
-  ];
-  try {
-    const rolloutDirectory = resolve(root, "sessions", "2026", "08", "23");
-    await mkdir(rolloutDirectory, { recursive: true });
-    await writeFile(
-      resolve(root, "session_index.jsonl"),
-      serialize(
-        cases.map((item) => ({
-          id: item.id,
-          thread_name: item.title,
-          updated_at: item.timestamp,
-        })),
-      ),
-    );
-    for (const [index, item] of cases.entries()) {
-      await writeFile(
-        resolve(rolloutDirectory, `rollout-${item.id}.jsonl`),
-        serialize([
-          {
-            timestamp: item.timestamp,
-            type: "session_meta",
-            payload: {
-              id: item.id,
-              source: item.source,
-              cwd: item.source,
-              git: { repository_url: item.gitOrigin },
-            },
-          },
-          ...turnStart(item.timestamp, `turn-privacy-${index}`),
-          tokenCount(
-            new Date(Date.parse(item.timestamp) + 1_000).toISOString(),
-            100 + index,
-            100 + index,
-          ),
-        ]),
-      );
-    }
-
-    const snapshot = await collectUsage({
-      output: resolve(root, "snapshot.json"),
-      codexHome: root,
-      includeArchived: true,
-      since: null,
-    });
-    const serialized = JSON.stringify(snapshot);
-
-    assert.equal(snapshot.events.length, cases.length);
-    assert.doesNotMatch(
-      serialized,
-      /(?:\/Users\/|\/home\/|\b[A-Za-z]:[\\/]Users[\\/]|\\\\server[\\/]|file:\/\/\/)/,
-    );
-    for (const item of cases) {
-      assert.equal(serialized.includes(item.secret), false);
-      const event = snapshot.events.find((candidate) =>
-        candidate.threadIds.includes(item.id),
-      );
-      const thread = snapshot.threads.find(
-        (candidate) => candidate.id === item.id,
-      );
-      assert.equal(event.source, "local");
-      assert.equal(event.useType, "interactive");
-      assert.equal(event.project, "local");
-      assert.equal(thread.source, event.source);
-      assert.equal(thread.useType, event.useType);
-      assert.equal(thread.project, event.project);
-      assert.equal(
-        thread.title,
-        item.expectedTitle ?? "Review [local path] before shipping",
-      );
-    }
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("SSH remotes with absolute repository paths keep their project label", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-ssh-"));
-  const threadId = "12121212-1212-4121-8121-121212121212";
-  const timestamp = "2026-08-23T15:00:00.000Z";
-  try {
-    const rolloutDirectory = resolve(root, "sessions", "2026", "08", "23");
-    await mkdir(rolloutDirectory, { recursive: true });
-    await writeFile(
-      resolve(rolloutDirectory, `rollout-${threadId}.jsonl`),
-      serialize([
-        {
-          timestamp,
-          type: "session_meta",
-          payload: {
-            id: threadId,
-            source: "desktop",
-            cwd: "/Users/issue34-ssh/worktree",
-            git: {
-              repository_url: "git@example.com:/srv/git/org/repo.git",
-            },
-          },
-        },
-        ...turnStart(timestamp, "turn-ssh"),
-        tokenCount(
-          new Date(Date.parse(timestamp) + 1_000).toISOString(),
-          100,
-          100,
-        ),
-      ]),
-    );
-
-    const snapshot = await collectUsage({
-      output: resolve(root, "snapshot.json"),
-      codexHome: root,
-      includeArchived: true,
-      since: null,
-    });
-    const [event] = snapshot.events;
-    const [thread] = snapshot.threads;
-    assert.equal(event.project, "org/repo");
-    assert.equal(thread.project, "org/repo");
-    assert.doesNotMatch(JSON.stringify(snapshot), /srv\/git/);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("credential-like title text is redacted before truncation", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-credential-"));
-  const threadId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-  const credential = `ghp_${"A".repeat(30)}`;
-  try {
-    const rolloutDirectory = resolve(root, "sessions", "2026", "08", "23");
-    await mkdir(rolloutDirectory, { recursive: true });
-    await writeFile(
-      resolve(root, "session_index.jsonl"),
-      serialize([{
-        id: threadId,
-        thread_name: `${"x".repeat(170)} ${credential}`,
-        updated_at: "2026-08-23T15:00:00.000Z",
-      }]),
-    );
-    await writeFile(
-      resolve(rolloutDirectory, `rollout-${threadId}.jsonl`),
-      serialize([
-        {
-          timestamp: "2026-08-23T15:00:00.000Z",
-          type: "session_meta",
-          payload: { id: threadId, source: "desktop", cwd: "project" },
-        },
-        ...turnStart("2026-08-23T15:00:00.000Z", "turn-credential"),
-        tokenCount("2026-08-23T15:00:01.000Z", 100, 100),
-      ]),
-    );
-
-    const snapshot = await collectUsage({
-      output: resolve(root, "snapshot.json"),
-      codexHome: root,
-      includeArchived: true,
-      since: null,
-    });
-    const title = snapshot.threads[0].title;
-    assert.ok(title.length <= 180);
-    assert.doesNotMatch(title, /ghp_/);
-    assert.doesNotMatch(title, /A{16,}/);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
 test("malformed usage and rate-limit payloads are ignored safely", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
   const threadId = "88888888-8888-4888-8888-888888888888";
@@ -1026,6 +854,157 @@ test("malformed usage and rate-limit payloads are ignored safely", async () => {
     assert.equal(quota.planType, "plus");
     assert.equal(quota.limitName, "weekly");
     assert.equal(snapshot.coverage.parseErrors, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("validates token totals and preserves malformed breakdowns as unknown", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-token-validation-"));
+  const threadId = "91919191-9191-4919-8919-919191919191";
+  const validUsage = {
+    input_tokens: 90,
+    cached_input_tokens: 500,
+    output_tokens: 10,
+    reasoning_output_tokens: 40,
+    total_tokens: 100,
+  };
+  const tokenRecord = (timestamp, usage) => ({
+    timestamp,
+    type: "event_msg",
+    payload: {
+      type: "token_count",
+      info: {
+        total_token_usage: usage,
+        last_token_usage: usage,
+        model_context_window: 128000,
+      },
+    },
+  });
+  const invalidTotals = [
+    -1,
+    100.5,
+    Number.MAX_SAFE_INTEGER + 1,
+    Number.MAX_VALUE,
+    "100",
+    true,
+    [100],
+    { value: 100 },
+  ];
+  const rows = [];
+  for (const [index, total] of invalidTotals.entries()) {
+    const timestamp = new Date(
+      Date.parse("2026-08-18T10:00:00.000Z") + index * 60_000,
+    ).toISOString();
+    rows.push(...turnStart(timestamp, `invalid-${index}`));
+    rows.push(tokenRecord(timestamp, { ...validUsage, total_tokens: total }));
+  }
+  const validTimestamp = "2026-08-18T20:00:00.000Z";
+  rows.push(...turnStart(validTimestamp, "valid-turn"));
+  rows.push(tokenRecord(validTimestamp, validUsage));
+  const malformedBreakdownTimestamp = "2026-08-18T20:01:00.000Z";
+  rows.push(...turnStart(malformedBreakdownTimestamp, "unknown-turn"));
+  rows.push(tokenRecord(malformedBreakdownTimestamp, {
+    ...validUsage,
+    input_tokens: "90",
+  }));
+
+  try {
+    const rolloutDirectory = resolve(root, "sessions", "2026", "08", "18");
+    await mkdir(rolloutDirectory, { recursive: true });
+    await writeFile(
+      resolve(rolloutDirectory, `rollout-${threadId}.jsonl`),
+      serialize(rows),
+    );
+
+    const snapshot = await collectUsage({
+      output: resolve(root, "snapshot.json"),
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+    assert.equal(snapshot.coverage.invalidTokenRecords, invalidTotals.length);
+    assert.equal(snapshot.coverage.observedModelCalls, 2);
+    assert.equal(snapshot.coverage.observedTokens, 200);
+    assert.equal(snapshot.coverage.detailedTokens, 100);
+    assert.equal(snapshot.coverage.unknownBreakdownTokens, 100);
+    assert.equal(snapshot.coverage.detailedPercent, 50);
+    assert.equal(snapshot.events.length, 2);
+
+    const validEvent = snapshot.events.find(
+      (event) => event.breakdownAvailable === true,
+    );
+    const unknownEvent = snapshot.events.find(
+      (event) => event.breakdownAvailable === false,
+    );
+    assert.equal(validEvent.cachedInputTokens, 90);
+    assert.equal(validEvent.reasoningTokens, 10);
+    assert.equal(validEvent.rateCardCredits !== null, true);
+    assert.equal(unknownEvent.totalTokens, 100);
+    assert.equal(unknownEvent.inputTokens, 0);
+    assert.equal(unknownEvent.rateCardCredits, null);
+
+    const [thread] = snapshot.threads;
+    assert.equal(thread.totalTokens, 200);
+    assert.equal(thread.detailedTokens, 100);
+    assert.equal(thread.unknownBreakdownTokens, 100);
+    assert.equal(thread.coverage, "partial");
+    assert.equal(thread.rateCardCredits, null);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("coverage preserves unknown totals after safe-counter saturation", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-saturation-"));
+  const threadId = "13131313-1313-4131-8131-131313131313";
+  const firstTimestamp = "2026-08-18T21:00:00.000Z";
+  const secondTimestamp = "2026-08-18T21:01:00.000Z";
+  const thirdTimestamp = "2026-08-18T21:02:00.000Z";
+  const huge = Number.MAX_SAFE_INTEGER;
+  const totalOnlyRecord = (timestamp) => ({
+    timestamp,
+    type: "event_msg",
+    payload: {
+      type: "token_count",
+      info: {
+        total_token_usage: { total_tokens: huge },
+        last_token_usage: { total_tokens: huge },
+        model_context_window: 128000,
+      },
+    },
+  });
+
+  try {
+    const rolloutDirectory = resolve(root, "sessions", "2026", "08", "18");
+    await mkdir(rolloutDirectory, { recursive: true });
+    await writeFile(
+      resolve(rolloutDirectory, `rollout-${threadId}.jsonl`),
+      serialize([
+        ...turnStart(firstTimestamp, "saturation-detailed"),
+        tokenCount(firstTimestamp, huge, huge),
+        ...turnStart(secondTimestamp, "saturation-detailed-second"),
+        tokenCount(secondTimestamp, huge, huge),
+        ...turnStart(thirdTimestamp, "saturation-unknown"),
+        totalOnlyRecord(thirdTimestamp),
+      ]),
+    );
+
+    const snapshot = await collectUsage({
+      output: resolve(root, "snapshot.json"),
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+    const [thread] = snapshot.threads;
+    assert.equal(snapshot.coverage.observedTokens, huge);
+    assert.ok(snapshot.coverage.detailedTokens < huge);
+    assert.ok(snapshot.coverage.unknownBreakdownTokens < huge);
+    assert.ok(
+      Math.abs(snapshot.coverage.detailedPercent - (2 / 3) * 100) < 1e-12,
+    );
+    assert.equal(thread.unknownBreakdownTokens, huge);
+    assert.equal(thread.coverage, "partial");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

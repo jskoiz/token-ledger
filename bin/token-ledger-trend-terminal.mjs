@@ -1,7 +1,10 @@
 import { buildBurnDayBins, buildUsageTrend, trendModelLabel } from "./token-ledger-trend.mjs";
 import { chooseBinSize } from "./token-ledger-image-layout.mjs";
 import {
+  MAX_SAFE_TOKEN_COUNT,
+  checkedTokenAdd,
   splitUsageBucketsAtBoundaries,
+  tokenValue,
   usageBuckets,
   usageCallCount,
 } from "../lib/token-ledger-usage.mjs";
@@ -16,6 +19,89 @@ const BORDER_STYLE = [38, 2, 88, 88, 88];
 const GRID_STYLE = [38, 2, 72, 72, 72];
 const LINE_STYLE = [1, 38, 2, 255, 236, 168];
 const RESET_LINE_STYLE = [1, 38, 2, 255, 255, 255];
+const TOKEN_SCALE = Symbol("tokenScale");
+
+function tokenScale(target) {
+  return Number.isFinite(target[TOKEN_SCALE]) && target[TOKEN_SCALE] >= 1
+    ? target[TOKEN_SCALE]
+    : 1;
+}
+
+function setTokenScale(target, scale) {
+  Object.defineProperty(target, TOKEN_SCALE, {
+    configurable: true,
+    enumerable: false,
+    value: scale,
+    writable: true,
+  });
+}
+
+function scaleTokenMap(values, ratio) {
+  for (const [model, value] of values) {
+    values.set(model, value * ratio);
+  }
+}
+
+function addBinTokens(bin, model, tokens, fast) {
+  if (!(tokens > 0)) return;
+  const scale = tokenScale(bin);
+  const scaledTokens = tokens / scale;
+  bin.totalTokens += scaledTokens;
+  bin.values.set(model, (bin.values.get(model) ?? 0) + scaledTokens);
+  if (fast) {
+    bin.fastValues.set(model, (bin.fastValues.get(model) ?? 0) + scaledTokens);
+  }
+
+  const scaleFactor = Math.max(1, bin.totalTokens / MAX_SAFE_TOKEN_COUNT);
+  if (scaleFactor === 1) return;
+  bin.totalTokens = MAX_SAFE_TOKEN_COUNT;
+  scaleTokenMap(bin.values, 1 / scaleFactor);
+  scaleTokenMap(bin.fastValues, 1 / scaleFactor);
+  setTokenScale(bin, scale * scaleFactor);
+}
+
+function mergeBinTotals(state, bin) {
+  const sourceScale = tokenScale(bin);
+  const commonScale = Math.max(state.scale, sourceScale);
+  const targetRatio = state.scale / commonScale;
+  const sourceRatio = sourceScale / commonScale;
+  state.totalTokens *= targetRatio;
+  scaleTokenMap(state.values, targetRatio);
+  scaleTokenMap(state.fastValues, targetRatio);
+  for (const [model, value] of bin.values) {
+    state.totalTokens += value * sourceRatio;
+    state.values.set(
+      model,
+      (state.values.get(model) ?? 0) + value * sourceRatio,
+    );
+  }
+  for (const [model, value] of bin.fastValues) {
+    state.fastValues.set(
+      model,
+      (state.fastValues.get(model) ?? 0) + value * sourceRatio,
+    );
+  }
+
+  const scaleFactor = Math.max(1, state.totalTokens / MAX_SAFE_TOKEN_COUNT);
+  if (scaleFactor > 1) {
+    state.totalTokens = MAX_SAFE_TOKEN_COUNT;
+    scaleTokenMap(state.values, 1 / scaleFactor);
+    scaleTokenMap(state.fastValues, 1 / scaleFactor);
+  }
+  state.scale = commonScale * scaleFactor;
+}
+
+function alignBinsToScale(bins, scale) {
+  for (const bin of bins) {
+    const sourceScale = tokenScale(bin);
+    if (sourceScale === scale) continue;
+    const ratio = sourceScale / scale;
+    bin.totalTokens *= ratio;
+    scaleTokenMap(bin.values, ratio);
+    scaleTokenMap(bin.fastValues, ratio);
+    setTokenScale(bin, scale);
+  }
+}
 
 // Mirrors the SVG renderer's validated categorical palette.
 export const TREND_MODEL_COLORS = {
@@ -256,27 +342,34 @@ export function buildActualTokenBins(
     const dayIndex = dateIndexByString.get(dateString);
     if (dayIndex === undefined || dayIndex >= days) continue;
     const bin = bins[Math.floor(dayIndex / binSize)];
-    const tokens = Math.max(0, Number(event.totalTokens) || 0);
+    if (event?.invalidTokenRecord === true) continue;
+    const allowFractional = event.rangeAllocationEstimated === true;
+    const tokens = tokenValue(event.totalTokens, { allowFractional });
     const model = trendModelLabel(event.model);
-    bin.totalTokens += tokens;
-    bin.calls += usageCallCount(event);
-    bin.values.set(model, (bin.values.get(model) ?? 0) + tokens);
-    if (event.serviceTier === "priority") {
-      bin.fastValues.set(model, (bin.fastValues.get(model) ?? 0) + tokens);
-    }
+    bin.calls = checkedTokenAdd(bin.calls, usageCallCount(event), {
+      allowFractional,
+    });
+    addBinTokens(bin, model, tokens, event.serviceTier === "priority");
   }
 
-  const totals = new Map();
-  const fastTotals = new Map();
+  const totalsState = {
+    scale: 1,
+    totalTokens: 0,
+    values: new Map(),
+    fastValues: new Map(),
+  };
   for (const bin of bins) {
-    for (const [model, value] of bin.values) {
-      totals.set(model, (totals.get(model) ?? 0) + value);
-    }
-    for (const [model, value] of bin.fastValues) {
-      fastTotals.set(model, (fastTotals.get(model) ?? 0) + value);
-    }
+    mergeBinTotals(totalsState, bin);
   }
-  return { bins, totals, fastTotals, binSize, binCount };
+  alignBinsToScale(bins, totalsState.scale);
+  return {
+    bins,
+    totals: totalsState.values,
+    fastTotals: totalsState.fastValues,
+    scale: totalsState.scale,
+    binSize,
+    binCount,
+  };
 }
 
 function niceCeiling(value) {
@@ -292,7 +385,12 @@ function allocateSegmentHeights(entries, total, maxValue, plotHeight) {
     ? Math.max(1, Math.round((total / maxValue) * (plotHeight - 1)))
     : 0;
   if (!barHeight) return [];
-  const ideal = entries.map(([, value]) => (value / total) * barHeight);
+  // Model counters can cap independently when the bin total reaches the
+  // safe-token limit. Partition the already-scaled bar across the model
+  // entries so capped components cannot make the stack taller than its bin.
+  const segmentTotal = entries.reduce((sum, [, value]) => sum + value, 0);
+  const partitionTotal = segmentTotal > 0 ? segmentTotal : total;
+  const ideal = entries.map(([, value]) => (value / partitionTotal) * barHeight);
   const heights = ideal.map(Math.floor);
   let remainder = barHeight - heights.reduce((sum, value) => sum + value, 0);
   const order = ideal
@@ -620,7 +718,10 @@ export function renderTrendCombo({
   }
   lines.push(`├${"─".repeat(frameWidth - 2)}┤`);
 
-  const totalTokens = [...actual.totals.values()].reduce((sum, value) => sum + value, 0);
+  const totalTokens = [...actual.totals.values()].reduce(
+    (sum, value) => checkedTokenAdd(sum, value, { allowFractional: true }),
+    0,
+  );
   const legendModels = percentMode
     ? [...burn.totals.keys()].sort(modelSort)
     : [...actual.totals.keys()].sort(modelSort);
