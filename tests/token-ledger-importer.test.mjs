@@ -283,6 +283,7 @@ test("empty thread settings reset the service tier for the next turn", async () 
     await mkdir(rolloutDirectory, { recursive: true });
     const firstTimestamp = "2026-08-18T10:00:00.000Z";
     const secondTimestamp = "2026-08-18T10:01:00.000Z";
+    const thirdTimestamp = "2026-08-18T10:02:00.000Z";
     await writeFile(
       resolve(rolloutDirectory, `rollout-${threadId}.jsonl`),
       serialize([
@@ -348,6 +349,104 @@ test("empty thread settings reset the service tier for the next turn", async () 
           },
         },
         tokenCount("2026-08-18T10:01:01.000Z", 200, 100),
+        {
+          timestamp: thirdTimestamp,
+          type: "event_msg",
+          payload: {
+            type: "task_started",
+            turn_id: "turn-3",
+            started_at: Date.parse(thirdTimestamp) / 1000,
+          },
+        },
+        {
+          timestamp: thirdTimestamp,
+          type: "event_msg",
+          payload: {
+            type: "thread_settings_applied",
+            thread_settings: {
+              model: "gpt-5.4",
+              reasoning_effort: "medium",
+              service_tier: " FAST ",
+            },
+          },
+        },
+        {
+          timestamp: thirdTimestamp,
+          type: "turn_context",
+          payload: {
+            turn_id: "turn-3",
+            model: "gpt-5.4",
+            effort: "medium",
+          },
+        },
+        tokenCount("2026-08-18T10:02:01.000Z", 300, 100),
+      ]),
+    );
+
+    const snapshot = await collectUsage({
+      output: resolve(root, "snapshot.json"),
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+    assert.equal(snapshot.events.length, 3);
+    assert.equal(snapshot.events[0].serviceTier, "priority");
+    assert.equal(snapshot.events[1].serviceTier, null);
+    assert.equal(snapshot.events[2].serviceTier, "FAST");
+    assert.ok(
+      Math.abs(
+        snapshot.events[0].rateCardCredits -
+          snapshot.events[1].rateCardCredits * 2.5,
+      ) < 0.000001,
+    );
+    // The 2x GPT-5.4 fast price equals the standard GPT-5.5 price for this
+    // input/cache/output mix.
+    assert.equal(
+      snapshot.events[2].rateCardCredits,
+      snapshot.events[1].rateCardCredits,
+    );
+    assert.equal(snapshot.provenance.rateCardKind, "codex-purchased-credits");
+    assert.equal(snapshot.provenance.rateCardAsOf, "2026-08-23");
+    assert.equal(
+      snapshot.provenance.rateCardUrl,
+      "https://help.openai.com/en/articles/11481834",
+    );
+    assert.match(snapshot.provenance.rateCardScope, /not API USD/i);
+    assert.match(snapshot.provenance.rateCardScope, /not included plan-limit/i);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("collector applies current Sol and priority Daybreak Red purchased-credit rates", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
+  const threadId = "22222222-2222-4222-8222-222222222222";
+  try {
+    const rolloutDirectory = resolve(root, "sessions", "2026", "08", "18");
+    await mkdir(rolloutDirectory, { recursive: true });
+    await writeFile(
+      resolve(rolloutDirectory, `rollout-${threadId}.jsonl`),
+      serialize([
+        ...turnStart("2026-08-18T11:00:00.000Z", "turn-sol", "gpt-5.6-sol"),
+        tokenCount("2026-08-18T11:00:01.000Z", 100, 100),
+        ...turnStart(
+          "2026-08-18T11:01:00.000Z",
+          "turn-red",
+          "gpt-5.5-cyber",
+        ),
+        {
+          timestamp: "2026-08-18T11:01:00.000Z",
+          type: "event_msg",
+          payload: {
+            type: "thread_settings_applied",
+            thread_settings: {
+              model: "gpt-5.5-cyber",
+              reasoning_effort: "medium",
+              service_tier: "priority",
+            },
+          },
+        },
+        tokenCount("2026-08-18T11:01:01.000Z", 200, 100),
       ]),
     );
 
@@ -358,13 +457,88 @@ test("empty thread settings reset the service tier for the next turn", async () 
       since: null,
     });
     assert.equal(snapshot.events.length, 2);
-    assert.equal(snapshot.events[0].serviceTier, "priority");
-    assert.equal(snapshot.events[1].serviceTier, null);
+    assert.equal(snapshot.events[0].model, "gpt-5.6-sol");
+    assert.ok(Math.abs(snapshot.events[0].rateCardCredits - 0.0131) < 1e-12);
+    assert.equal(snapshot.events[1].model, "daybreak-red");
     assert.ok(
-      Math.abs(
-        snapshot.events[0].rateCardCredits -
-          snapshot.events[1].rateCardCredits * 1.5,
-      ) < 0.000001,
+      Math.abs(snapshot.events[1].rateCardCredits - 0.11015625) < 1e-12,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("collector leaves unsupported Daybreak latest aliases unrated", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
+  const threadId = "88888888-8888-4888-8888-888888888888";
+  try {
+    const rolloutDirectory = resolve(root, "sessions", "2026", "08", "18");
+    await mkdir(rolloutDirectory, { recursive: true });
+    await writeFile(
+      resolve(rolloutDirectory, `rollout-${threadId}.jsonl`),
+      serialize([
+        ...turnStart(
+          "2026-08-18T12:00:00.000Z",
+          "turn-red-latest",
+          "gpt-daybreak-red-latest",
+        ),
+        {
+          timestamp: "2026-08-18T12:00:00.000Z",
+          type: "event_msg",
+          payload: {
+            type: "thread_settings_applied",
+            thread_settings: {
+              model: "gpt-daybreak-red-latest",
+              reasoning_effort: "medium",
+              service_tier: "priority",
+            },
+          },
+        },
+        tokenCount("2026-08-18T12:00:01.000Z", 100, 100),
+        ...turnStart(
+          "2026-08-18T12:01:00.000Z",
+          "turn-blue-latest",
+          "gpt-5.5-daybreak-blue-latest",
+        ),
+        {
+          timestamp: "2026-08-18T12:01:00.000Z",
+          type: "event_msg",
+          payload: {
+            type: "thread_settings_applied",
+            thread_settings: {
+              model: "gpt-5.5-daybreak-blue-latest",
+              reasoning_effort: "medium",
+              service_tier: "fast",
+            },
+          },
+        },
+        tokenCount("2026-08-18T12:01:01.000Z", 200, 100),
+      ]),
+    );
+
+    const snapshot = await collectUsage({
+      output: resolve(root, "snapshot.json"),
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+
+    assert.equal(snapshot.events.length, 2);
+    assert.deepEqual(
+      snapshot.events.map((event) => event.model),
+      ["daybreak-red", "daybreak-blue"],
+    );
+    assert.deepEqual(
+      snapshot.events.map((event) => event.rateCardModel),
+      ["gpt-daybreak-red-latest", "gpt-5.5-daybreak-blue-latest"],
+    );
+    assert.deepEqual(
+      snapshot.events.map((event) => event.serviceTier),
+      ["priority", "fast"],
+    );
+    assert.deepEqual(
+      snapshot.events.map((event) => event.rateCardCredits),
+      [null, null],
     );
   } finally {
     await rm(root, { recursive: true, force: true });

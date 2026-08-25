@@ -6,7 +6,11 @@ import {
   priorPeriodBounds,
   weeklyQuotaObservations,
 } from "./token-ledger-trend.mjs";
-import { FAST_MODE_MULTIPLIER } from "../lib/token-ledger-rates.mjs";
+import {
+  calculateCodexPurchasedCredits,
+  codexCreditMultiplier,
+  isFastServiceTier,
+} from "../lib/token-ledger-rates.mjs";
 import { buildActualTokenBins } from "./token-ledger-trend-terminal.mjs";
 import { buildCacheReportData } from "./token-ledger-cache-data.mjs";
 import {
@@ -241,6 +245,58 @@ function fallbackProjectRows(snapshot, bounds, events = null) {
     .sort((left, right) => right.totalTokens - left.totalTokens);
 }
 
+function fastRateSummary(snapshot, bounds, events = null) {
+  let ratedTokens = 0;
+  let standardCardCredits = 0;
+  let fastCardCredits = 0;
+  let unratedTokens = 0;
+  const multipliers = new Set();
+  const sourceEvents = events ?? usageBucketsInRange(
+    snapshot,
+    bounds.start.getTime(),
+    bounds.end.getTime(),
+  );
+  for (const event of sourceEvents) {
+    if (!isFastServiceTier(event.serviceTier)) continue;
+    const tokens = Math.max(0, Number(event.totalTokens) || 0);
+    const rateCardModel = event.rateCardModel ?? event.model;
+    const multiplier = codexCreditMultiplier(rateCardModel, event.serviceTier);
+    const standardCredits = calculateCodexPurchasedCredits({
+      model: rateCardModel,
+      serviceTier: null,
+      usage: event,
+    });
+    const fastCredits = calculateCodexPurchasedCredits({
+      model: rateCardModel,
+      serviceTier: event.serviceTier,
+      usage: event,
+    });
+    if (
+      multiplier === null ||
+      !Number.isFinite(standardCredits) ||
+      !(standardCredits > 0) ||
+      !Number.isFinite(fastCredits)
+    ) {
+      unratedTokens += tokens;
+      continue;
+    }
+    ratedTokens += tokens;
+    standardCardCredits += standardCredits;
+    fastCardCredits += fastCredits;
+    multipliers.add(multiplier);
+  }
+  const sortedMultipliers = [...multipliers].sort((left, right) => left - right);
+  return {
+    ratedTokens,
+    unratedTokens,
+    effectiveMultiplier:
+      standardCardCredits > 0 ? fastCardCredits / standardCardCredits : null,
+    minimumMultiplier: sortedMultipliers[0] ?? null,
+    maximumMultiplier: sortedMultipliers.at(-1) ?? null,
+    mixedMultipliers: sortedMultipliers.length > 1,
+  };
+}
+
 export function renderTrendImage({
   snapshot,
   bounds,
@@ -285,7 +341,21 @@ export function renderTrendImage({
     (sum, value) => checkedTokenAdd(sum, value, { allowFractional: true }),
     0,
   );
+  const fastRates = fastRateSummary(
+    snapshot,
+    bounds,
+    analysis?.currentEvents ?? null,
+  );
   const hasFast = !percentMode && fastTokens > 0;
+  const fastRateAnnotation = !hasFast
+    ? null
+    : fastRates.effectiveMultiplier === null
+      ? "Fast credit rate · unrated for this model"
+      : `${fastRates.mixedMultipliers
+          ? `Fast credit rate · ${fastRates.minimumMultiplier}×–${fastRates.maximumMultiplier}× by model`
+          : `Fast credit rate · ${fastRates.effectiveMultiplier.toFixed(2)}×`}${
+          fastRates.unratedTokens > 0 ? " · some fast usage unrated" : ""
+        }`;
 
   const modelCards = [...actual.totals.entries()]
     .filter(([, value]) => value > 0 && totalTokens > 0 && value / totalTokens >= 0.01)
@@ -470,7 +540,8 @@ export function renderTrendImage({
   const plotBottom = plotTop + plotHeight;
   const chartBlockBottom = plotBottom + 70;
   const legendBaseline = chartBlockBottom + 25;
-  const cacheRuleY = legendBaseline + 23;
+  const fastAnnotationHeight = fastRateAnnotation ? 18 : 0;
+  const cacheRuleY = legendBaseline + 23 + fastAnnotationHeight;
   const cacheHeaderBaseline = cacheRuleY + 27;
   const cachePlotTop = cacheHeaderBaseline + 34;
   const cachePlotHeight = 128;
@@ -625,19 +696,30 @@ export function renderTrendImage({
   }
   if (hasFast) {
     const fastShare = totalTokens > 0 ? (fastTokens / totalTokens) * 100 : 0;
+    const effectiveRate = fastRates.effectiveMultiplier;
+    const rateDescription = fastRates.mixedMultipliers
+      ? `${fastRates.minimumMultiplier}×–${fastRates.maximumMultiplier}× by model`
+      : effectiveRate === null
+        ? "unrated credit multiplier"
+        : `${effectiveRate.toFixed(2)}× credit rate`;
+    const unratedSuffix = fastRates.unratedTokens > 0 && effectiveRate !== null
+      ? " · some fast usage unrated"
+      : "";
     cards.push({
       swatch: FAST_MODE_LABEL_COLOR,
       label: "Fast mode",
       labelColor: COLORS.muted,
-      value: `${FAST_MODE_MULTIPLIER.toFixed(2)}×`,
+      value: effectiveRate === null ? "UNRATED" : `${effectiveRate.toFixed(2)}×`,
       valueColor: COLORS.ink,
       chip: null,
-      suffix: "rate",
+      suffix: fastRates.mixedMultipliers || fastRates.unratedTokens > 0
+        ? "effective"
+        : "rate",
       track: COLORS.track,
       fill: FAST_MODE_LABEL_COLOR,
       barPercent: fastShare,
-      caption: `${percent(fastShare)} of tokens · darker bar shade`,
-      captionShort: `${percent(fastShare)} of tokens`,
+      caption: `${percent(fastShare)} of tokens · ${rateDescription}${unratedSuffix} · darker bar shade`,
+      captionShort: `${percent(fastShare)} · ${rateDescription}${unratedSuffix}`,
       panel: COLORS.panel,
       border: COLORS.panelBorder,
     });
@@ -1550,6 +1632,16 @@ export function renderTrendImage({
         "OpenAI weekly-limit reading",
       );
     }
+  }
+  if (fastRateAnnotation) {
+    elements.push(svgText({
+      x: contentRight,
+      y: legendBaseline + 18,
+      value: fastRateAnnotation,
+      fill: FAST_MODE_LABEL_COLOR,
+      size: 11.5,
+      anchor: "end",
+    }));
   }
 
   // ---- Cache rate by period (compressed strip) ----

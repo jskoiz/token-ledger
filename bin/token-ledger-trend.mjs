@@ -1,6 +1,6 @@
 import {
-  creditsForUsage,
-  RATE_CARD_AS_OF,
+  calculateCodexPurchasedCredits,
+  CODEX_CREDIT_RATE_CARD_AS_OF,
 } from "../lib/token-ledger-rates.mjs";
 import {
   MAX_SAFE_TOKEN_COUNT,
@@ -274,18 +274,13 @@ export function normalizeQuotaTimeline(observations) {
 }
 
 export function eventCredits(event) {
-  // Recompute from token components first so the current rate card applies;
-  // snapshots can carry credits stored under an outdated card. Fast-mode
-  // turns (service tier "priority") debit the limit at a higher rate.
-  const computed = creditsForUsage(event.model, event, event.serviceTier);
-  if (Number.isFinite(computed) && computed >= 0) return computed;
-  const stored = Number(event.rateCardCredits);
-  if (event.rateCardCredits !== null && event.rateCardCredits !== undefined) {
-    // Stored credits from current snapshots already include the fast-mode
-    // multiplier.
-    if (Number.isFinite(stored) && stored >= 0) return stored;
-  }
-  return null;
+  // Always recompute with the current purchased-credit card. Snapshot values
+  // may have been stored under an older card and must not fill a current gap.
+  return calculateCodexPurchasedCredits({
+    model: event.rateCardModel ?? event.model,
+    serviceTier: event.serviceTier,
+    usage: event,
+  });
 }
 
 function eventWeight(event, fallbackCreditsPerToken) {
@@ -557,7 +552,7 @@ function buildUsageTrendFromAnalysis(snapshot, bounds, rangeAnalysis) {
       sampleCount: 0,
       allocationMethod: "unavailable",
       observedThroughMs: null,
-      rateCardAsOf: snapshot.provenance?.rateCardAsOf ?? RATE_CARD_AS_OF,
+      rateCardAsOf: CODEX_CREDIT_RATE_CARD_AS_OF,
     };
   }
 
@@ -768,7 +763,7 @@ function buildUsageTrendFromAnalysis(snapshot, bounds, rangeAnalysis) {
     observedThroughMs:
       [...displayPoints].reverse().find((point) => point.observed)
         ?.timestampMs ?? null,
-    rateCardAsOf: snapshot.provenance?.rateCardAsOf ?? RATE_CARD_AS_OF,
+    rateCardAsOf: CODEX_CREDIT_RATE_CARD_AS_OF,
   };
 }
 

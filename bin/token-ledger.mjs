@@ -20,6 +20,7 @@ import {
   priorPeriodBounds,
 } from "./token-ledger-trend.mjs";
 import { renderTrendCombo } from "./token-ledger-trend-terminal.mjs";
+import { renderCostTerminal } from "./token-ledger-cost-terminal.mjs";
 import { startInteractive } from "./token-ledger-tui.mjs";
 import {
   createTimeZoneFormatter,
@@ -45,8 +46,6 @@ import {
   SNAPSHOT_SCHEMA_VERSION,
   checkedFiniteAdd,
   checkedTokenAdd,
-  isNonNegativeFiniteValue,
-  nonNegativeFiniteValue,
   tokenValue,
   MAX_SAFE_TOKEN_COUNT,
   usageBuckets,
@@ -54,6 +53,7 @@ import {
   usageCallCount,
   usageThreadIds,
 } from "../lib/token-ledger-usage.mjs";
+import { calculateCodexPurchasedCredits } from "../lib/token-ledger-rates.mjs";
 import { sanitizeTerminalText } from "../lib/token-ledger-terminal-text.mjs";
 
 export { sanitizeTerminalText };
@@ -61,7 +61,7 @@ export { sanitizeTerminalText };
 export const DEFAULT_SNAPSHOT = resolve(
   homedir(),
   ".token-ledger",
-  "token-ledger-snapshot-v2.json.gz",
+  "token-ledger-snapshot-v3.json.gz",
 );
 const DEFAULT_TOP = 10;
 const DEFAULT_TIME_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -118,6 +118,9 @@ Usage:
   tledger 1d                         Last 24 hours in the terminal
   tledger week                       Last 7 calendar days in the terminal
   tledger 30d                        Rolling 30 days in the terminal
+  tledger cost 7d --basis api-usd    Hypothetical API-equivalent USD estimate
+  tledger cost week --basis codex-credits
+                                     Codex purchased-credit estimate
   tledger report 7d                  Write the 7-day PNG report
   tledger report 7d --cache-rate     Write the cache-only PNG report
 
@@ -143,6 +146,12 @@ Terminal commands:
   tledger day <YYYY-MM-DD>           One local calendar day
   tledger week [end-day]             Seven local calendar days
   tledger trend [Nd|Nw]              Multi-day terminal trend
+
+Cost commands (basis is required):
+  tledger cost <1d|Nd|Nw|week> --basis api-usd
+                                      Hypothetical API-equivalent USD estimate
+  tledger cost <1d|Nd|Nw|week> --basis codex-credits
+                                      Codex purchased-credit estimate
 
 Report commands:
   tledger report [Nd|Nw]             Write the usage dashboard PNG
@@ -183,7 +192,7 @@ Help:
   -h, --help                Show the quick guide
   --help-all                Show this complete reference
 
-The default snapshot is ~/.token-ledger/token-ledger-snapshot-v2.json.gz.
+The default snapshot is ~/.token-ledger/token-ledger-snapshot-v3.json.gz.
 Token Ledger reads local Codex data only. It does not upload your usage.`;
 }
 
@@ -230,10 +239,22 @@ function readOption(argv, index, name) {
 
 export function parseArgs(argv) {
   const helpCommand = argv[0] === "help";
+  const costCommand = argv[0] === "cost";
+  const costRangeValue = costCommand ? argv[1] : null;
+  const costHelpWithoutRange = costCommand &&
+    ["--help", "-h", "--help-all"].includes(costRangeValue);
+  const costAlias = costCommand && costRangeValue !== "week" && !costHelpWithoutRange
+    ? durationAlias(costRangeValue)
+    : null;
+  const costRangeValid = costRangeValue === "week" || Boolean(costAlias);
   const alias = durationAlias(argv[0]);
-  const rolling24hCommand = argv[0] === "1d";
-  const rollingDurationCommand = Boolean(alias) && !rolling24hCommand;
-  const command = rolling24hCommand
+  const rolling24hCommand = argv[0] === "1d" ||
+    (costCommand && costAlias?.days === 1);
+  const rollingDurationCommand = (Boolean(alias) && argv[0] !== "1d") ||
+    (costCommand && Boolean(costAlias) && costAlias.days !== 1);
+  const command = costCommand && costRangeValue === "week"
+    ? "week"
+    : rolling24hCommand
     ? "rolling24h"
     : rollingDurationCommand
       ? "rolling"
@@ -244,13 +265,14 @@ export function parseArgs(argv) {
         : "day";
   const options = {
     range: command,
-    view: command === "trend" ? "trend" : "projects",
+    view: costCommand ? "cost" : command === "trend" ? "trend" : "projects",
     rolling24h: rolling24hCommand,
     rollingDuration: rollingDurationCommand,
-    rollingDays: alias?.days ?? (rolling24hCommand ? 1 : null),
-    rollingAmount: alias?.amount ?? (rolling24hCommand ? 1 : null),
-    rollingUnit: alias?.unit ?? (rolling24hCommand ? "d" : null),
-    rollingLabel: alias?.label ?? "1 day",
+    rollingDays: (costCommand ? costAlias?.days : alias?.days) ?? (rolling24hCommand ? 1 : null),
+    rollingAmount: (costCommand ? costAlias?.amount : alias?.amount) ?? (rolling24hCommand ? 1 : null),
+    rollingUnit: (costCommand ? costAlias?.unit : alias?.unit) ?? (rolling24hCommand ? "d" : null),
+    rollingLabel: (costCommand ? costAlias?.label : alias?.label) ?? "1 day",
+    basis: null,
     report: argv[0] === "report",
     trendDays: 7,
     date: null,
@@ -267,7 +289,7 @@ export function parseArgs(argv) {
     rawProjects: false,
     plain: false,
     ascii: false,
-    static: false,
+    static: costCommand,
     image: false,
     imageOutput: null,
     imageWidth: null,
@@ -280,7 +302,10 @@ export function parseArgs(argv) {
   };
 
   let trendPeriodSeen = false;
-  let index = alias || ["day", "week", "trend", "report", "help"].includes(argv[0]) ? 1 : 0;
+  let basisSeen = false;
+  let index = costCommand
+    ? costHelpWithoutRange ? 1 : 2
+    : alias || ["day", "week", "trend", "report", "help"].includes(argv[0]) ? 1 : 0;
   for (; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--help" || argument === "-h") {
@@ -308,6 +333,18 @@ export function parseArgs(argv) {
       options.trendDays = period.days;
       trendPeriodSeen = true;
       index += 1;
+    } else if (argument === "--basis") {
+      if (options.view !== "cost") {
+        throw new Error("--basis is only available with the cost command.");
+      }
+      if (basisSeen) throw new Error("Cost basis can only be specified once.");
+      const value = readOption(argv, index, "--basis");
+      if (value !== "codex-credits" && value !== "api-usd") {
+        throw new Error("--basis must be codex-credits or api-usd.");
+      }
+      options.basis = value;
+      basisSeen = true;
+      index += 1;
     } else if (argument === "--input") {
       options.input = resolve(readOption(argv, index, "--input"));
       options.inputExplicit = true;
@@ -327,6 +364,9 @@ export function parseArgs(argv) {
       options.timeZone = readOption(argv, index, "--tz");
       index += 1;
     } else if (argument === "--top") {
+      if (options.view === "cost") {
+        throw new Error("--top is not available with the cost command.");
+      }
       const value = Number(readOption(argv, index, "--top"));
       if (!Number.isInteger(value) || value < 1 || value > 100) {
         throw new Error("--top must be an integer from 1 to 100.");
@@ -334,6 +374,9 @@ export function parseArgs(argv) {
       options.top = value;
       index += 1;
     } else if (argument === "--width") {
+      if (options.view === "cost") {
+        throw new Error("--width is not available with the cost command.");
+      }
       const value = Number(readOption(argv, index, "--width"));
       if (!Number.isInteger(value) || value < 40 || value > 200) {
         throw new Error("--width must be an integer from 40 to 200.");
@@ -347,6 +390,9 @@ export function parseArgs(argv) {
     } else if (argument === "--plain") {
       options.plain = true;
     } else if (argument === "--ascii") {
+      if (options.view === "cost") {
+        throw new Error("--ascii is not available with the cost command.");
+      }
       options.ascii = true;
     } else if (argument === "--static") {
       options.static = true;
@@ -427,6 +473,12 @@ export function parseArgs(argv) {
   }
 
   if (options.report) options.image = true;
+  if (!options.help && costCommand && !costRangeValid) {
+    throw new Error("Cost range must be 1d, Nd, Nw, or week.");
+  }
+  if (!options.help && costCommand && !options.basis) {
+    throw new Error("The cost command requires --basis codex-credits or --basis api-usd.");
+  }
   if (!options.help && (options.rolling24h || options.rollingDuration) && options.date) {
     throw new Error(`${options.rollingLabel} does not accept --date; its rolling window ends now.`);
   }
@@ -444,6 +496,12 @@ export function parseArgs(argv) {
   }
   if (!options.help && options.view === "trend" && options.legacyPlot) {
     throw new Error("--youplot is only available for the project view.");
+  }
+  if (!options.help && options.view === "cost" && options.legacyPlot) {
+    throw new Error("--youplot is not available with the cost command.");
+  }
+  if (!options.help && options.view === "cost" && options.rawProjects) {
+    throw new Error("--raw-projects is not available with the cost command.");
   }
   if (!options.help && options.cacheRate && options.drain) {
     throw new Error("--cache-rate cannot be combined with --drain.");
@@ -618,6 +676,14 @@ function modelLabel(value) {
   return model;
 }
 
+function currentRateCardCredits(event) {
+  return calculateCodexPurchasedCredits({
+    model: event?.rateCardModel ?? event?.model,
+    serviceTier: event?.serviceTier,
+    usage: event,
+  });
+}
+
 export function filterDayEvents(snapshot, bounds, analysis = null) {
   if (analysis !== null) return analysis.currentEvents;
   const start = bounds.start.getTime();
@@ -673,9 +739,9 @@ export function aggregateProjects(snapshot, events, options = {}, analysis = nul
       allowFractional,
     });
     for (const threadId of usageThreadIds(event)) row.threadIds.add(threadId);
-    const credits = event.rateCardCredits;
-    if (isNonNegativeFiniteValue(credits)) {
-      row.rateCardCredits = checkedFiniteAdd(row.rateCardCredits, credits);
+    const rateCardCredits = currentRateCardCredits(event);
+    if (Number.isFinite(rateCardCredits)) {
+      row.rateCardCredits = checkedFiniteAdd(row.rateCardCredits, rateCardCredits);
       row.knownCreditTokens = checkedTokenAdd(
         row.knownCreditTokens,
         tokenValue(event.totalTokens, { allowFractional }),
@@ -698,10 +764,10 @@ export function aggregateProjects(snapshot, events, options = {}, analysis = nul
     modelRow.events = checkedTokenAdd(modelRow.events, usageCallCount(event), {
       allowFractional,
     });
-    if (isNonNegativeFiniteValue(credits)) {
+    if (Number.isFinite(rateCardCredits)) {
       modelRow.rateCardCredits = checkedFiniteAdd(
         modelRow.rateCardCredits,
-        credits,
+        rateCardCredits,
       );
     }
     row.models.set(model, modelRow);
@@ -745,11 +811,11 @@ function totalSummary(events, projectRows) {
       for (const threadId of usageThreadIds(event)) {
         summary.threadIds.add(threadId);
       }
-      const credits = event.rateCardCredits;
-      if (isNonNegativeFiniteValue(credits)) {
+      const rateCardCredits = currentRateCardCredits(event);
+      if (Number.isFinite(rateCardCredits)) {
         summary.rateCardCredits = checkedFiniteAdd(
           summary.rateCardCredits,
-          nonNegativeFiniteValue(credits),
+          rateCardCredits,
         );
         summary.knownCreditTokens = checkedTokenAdd(
           summary.knownCreditTokens,
@@ -1122,6 +1188,9 @@ async function render(
   reportTimeMs,
   analysis,
 ) {
+  if (options.view === "cost") {
+    return renderCostTerminal({ events, bounds, basis: options.basis });
+  }
   if (options.view === "trend") {
     if (options.image && options.cacheRate) {
       const { renderCacheReportImage } = await import(
@@ -1277,7 +1346,7 @@ export async function run(options, { nowMs } = {}) {
   if (events.length === 0 && !writingEmptyCacheReport) {
     return emptyRangeMessage(options, snapshot, bounds);
   }
-  const allRows = options.cacheRate
+  const allRows = options.cacheRate || options.view === "cost"
     ? []
     : aggregateProjects(snapshot, events, options, analysis);
   const rows = allRows.slice(0, options.top);
@@ -1354,6 +1423,7 @@ function shouldUseInteractive(options) {
   return Boolean(
     !options.static &&
       options.view !== "trend" &&
+      options.view !== "cost" &&
       !options.plain &&
       !options.legacyPlot &&
       !process.env.NO_COLOR &&

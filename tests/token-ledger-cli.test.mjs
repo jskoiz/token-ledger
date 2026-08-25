@@ -51,18 +51,30 @@ import {
   buildBurnDayBins,
   buildRangeAnalysis,
   buildUsageTrend,
+  eventCredits,
   multiDayBounds,
   normalizeQuotaTimeline,
   priorPeriodBounds,
   weeklyQuotaObservations,
 } from "../bin/token-ledger-trend.mjs";
-import { creditsForUsage } from "../lib/token-ledger-rates.mjs";
+import {
+  API_USD_LONG_CONTEXT_THRESHOLD_TOKENS,
+  apiUsdForUsage,
+  calculateCodexPurchasedCredits,
+  codexCreditMultiplier,
+  hasDetailedTokenBreakdown,
+  isFastServiceTier,
+  normalizeCodexCreditModel,
+  partitionTokenUsage,
+} from "../lib/token-ledger-rates.mjs";
+import { renderCostTerminal } from "../bin/token-ledger-cost-terminal.mjs";
 import {
   renderTrendImage,
   writeTrendPng,
 } from "../bin/token-ledger-trend-image.mjs";
 import { buildCacheReportData } from "../bin/token-ledger-cache-data.mjs";
 import { renderCacheReportImage } from "../bin/token-ledger-cache-image.mjs";
+import { splitUsageBucketsAtBoundaries } from "../lib/token-ledger-usage.mjs";
 import {
   textWidth,
   truncateText,
@@ -381,11 +393,11 @@ async function setLifecycleSourceNewer(sourcePath, cacheTimeMs) {
 test("successful metadata-backed refresh lifecycle remains hermetic", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-refresh-lifecycle-"));
   const codexHome = resolve(root, "codex-home");
-  const cachePath = resolve(root, "cache", "token-ledger-snapshot-v2.json.gz");
+  const cachePath = resolve(root, "cache", "token-ledger-snapshot-v3.json.gz");
   const noArchivedCachePath = resolve(
     root,
     "cache-no-archived",
-    "token-ledger-snapshot-v2.json.gz",
+    "token-ledger-snapshot-v3.json.gz",
   );
   const activeThreadId = "11111111-1111-4111-8111-111111111111";
   const parentThreadId = "22222222-2222-4222-8222-222222222222";
@@ -634,6 +646,13 @@ test(
     assert.ifError(result.error);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /--help/);
+    assert.match(result.stdout, /cost 7d --basis api-usd/);
+
+    const costHelp = spawnSync(CLI_ENTRYPOINT, ["cost", "--help"], {
+      encoding: "utf8",
+    });
+    assert.equal(costHelp.status, 0, costHelp.stderr);
+    assert.match(costHelp.stdout, /cost 7d --basis api-usd/);
   },
 );
 
@@ -829,6 +848,48 @@ test("aggregateProjects sorts by tokens and retains model mix", () => {
   assert.equal(rows[0].totalTokens, 1_000);
 });
 
+test("ordinary terminal credit shares use the current rate card", () => {
+  const events = [
+    {
+      project: "alpha",
+      model: "gpt-5.6-sol",
+      totalTokens: 1_000_000,
+      inputTokens: 1_000_000,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      rateCardCredits: 9_999,
+    },
+    {
+      project: "beta",
+      model: "gpt-5.6-luna",
+      totalTokens: 1_000_000,
+      inputTokens: 1_000_000,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      rateCardCredits: 0.001,
+    },
+  ];
+  const rows = aggregateProjects({ events: [], threads: [] }, events, {
+    rawProjects: true,
+  });
+
+  assert.equal(rows[0].rateCardCredits, 100);
+  assert.equal(rows[1].rateCardCredits, 5);
+  assert.equal(rows[0].knownCreditTokens, 1_000_000);
+  assert.equal(rows[1].knownCreditTokens, 1_000_000);
+
+  const output = renderTerminal({
+    options: { plain: true, ascii: true, width: 100 },
+    snapshot: { events: [], threads: [] },
+    bounds: dayBounds("2026-08-01", "UTC"),
+    events,
+    rows,
+    allRows: rows,
+  });
+  assert.match(output, /95\.2% credits/);
+  assert.match(output, /4\.76% credits/);
+});
+
 test("aggregateProjects keeps capped project shares proportional", () => {
   const huge = Number.MAX_SAFE_INTEGER;
   const events = [
@@ -1012,7 +1073,7 @@ test("explicit snapshots sanitize labels in static output", async () => {
     await writeFile(
       snapshotPath,
       JSON.stringify({
-        schemaVersion: 2,
+        schemaVersion: 3,
         generatedAt: "2026-08-20T12:00:00.000Z",
         events: [{
           timestamp: "2026-08-20T12:00:00.000Z",
@@ -1119,7 +1180,7 @@ test("parseArgs defaults the week end day to today", () => {
   );
   assert.equal(
     options.input,
-    resolve(homedir(), ".token-ledger", "token-ledger-snapshot-v2.json.gz"),
+    resolve(homedir(), ".token-ledger", "token-ledger-snapshot-v3.json.gz"),
   );
   assert.equal(options.input, DEFAULT_SNAPSHOT);
 });
@@ -1165,6 +1226,63 @@ test("parseArgs accepts rolling day and week duration aliases", () => {
   );
 });
 
+test("parseArgs requires an explicit basis for cost ranges", () => {
+  const oneDay = parseArgs(["cost", "1d", "--basis", "api-usd"]);
+  assert.equal(oneDay.view, "cost");
+  assert.equal(oneDay.range, "rolling24h");
+  assert.equal(oneDay.basis, "api-usd");
+  assert.equal(oneDay.static, true);
+
+  const twoWeeks = parseArgs(["cost", "2w", "--basis", "codex-credits"]);
+  assert.equal(twoWeeks.range, "rolling");
+  assert.equal(twoWeeks.rollingDays, 14);
+  assert.equal(twoWeeks.basis, "codex-credits");
+
+  const week = parseArgs(["cost", "week", "--basis", "api-usd"]);
+  assert.equal(week.range, "week");
+  assert.equal(week.date, "today");
+
+  assert.throws(
+    () => parseArgs(["cost", "7d"]),
+    /requires --basis codex-credits or --basis api-usd/,
+  );
+  assert.throws(
+    () => parseArgs(["cost", "month", "--basis", "api-usd"]),
+    /Cost range must be 1d, Nd, Nw, or week/,
+  );
+  assert.throws(
+    () => parseArgs(["cost", "7d", "--basis", "credits"]),
+    /--basis must be codex-credits or api-usd/,
+  );
+  assert.throws(
+    () => parseArgs(["week", "--basis", "api-usd"]),
+    /--basis is only available with the cost command/,
+  );
+});
+
+test("parseArgs rejects cost-incompatible report and interactive flags", () => {
+  const base = ["cost", "7d", "--basis", "api-usd"];
+  const rejections = new Map([
+    ["--drain", /--drain is only available for the trend view/],
+    ["--cache-rate", /--cache-rate is only available with the report command/],
+    ["--image", /--image is only available for the trend view/],
+    ["--no-open", /--no-open is only available for the trend view/],
+    ["--youplot", /--youplot is not available with the cost command/],
+    ["--raw-projects", /--raw-projects is not available with the cost command/],
+    ["--top", /--top is not available with the cost command/],
+    ["--width", /--width is not available with the cost command/],
+    ["--ascii", /--ascii is not available with the cost command/],
+  ]);
+  for (const [flag, message] of rejections) {
+    const args = flag === "--top"
+      ? [...base, flag, "5"]
+      : flag === "--width"
+        ? [...base, flag, "80"]
+        : [...base, flag];
+    assert.throws(() => parseArgs(args), message);
+  }
+});
+
 test("parseArgs accepts --no-open for trend images and rejects it elsewhere", () => {
   const options = parseArgs(["trend", "--image", "--no-open"]);
   assert.equal(options.image, true);
@@ -1182,7 +1300,7 @@ test("rolling view describes an empty range as the last 24 hours", async () => {
   try {
     await writeFile(
       snapshotPath,
-      JSON.stringify({ schemaVersion: 2, events: [], threads: [] }),
+      JSON.stringify({ schemaVersion: 3, events: [], threads: [] }),
     );
     const output = await run(parseArgs([
       "1d",
@@ -1335,7 +1453,7 @@ test("CLI reads an explicit gzip-compressed snapshot", async () => {
   const snapshotPath = resolve(root, "snapshot.json.gz");
   try {
     await writePrivateSnapshot(snapshotPath, {
-      schemaVersion: 2,
+      schemaVersion: 3,
       generatedAt: "2026-08-20T12:00:00.000Z",
       events: [{
         id: "gzip-event",
@@ -1374,6 +1492,42 @@ test("CLI reads an explicit gzip-compressed snapshot", async () => {
   }
 });
 
+test("rejects legacy snapshots before repricing aliases", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-legacy-rate-card-"));
+  const snapshotPath = resolve(root, "snapshot.json");
+  try {
+    await writeFile(snapshotPath, JSON.stringify({
+      schemaVersion: 2,
+      generatedAt: "2026-08-20T12:00:00.000Z",
+      events: [{
+        timestamp: "2026-08-20T12:00:00.000Z",
+        model: "gpt-5.5",
+        serviceTier: "fast",
+        totalTokens: 1_000,
+        inputTokens: 1_000,
+        cachedInputTokens: 0,
+        outputTokens: 0,
+      }],
+      threads: [],
+    }));
+
+    await assert.rejects(
+      () => run(parseArgs([
+        "cost",
+        "1d",
+        "--input",
+        snapshotPath,
+        "--no-refresh",
+        "--basis",
+        "codex-credits",
+      ])),
+      /Snapshot uses an unsupported schema: snapshot\.json\. Rebuild it with --refresh\./,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("refresh and source failures retain context without absolute paths", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-source-privacy-"));
   const missingCodexHome = resolve(root, "missing-codex-home");
@@ -1401,7 +1555,7 @@ test("refresh and source failures retain context without absolute paths", async 
     await writeFile(resolve(codexHome, "sessions"), "not a directory");
     await writeFile(
       staleSnapshotPath,
-      JSON.stringify({ schemaVersion: 2, events: [] }),
+      JSON.stringify({ schemaVersion: 3, events: [] }),
     );
     const staleTime = new Date(Date.now() - 2 * 60 * 60 * 1_000);
     await utimes(staleSnapshotPath, staleTime, staleTime);
@@ -1458,7 +1612,7 @@ test("static freshness uses the wall clock after snapshot loading", async () => 
   const afterLoadMs = beforeLoadMs + 1_000;
   try {
     await writeFile(snapshotPath, JSON.stringify({
-      schemaVersion: 2,
+      schemaVersion: 3,
       generatedAt: new Date(afterLoadMs).toISOString(),
       events: [{
         project: "alpha",
@@ -1709,7 +1863,7 @@ test("unfiltered reads reject a cache with a filtered collection scope", async (
   const snapshotPath = resolve(root, "filtered-snapshot.json");
   try {
     await writePrivateSnapshot(snapshotPath, {
-      schemaVersion: 2,
+      schemaVersion: 3,
       generatedAt: new Date().toISOString(),
       provenance: {
         collection: {
@@ -2184,7 +2338,7 @@ test("empty ranges with uncollected history are reported as not collected", asyn
   const snapshotPath = resolve(root, "scoped-snapshot.json");
   try {
     await writePrivateSnapshot(snapshotPath, {
-      schemaVersion: 2,
+      schemaVersion: 3,
       generatedAt: "2026-08-20T20:00:00.000Z",
       provenance: {
         collection: {
@@ -2343,8 +2497,12 @@ test("quota burn recomputes current card credits when every cycle event is rated
     [displayed],
   );
   assert.equal(quota.shareBasis, "credits");
-  assert.equal(quota.displayedSharePercent, 25);
-  assert.equal(quota.estimatedDisplayedBurnPercent, 5);
+  assert.ok(
+    Math.abs(quota.displayedSharePercent - (5 / 17) * 100) < 1e-12,
+  );
+  assert.ok(
+    Math.abs(quota.estimatedDisplayedBurnPercent - (5 / 17) * 20) < 1e-12,
+  );
 
   const fallbackDisplayed = {
     timestamp: "2026-08-01T00:00:00.000Z",
@@ -2413,12 +2571,18 @@ test("trend burn keeps rated token and credit scales aligned", () => {
         timestamp: "2026-08-01T01:00:00.000Z",
         model: "gpt-5.6-luna",
         totalTokens: huge,
+        inputTokens: huge,
+        cachedInputTokens: 0,
+        outputTokens: 0,
         rateCardCredits: 1,
       },
       {
         timestamp: "2026-08-01T02:00:00.000Z",
         model: "gpt-5.6-luna",
         totalTokens: huge,
+        inputTokens: huge,
+        cachedInputTokens: 0,
+        outputTokens: 0,
         rateCardCredits: 1,
       },
       {
@@ -2513,7 +2677,7 @@ test("compact totals promote values that round to 1000 of a unit", () => {
   assert.doesNotMatch(output, /1000K/);
 });
 
-test("rate lookups normalize whitespace model separators", () => {
+test("purchased-credit rates normalize exact current model identifiers", () => {
   const usage = {
     inputTokens: 1_000_000,
     cachedInputTokens: 0,
@@ -2521,9 +2685,54 @@ test("rate lookups normalize whitespace model separators", () => {
     reasoningTokens: 0,
     totalTokens: 1_000_000,
   };
-  const spaced = creditsForUsage("gpt-5.4 mini", usage);
-  assert.equal(spaced, creditsForUsage("gpt-5.4-mini", usage));
-  assert.notEqual(spaced, creditsForUsage("gpt-5.4", usage));
+  const credits = (model, serviceTier = null) =>
+    calculateCodexPurchasedCredits({ model, serviceTier, usage });
+  const spaced = credits("gpt-5.4 mini");
+  assert.equal(spaced, credits("gpt-5.4-mini"));
+  assert.notEqual(spaced, credits("gpt-5.4"));
+  assert.equal(normalizeCodexCreditModel("gpt-5.5-cyber"), "daybreak-red");
+  assert.equal(
+    normalizeCodexCreditModel("gpt-daybreak-red-latest"),
+    "daybreak-red",
+  );
+  for (const model of [
+    "gpt-daybreak-red",
+    "gpt-5.6-cyber",
+    "gpt-5.5-cyber-preview",
+  ]) {
+    assert.equal(normalizeCodexCreditModel(model), "daybreak-red");
+  }
+  assert.equal(normalizeCodexCreditModel("gpt-daybreak-blue"), "daybreak-blue");
+  assert.equal(codexCreditMultiplier("daybreak-red", "fast"), 2.5);
+  assert.equal(codexCreditMultiplier("daybreak-red", "priority"), 2.5);
+  assert.equal(codexCreditMultiplier("daybreak-blue", "fast"), 2.5);
+  assert.equal(codexCreditMultiplier("daybreak-blue", "priority"), 2.5);
+  assert.equal(codexCreditMultiplier("gpt-daybreak-red", "fast"), 2.5);
+  assert.equal(codexCreditMultiplier("gpt-daybreak-blue", "fast"), 2.5);
+  assert.equal(codexCreditMultiplier("gpt-daybreak-red-latest", "fast"), null);
+});
+
+test("proportional fragments retain detailed token breakdowns through reconciliation noise", () => {
+  const fraction = 1 / 101;
+  const usage = {
+    inputTokens: fraction,
+    cachedInputTokens: 0,
+    outputTokens: 5 * fraction,
+    totalTokens: 6 * fraction,
+    rangeAllocationEstimated: true,
+  };
+
+  assert.notEqual(usage.inputTokens + usage.outputTokens, usage.totalTokens);
+  assert.equal(hasDetailedTokenBreakdown(usage), true);
+  assert.ok(Number.isFinite(calculateCodexPurchasedCredits({
+    model: "gpt-5.6-luna",
+    serviceTier: null,
+    usage,
+  })));
+  assert.equal(
+    hasDetailedTokenBreakdown({ ...usage, totalTokens: 7 * fraction }),
+    false,
+  );
 });
 
 test("quota normalization is monotone inside cycles and marks resets", () => {
@@ -3086,7 +3295,7 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
   // mode stat card explains it.
   assert.match(svg, /fill="#0a655c"/);
   assert.match(svg, /FAST MODE/);
-  assert.match(svg, /1\.50×/);
+  assert.match(svg, /2\.50×/);
   assert.match(svg, /Darker shade = fast mode/);
   // The projects row and the pace block sit in the combined layout.
   assert.match(svg, /WHERE IT WENT · TOP PROJECTS/);
@@ -4436,7 +4645,7 @@ test("report emits progress while generating the PNG", async () => {
     await writeFile(
       snapshotPath,
       `${JSON.stringify({
-        schemaVersion: 2,
+        schemaVersion: 3,
         generatedAt: "2026-08-15T12:00:00.000Z",
         events: [
           {
@@ -4496,7 +4705,7 @@ test("cache-rate report uses its separate renderer and progress label", async ()
     await writeFile(
       snapshotPath,
       `${JSON.stringify({
-        schemaVersion: 2,
+        schemaVersion: 3,
         generatedAt: "2026-08-15T12:00:00.000Z",
         events: [
           {
@@ -4553,7 +4762,7 @@ test("cache-rate report ignores unused project metadata for an empty range", asy
     await writeFile(
       snapshotPath,
       `${JSON.stringify({
-        schemaVersion: 2,
+        schemaVersion: 3,
         generatedAt: "2026-08-15T12:00:00.000Z",
         events: [
           null,
@@ -4603,7 +4812,7 @@ test("standard image views retain the empty-range diagnostic", async () => {
     await writeFile(
       snapshotPath,
       `${JSON.stringify({
-        schemaVersion: 2,
+        schemaVersion: 3,
         generatedAt: "2026-08-15T12:00:00.000Z",
         events: [
           null,
@@ -4652,7 +4861,7 @@ test("cache-rate report uses a distinct default filename", async () => {
     await writeFile(
       snapshotPath,
       `${JSON.stringify({
-        schemaVersion: 2,
+        schemaVersion: 3,
         generatedAt: "2026-08-15T12:00:00.000Z",
         events: [
           {
@@ -5134,7 +5343,7 @@ test("burn day bins place observed drops on days in meter percent units", () => 
         rateCardCredits: 9_999,
       },
       {
-        // 100K uncached Sol input = 12.5 credits.
+        // 100K uncached Sol input = 10 credits under the promotional card.
         timestamp: "2026-08-12T12:00:00.000Z",
         model: "gpt-5.6-sol",
         totalTokens: 100_000,
@@ -5174,8 +5383,8 @@ test("burn day bins place observed drops on days in meter percent units", () => 
 
   const day12 = burn.bins[3];
   assert.equal(day12.startDateString, "2026-08-12");
-  approximately(day12.values.get("Luna"), 10);
-  approximately(day12.values.get("Sol"), 10);
+  approximately(day12.values.get("Luna"), 20 * (12.5 / 22.5));
+  approximately(day12.values.get("Sol"), 20 * (10 / 22.5));
   // The eventless 54-hour drop is spread across its span by duration and
   // flagged approximate: 6h on Aug 12, 24h each on Aug 13 and Aug 14.
   approximately(day12.values.get("Unattributed"), 20 * (6 / 54));
@@ -5183,36 +5392,427 @@ test("burn day bins place observed drops on days in meter percent units", () => 
   approximately(burn.bins[5].values.get("Unattributed"), 20 * (24 / 54));
   assert.equal(burn.bins[5].approximate, true);
   approximately(burn.totalPercent, 40);
-  approximately(burn.totals.get("Luna"), 10);
-  approximately(burn.totals.get("Sol"), 10);
+  approximately(burn.totals.get("Luna"), 20 * (12.5 / 22.5));
+  approximately(burn.totals.get("Sol"), 20 * (10 / 22.5));
   approximately(burn.totals.get("Unattributed"), 20);
 });
 
 test("rate card prices Luna at the current published credit rates", () => {
-  const credits = creditsForUsage("gpt-5.6-luna", {
-    totalTokens: 2_000_000,
-    inputTokens: 1_000_000,
-    cachedInputTokens: 0,
-    outputTokens: 1_000_000,
+  const credits = calculateCodexPurchasedCredits({
+    model: "gpt-5.6-luna",
+    serviceTier: null,
+    usage: {
+      totalTokens: 2_000_000,
+      inputTokens: 1_000_000,
+      cachedInputTokens: 0,
+      outputTokens: 1_000_000,
+    },
   });
   assert.equal(credits, 35);
 });
 
-test("rate card tolerates estimated floating-point component drift", () => {
-  const credits = creditsForUsage("gpt-5.6-luna", {
-    totalTokens: 2,
-    inputTokens: 1 / 3,
+test("unsupported fast aliases remain unrated after snapshot recomputation", () => {
+  const event = {
+    model: "daybreak-red",
+    rateCardModel: "gpt-daybreak-red-latest",
+    serviceTier: "priority",
+    totalTokens: 100_000,
+    inputTokens: 100_000,
     cachedInputTokens: 0,
-    outputTokens: 5 / 3,
-    rangeAllocationEstimated: true,
-    breakdownAvailable: true,
-  });
+    outputTokens: 0,
+  };
 
-  assert.ok(credits !== null);
-  assert.ok(Math.abs(credits - ((1 / 3 * 5 + 5 / 3 * 30) / 1_000_000)) < 1e-12);
+  assert.equal(eventCredits(event), null);
+  const rows = aggregateProjects(
+    { events: [], threads: [] },
+    [event],
+    { rawProjects: true },
+  );
+  assert.equal(rows[0].rateCardCredits, 0);
 });
 
-test("fast-mode turns weigh 1.5x in the burn allocation", () => {
+test("purchased-credit calculator applies current rows and fast tiers", () => {
+  const usage = {
+    totalTokens: 3_000_000,
+    inputTokens: 2_000_000,
+    cachedInputTokens: 1_000_000,
+    outputTokens: 1_000_000,
+    reasoningTokens: 1_000_000,
+  };
+  const credits = (model, serviceTier = null, eventUsage = usage) =>
+    calculateCodexPurchasedCredits({ model, serviceTier, usage: eventUsage });
+
+  assert.equal(credits("gpt-5.6-sol"), 610);
+  assert.equal(credits("gpt-5.5-cyber"), 2_218.75);
+  assert.equal(credits("daybreak-red", "priority"), 5_546.875);
+  assert.equal(credits("daybreak-blue", "fast"), 1_525);
+  assert.equal(credits("gpt-5.6-sol", " Priority "), 1_525);
+  assert.equal(credits("gpt-5.5", "FAST"), 2_218.75);
+  assert.equal(credits("gpt-5.4", "fast"), 887.5);
+  assert.equal(codexCreditMultiplier("gpt-5.6-luna", "priority"), 2.5);
+  assert.equal(codexCreditMultiplier("gpt-5.4", "fast"), 2);
+
+  for (const tier of ["priority", " Priority ", "fast", "FAST"]) {
+    assert.equal(isFastServiceTier(tier), true);
+  }
+  for (const tier of [null, "", "standard", "flex", "ultrafast", "unknown"]) {
+    assert.equal(isFastServiceTier(tier), false);
+    assert.equal(credits("gpt-5.6-sol", tier), 610);
+  }
+
+  assert.equal(credits("gpt-5.4-mini", "fast"), null);
+  assert.equal(credits("future-model", "priority"), null);
+  assert.equal(credits("future-model", null), null);
+  assert.equal(
+    credits("gpt-5.6-sol", null, {
+      totalTokens: 3_000_000,
+      inputTokens: 2_000_000,
+    }),
+    null,
+  );
+});
+
+test("API USD calculator keeps cache partitions exclusive and separate from credits", () => {
+  const usage = {
+    model: "gpt-5.6-sol",
+    totalTokens: 210_000,
+    inputTokens: 200_000,
+    cachedInputTokens: 50_000,
+    cacheWriteInputTokens: 25_000,
+    outputTokens: 10_000,
+    reasoningTokens: 5_000,
+    callCount: 1,
+  };
+  const partition = partitionTokenUsage(usage);
+  assert.deepEqual(partition, {
+    uncachedInputTokens: 125_000,
+    cachedInputTokens: 50_000,
+    cacheWriteInputTokens: 25_000,
+    outputTokens: 10_000,
+    reasoningTokens: 5_000,
+  });
+  assert.equal(
+    partition.uncachedInputTokens + partition.cachedInputTokens +
+      partition.cacheWriteInputTokens,
+    usage.inputTokens,
+  );
+
+  const api = apiUsdForUsage(usage);
+  const credits = calculateCodexPurchasedCredits({
+    model: usage.model,
+    usage,
+  });
+  assert.equal(api.amount, 0.845);
+  assert.equal(api.currency, "USD");
+  assert.equal(api.ratedTokens, usage.totalTokens);
+  assert.equal(api.unratedTokens, 0);
+  assert.equal(api.complete, true);
+  assert.equal(credits, 20.5);
+  assert.notEqual(api.amount, credits);
+});
+
+test("API USD calculator has explicit standard text rates for every credit-card model", () => {
+  const expected = new Map([
+    ["gpt-5.6-sol", [4, 0.4, 20]],
+    ["gpt-5.6-terra", [2, 0.2, 12]],
+    ["gpt-5.6-luna", [0.2, 0.02, 1.2]],
+    ["gpt-5.5", [5, 0.5, 30]],
+    ["daybreak-blue", [4, 0.4, 20]],
+    ["daybreak-red", [12.5, 1.25, 75]],
+    ["gpt-5.4", [2.5, 0.25, 15]],
+    ["gpt-5.4-mini", [0.75, 0.075, 4.5]],
+    ["gpt-5.3-codex", [1.75, 0.175, 14]],
+    ["gpt-5.2", [1.75, 0.175, 14]],
+  ]);
+  const amount = (model, inputTokens, cachedInputTokens, outputTokens) =>
+    apiUsdForUsage({
+      model,
+      totalTokens: inputTokens + outputTokens,
+      inputTokens,
+      cachedInputTokens,
+      outputTokens,
+    }).amount;
+  const approximately = (actual, expected, label) =>
+    assert.ok(
+      Math.abs(actual - expected) < 1e-12,
+      `${label}: expected ${expected}, got ${actual}`,
+    );
+
+  for (const [model, [input, cached, output]] of expected) {
+    approximately(amount(model, 100_000, 0, 0), input / 10, `${model} input`);
+    approximately(
+      amount(model, 100_000, 100_000, 0),
+      cached / 10,
+      `${model} cached input`,
+    );
+    approximately(amount(model, 0, 0, 1_000_000), output, `${model} output`);
+  }
+});
+
+test("API USD calculator applies Sol fast and exact long-context prices", () => {
+  const event = (inputTokens, serviceTier = null, callCount = 1) => ({
+    model: "gpt-5.6-sol",
+    serviceTier,
+    totalTokens: inputTokens + 1_000,
+    inputTokens,
+    cachedInputTokens: 0,
+    cacheWriteInputTokens: 0,
+    outputTokens: 1_000,
+    callCount,
+  });
+  const atThreshold = apiUsdForUsage(
+    event(API_USD_LONG_CONTEXT_THRESHOLD_TOKENS),
+  );
+  assert.equal(atThreshold.amount, 1.108);
+
+  const aboveThreshold = apiUsdForUsage(
+    event(API_USD_LONG_CONTEXT_THRESHOLD_TOKENS + 1),
+  );
+  assert.equal(aboveThreshold.amount, 2.206008);
+
+  for (const tier of ["fast", " FAST ", "priority", " Priority "]) {
+    assert.equal(
+      apiUsdForUsage(event(100_000, tier)).amount,
+      0.84,
+    );
+  }
+  assert.equal(
+    apiUsdForUsage(event(API_USD_LONG_CONTEXT_THRESHOLD_TOKENS + 1, "fast")).amount,
+    4.412016,
+  );
+});
+
+test("API USD calculator is conservative for compacted and unsupported usage", () => {
+  const sol = (inputTokens, callCount) => ({
+    model: "gpt-5.6-sol",
+    totalTokens: inputTokens,
+    inputTokens,
+    cachedInputTokens: 0,
+    outputTokens: 0,
+    callCount,
+  });
+  const safe = apiUsdForUsage(sol(200_000, 2));
+  assert.equal(safe.amount, 0.8);
+  assert.equal(safe.complete, true);
+  assert.equal(safe.estimated, true);
+
+  const ambiguous = apiUsdForUsage(sol(300_000, 2));
+  assert.equal(ambiguous.amount, null);
+  assert.equal(ambiguous.ratedTokens, 0);
+  assert.equal(ambiguous.unratedTokens, 300_000);
+  assert.deepEqual(ambiguous.reasons, ["compacted-long-context-ambiguous"]);
+
+  const unknownCompactedCount = apiUsdForUsage({
+    ...sol(300_000, undefined),
+    callCount: undefined,
+    resolutionSeconds: 3_600,
+  });
+  assert.equal(unknownCompactedCount.amount, null);
+  assert.deepEqual(
+    unknownCompactedCount.reasons,
+    ["compacted-long-context-ambiguous"],
+  );
+
+  const exactMissingCount = apiUsdForUsage({
+    ...sol(300_000, undefined),
+    callCount: undefined,
+  });
+  assert.equal(exactMissingCount.amount, 2.4);
+
+  const ultrafast = apiUsdForUsage({ ...sol(100_000, 1), serviceTier: "ultrafast" });
+  assert.equal(ultrafast.amount, null);
+  assert.deepEqual(ultrafast.reasons, ["ultrafast-unrated"]);
+
+  const unsupportedFast = apiUsdForUsage({
+    ...sol(100_000, 1),
+    model: "gpt-5.5",
+    serviceTier: "priority",
+  });
+  assert.equal(unsupportedFast.amount, null);
+  assert.deepEqual(unsupportedFast.reasons, ["unsupported-api-fast-tier"]);
+
+  assert.equal(apiUsdForUsage({
+    ...sol(100_000, 1),
+    model: "future-model",
+  }).amount, null);
+  assert.equal(apiUsdForUsage({
+    model: "gpt-5.6-sol",
+    totalTokens: 100_000,
+    inputTokens: 100_000,
+  }).amount, null);
+
+  const partialCacheWrite = apiUsdForUsage({
+    model: "gpt-5.5",
+    totalTokens: 1_100,
+    inputTokens: 1_000,
+    cachedInputTokens: 0,
+    cacheWriteInputTokens: 200,
+    outputTokens: 100,
+  });
+  assert.equal(partialCacheWrite.ratedTokens, 900);
+  assert.equal(partialCacheWrite.unratedTokens, 200);
+  assert.equal(partialCacheWrite.complete, false);
+  assert.deepEqual(partialCacheWrite.reasons, ["unsupported-cache-write-price"]);
+});
+
+test("sliced compacted long-context buckets remain ambiguous", () => {
+  const startMs = Date.parse("2026-08-15T00:00:00.000Z");
+  const [first, second] = splitUsageBucketsAtBoundaries(
+    [{
+      timestamp: new Date(startMs + 3_600_000).toISOString(),
+      startAt: new Date(startMs).toISOString(),
+      endAt: new Date(startMs + 7_200_000).toISOString(),
+      model: "gpt-5.6-sol",
+      totalTokens: 400_000,
+      inputTokens: 400_000,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      callCount: 2,
+    }],
+    [startMs + 3_600_000],
+  );
+
+  for (const fragment of [first, second]) {
+    assert.ok(Math.abs(fragment.inputTokens - 200_000) < 1);
+    assert.ok(Math.abs(fragment.callCount - 1) < 1e-6);
+    assert.equal(fragment.rangeAllocationEstimated, true);
+    const estimate = apiUsdForUsage(fragment);
+    assert.equal(estimate.amount, null);
+    assert.deepEqual(estimate.reasons, ["compacted-long-context-ambiguous"]);
+  }
+});
+
+test("cost renderer labels units, coverage, and unrated usage explicitly", () => {
+  const bounds = weekBounds("2026-08-23", "UTC");
+  const events = [
+    {
+      model: "gpt-5.6-sol",
+      totalTokens: 101_000,
+      inputTokens: 100_000,
+      cachedInputTokens: 0,
+      outputTokens: 1_000,
+      callCount: 1,
+    },
+    {
+      model: "future-model",
+      totalTokens: 50_000,
+      inputTokens: 50_000,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+    },
+  ];
+  const api = renderCostTerminal({ events, bounds, basis: "api-usd" });
+  assert.match(api, /^Hypothetical API-equivalent cost \(USD\)/);
+  assert.match(api, /Total rated amount: \$0\.42/);
+  assert.match(api, /Rated token coverage: 66\.9%/);
+  assert.match(api, /Unrated tokens: 50\.0K/);
+  assert.match(api, /unknown-model/);
+  assert.match(api, /not an actual bill/);
+
+  const credits = renderCostTerminal({ events, bounds, basis: "codex-credits" });
+  assert.match(credits, /^Codex purchased-credit estimate/);
+  assert.match(credits, /credits/);
+  assert.doesNotMatch(credits, /\$/);
+  assert.match(credits, /do not infer included-plan/);
+
+  const unrated = renderCostTerminal({
+    events: [events[1]],
+    bounds,
+    basis: "api-usd",
+  });
+  assert.match(unrated, /Total rated amount: —/);
+  assert.doesNotMatch(unrated, /\$0\.00/);
+});
+
+test("cost renderer sanitizes fallback model labels", () => {
+  const output = renderCostTerminal({
+    events: [{
+      model: "future\u001b]2;owned\u0007-model",
+      totalTokens: 1_000,
+      inputTokens: 1_000,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+    }],
+    bounds: weekBounds("2026-08-23", "UTC"),
+    basis: "api-usd",
+  });
+
+  assert.match(output, /future-model/);
+  assert.doesNotMatch(output, /owned/);
+  assert.doesNotMatch(output, /\u001b/);
+});
+
+test("trend fast shading recognizes both tiers and reports mixed model rates", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+  const event = (model, serviceTier, totalTokens) => ({
+    timestamp: "2026-08-12T12:00:00.000Z",
+    model,
+    serviceTier,
+    totalTokens,
+    inputTokens: totalTokens,
+    cachedInputTokens: 0,
+    outputTokens: 0,
+  });
+  const snapshot = {
+    generatedAt: "2026-08-15T00:00:00.000Z",
+    events: [
+      event("gpt-5.4", "priority", 1_000_000),
+      event("gpt-5.5", " FAST ", 3_000_000),
+      event("gpt-5.4-mini", "fast", 2_000_000),
+      event("gpt-5.6-sol", "standard", 1_000_000),
+      event("gpt-5.6-sol", "ultrafast", 1_000_000),
+    ],
+  };
+  const bins = buildActualTokenBins(snapshot, bounds, 7, 1_000);
+  assert.equal(
+    [...bins.fastTotals.values()].reduce((sum, value) => sum + value, 0),
+    6_000_000,
+  );
+
+  const svg = renderTrendImage({ snapshot, bounds, days: 7 });
+  assert.match(svg, /2\.43×/);
+  assert.match(svg, /2×–2\.5× by model/);
+  assert.match(svg, /some fast usage unrated/);
+  assert.match(svg, /Darker shade = fast mode/);
+
+  const unsupportedSvg = renderTrendImage({
+    snapshot: {
+      generatedAt: snapshot.generatedAt,
+      events: [event("gpt-5.4-mini", "fast", 2_000_000)],
+    },
+    bounds,
+    days: 7,
+  });
+  assert.match(unsupportedSvg, /UNRATED/);
+  assert.doesNotMatch(unsupportedSvg, /1\.00×/);
+});
+
+test("runtime rejects stale stored credits when current pricing is unavailable", () => {
+  assert.equal(eventCredits({
+    model: "future-model",
+    serviceTier: null,
+    totalTokens: 1_000,
+    inputTokens: 1_000,
+    outputTokens: 0,
+    rateCardCredits: 9_999,
+  }), null);
+  assert.equal(eventCredits({
+    model: "gpt-5.6-sol",
+    serviceTier: "fast",
+    totalTokens: 1_000,
+    rateCardCredits: 9_999,
+  }), null);
+  assert.equal(eventCredits({
+    model: "gpt-5.6-sol",
+    serviceTier: null,
+    totalTokens: 1_000,
+    inputTokens: 1_000,
+    outputTokens: 0,
+    rateCardCredits: 9_999,
+  }), 0.1);
+});
+
+test("fast-mode turns use model-specific credit weights in burn allocation", () => {
   const bounds = multiDayBounds("2026-08-15", "UTC", 7);
   const resetsAt = Date.parse("2026-08-16T00:00:00.000Z") / 1_000;
   const snapshot = {
@@ -5255,9 +5855,74 @@ test("fast-mode turns weigh 1.5x in the burn allocation", () => {
   const trend = buildUsageTrend(snapshot, bounds);
   const burn = buildBurnDayBins(trend, bounds, { days: 7, binSize: 1 });
   const day = burn.bins.find((bin) => bin.startDateString === "2026-08-12");
-  // 187.5 fast credits vs 125 normal credits: 25% splits 15 / 10.
-  assert.ok(Math.abs(day.values.get("Sol") - 15) < 0.01);
-  assert.ok(Math.abs(day.values.get("GPT-5.5") - 10) < 0.01);
+  // 250 fast Sol credits vs 125 standard GPT-5.5 credits: 25% splits 2:1.
+  assert.ok(Math.abs(day.values.get("Sol") - 16.6667) < 0.01);
+  assert.ok(Math.abs(day.values.get("GPT-5.5") - 8.3333) < 0.01);
+});
+
+test("canonical Daybreak fast tiers retain rate-card burn weights", () => {
+  const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+  const resetsAt = Date.parse("2026-08-16T00:00:00.000Z") / 1_000;
+  const event = (model, serviceTier) => ({
+    timestamp: "2026-08-12T12:00:00.000Z",
+    model,
+    serviceTier,
+    totalTokens: 1_000_000,
+    inputTokens: 1_000_000,
+    cachedInputTokens: 0,
+    outputTokens: 0,
+  });
+  const snapshot = {
+    events: [
+      event("daybreak-red", "priority"),
+      event("daybreak-blue", "fast"),
+      event("gpt-5.5", null),
+    ],
+    quotaObservations: [
+      {
+        timestamp: "2026-08-12T06:00:00.000Z",
+        usedPercent: 0,
+        windowMinutes: 10_080,
+        resetsAt,
+      },
+      {
+        timestamp: "2026-08-12T18:00:00.000Z",
+        usedPercent: 25,
+        windowMinutes: 10_080,
+        resetsAt,
+      },
+    ],
+  };
+
+  const trend = buildUsageTrend(snapshot, bounds);
+  const burn = buildBurnDayBins(trend, bounds, { days: 7, binSize: 1 });
+  const day = burn.bins.find((bin) => bin.startDateString === "2026-08-12");
+
+  assert.equal(trend.allocationMethod, "rate-card weights");
+  // Daybreak credits are 25 + 8 + 4 standard credit units here, so the
+  // combined Daybreak share is 33/37 of the observed 25-point drain.
+  assert.ok(Math.abs(day.values.get("Daybreak") - 22.2973) < 0.01);
+  assert.ok(Math.abs(day.values.get("GPT-5.5") - 2.7027) < 0.01);
+});
+
+test("purchased-credit reports rate canonical Daybreak fast tiers", () => {
+  const output = renderCostTerminal({
+    events: [{
+      model: "daybreak-red",
+      serviceTier: "priority",
+      totalTokens: 1_000_000,
+      inputTokens: 1_000_000,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+    }],
+    bounds: weekBounds("2026-08-23", "UTC"),
+    basis: "codex-credits",
+  });
+
+  assert.match(output, /Daybreak Red/);
+  assert.match(output, /Total rated amount: 781\.250 credits/);
+  assert.match(output, /Rated token coverage: 100\.0%/);
+  assert.match(output, /Unrated tokens: 0/);
 });
 
 test("the report command writes the dashboard image by default", () => {

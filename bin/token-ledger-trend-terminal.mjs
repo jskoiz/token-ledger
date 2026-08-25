@@ -15,6 +15,7 @@ import {
   localDateString,
   shiftCalendarDate,
 } from "../lib/token-ledger-calendar.mjs";
+import { isFastServiceTier } from "../lib/token-ledger-rates.mjs";
 import { sanitizeTerminalText } from "../lib/token-ledger-terminal-text.mjs";
 
 export { chooseBinSize } from "./token-ledger-image-layout.mjs";
@@ -282,7 +283,7 @@ export function buildActualTokenBins(
     bin.calls = checkedTokenAdd(bin.calls, usageCallCount(event), {
       allowFractional,
     });
-    addBinTokens(bin, model, tokens, event.serviceTier === "priority");
+    addBinTokens(bin, model, tokens, isFastServiceTier(event.serviceTier));
   }
 
   const totalsState = {

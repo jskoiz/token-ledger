@@ -29,6 +29,8 @@ use `npx tledger` instead.
 | Last 24 hours | `tledger 1d` |
 | Last 7 calendar days | `tledger week` |
 | Rolling 30 days | `tledger 30d` |
+| Purchased-credit estimate | `tledger cost 7d --basis codex-credits` |
+| Hypothetical API USD estimate | `tledger cost 7d --basis api-usd` |
 | 7-day PNG report | `tledger report 7d` |
 | Cache-only PNG report | `tledger report 7d --cache-rate` |
 
@@ -55,6 +57,42 @@ dashboard is interactive. `j`/`k` select a project; `q`, `Q`, `Esc`, or
 `Ctrl-C` exits. Enter does not inspect a project, and `d` / `w` / `m` do not
 change the range; choose the range in the command.
 
+## Cost estimates
+
+The `cost` command is a static terminal report and always requires an explicit
+basis. It accepts `1d`, any positive `Nd` or `Nw` duration, or `week`:
+
+```bash
+tledger cost 7d --basis codex-credits --no-refresh --plain
+tledger cost week --basis api-usd --no-refresh --plain
+```
+
+Both reports recompute the selected local events against a dated rate card and
+show rated-token coverage, unrated tokens, and reason labels. They do not reuse
+a stored amount when current pricing is unavailable.
+
+| Basis | Unit and estimate | It does not prove |
+| --- | --- | --- |
+| `codex-credits` | Eligible usage paid with Codex purchased credits | Included-plan meter consumption, five-hour or weekly limits, or API dollars |
+| `api-usd` | Hypothetical API-equivalent text-token cost in USD | An API invoice, account usage, contract terms, taxes, regional pricing, or unsupported tool/image/search charges |
+
+The API basis partitions cached reads, cache writes, and uncached input without
+double counting. Published GPT-5.6 cache-write pricing is applied when the
+local record contains cache-write tokens. GPT-5.6 Sol API `fast` and `priority`
+usage is priced at 2× the corresponding Standard API rate; this is separate
+from the 2.5× purchased-credit multiplier. `ultrafast`, other unsupported
+tiers, and fast use without a published model-specific API price remain
+unrated.
+
+For an exact single GPT-5.6 Sol call above 272,000 input tokens, the API basis
+applies the published long-context rates to the full request. A compacted
+multi-call bucket at or below that aggregate threshold is safely priced at the
+standard context rate. Above it, Token Ledger cannot recover which individual
+request crossed the threshold, so the bucket is visibly unrated as
+`compacted-long-context-ambiguous` rather than guessed. Local history can also
+be incomplete or pruned, and unrecognized models or incomplete token
+breakdowns reduce coverage instead of becoming zero-cost usage.
+
 Calendar boundaries use the first representable instant on a local date when
 midnight is skipped. If a time-zone transition skips an entire local date, that
 date contributes an empty interval and the next representable date boundary is
@@ -74,7 +112,7 @@ Use `--image-output`, `--image-width`, `--date`, `--tz`, and `--no-open` the
 same way as on the standard report.
 
 The default privacy-reduced snapshot is
-`~/.token-ledger/token-ledger-snapshot-v2.json.gz`. It is gzip-compressed,
+`~/.token-ledger/token-ledger-snapshot-v3.json.gz`. It is gzip-compressed,
 written atomically with mode `0600`, targets 12 MiB, and has a hard 16 MiB
 on-disk limit. Its expanded JSON representation also targets 48 MiB and has a
 64 MiB safety limit, so the old 93 MiB raw-cache behavior cannot recur on the
@@ -125,7 +163,7 @@ tledger week --refresh --since 2026-08-01T00:00:00Z
 tledger week --no-refresh
 
 # Read an explicit snapshot without automatic freshness checks
-tledger week --input /path/to/token-ledger-snapshot-v2.json.gz
+tledger week --input /path/to/token-ledger-snapshot-v3.json.gz
 ```
 
 `--refresh` rebuilds the default snapshot and cannot be combined with
@@ -134,13 +172,13 @@ occurs, and their collection scope must match a reusable cache. The collector
 can also be run directly:
 
 ```bash
-node lib/token-ledger-importer.mjs --output /path/to/token-ledger-snapshot-v2.json.gz
+node lib/token-ledger-importer.mjs --output /path/to/token-ledger-snapshot-v3.json.gz
 ```
 
 Explicit `.json` snapshots remain readable for fixtures and deliberate exports,
 but `.json.gz` is the bounded production cache format. After an upgrade, the
-new cache does not read or delete schema-v1 cache files; remove an old generated
-cache separately once the v2 cache is proven.
+new cache does not read or delete schema-v1 or schema-v2 cache files; remove an
+old generated cache separately once the v3 cache is proven.
 
 ## Report versus CLI
 
@@ -212,10 +250,21 @@ prevent rollout token collection; the snapshot records its normalized status in
 
 ## What is estimated
 
-Credit values use the hardcoded rate card dated **2026-08-17**. Cached input is
-priced separately, priority/fast-mode events use the 1.5× multiplier, and
-events without a detailed breakdown or known model rate are unrated. These are
-rate-card estimates, not provider billing totals.
+`rateCardCredits` estimates eligible Codex usage paid with purchased credits
+using the hardcoded OpenAI rate card dated **2026-08-23**. Cached input is
+priced separately. Both `priority` and `fast` service tiers are recognized:
+supported GPT-5.6 and GPT-5.5 models consume purchased credits at 2.5× the
+standard rate, while supported GPT-5.4 consumes them at 2×. Fast mode's
+approximately 1.5× figure describes model speed, not credit consumption.
+Events without a detailed input/output breakdown, a known model rate, or a
+published fast multiplier are unrated.
+
+These purchased-credit estimates are not API-dollar estimates. The separate
+`cost --basis api-usd` view uses an independent API rate card and does not
+convert credits to dollars. GPT-5.6 Sol's promotional purchased-credit rate
+does not determine included plan usage, five-hour or weekly limits, or legacy
+credit rates. Raw observed token counts and recorded meter readings remain
+unchanged by either calculator.
 
 When meter observations are available, report bars in `--drain` mode represent
 observed meter drops; model attribution within a drop uses rate-card weights
@@ -223,6 +272,10 @@ when possible and token weights as a fallback. Long observation gaps are
 spread across local calendar days as estimates. Tokens-per-meter-point,
 model-split burn, runway, and CLI `View burn` are derived estimates. None is
 official billing, quota, or account-completeness truth.
+
+Model allocation remains an estimate even when current credit weights are
+available. Local history can be pruned or incomplete, so it is not an
+authoritative lifetime account record.
 
 ## Verify
 

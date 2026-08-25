@@ -7,7 +7,7 @@ import { buildUsageTrend, multiDayBounds } from "../bin/token-ledger-trend.mjs";
 import { buildActualTokenBins } from "../bin/token-ledger-trend-terminal.mjs";
 import { usageBuckets } from "../lib/token-ledger-usage.mjs";
 
-const input = process.argv[2] || "/Users/jk/.token-ledger/token-ledger-snapshot-v2.json.gz";
+const input = process.argv[2] || "/Users/jk/.token-ledger/token-ledger-snapshot-v3.json.gz";
 const output = process.argv[3] || resolve("artifacts", "token-ledger-trend-youplot-7d.svg");
 const rawOutput = output.replace(/\.svg$/i, ".txt");
 const width = Number(process.argv[4]) || 82;
