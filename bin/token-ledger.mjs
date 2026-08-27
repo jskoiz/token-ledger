@@ -197,7 +197,8 @@ Help:
   -h, --help                Show the quick guide
   --help-all                Show this complete reference
 
-The default snapshot is ~/.token-ledger/token-ledger-snapshot-v3.json.gz.
+The default snapshot is ~/.token-ledger/token-ledger-snapshot-v3.json.gz and
+the durable ledger is ~/.token-ledger/token-ledger-ledger.sqlite.
 Token Ledger reads local Codex data only. It does not upload your usage.`;
 }
 
@@ -1188,6 +1189,29 @@ export async function loadSnapshot(options) {
     );
   }
   if (!sourceWatermarksEqual(cached.sourceWatermark, inventory.watermark)) {
+    try {
+      return {
+        snapshot: await refreshSnapshot(options),
+        sourceStatus: "verified-current",
+      };
+    } catch {
+      return { snapshot: cached, sourceStatus: "stale-fallback" };
+    }
+  }
+  const {
+    readDurableLedgerRevision,
+    resolveDurableLedgerPath,
+  } = await import("../lib/token-ledger-ledger.mjs");
+  const ledgerRevision = await readDurableLedgerRevision(
+    resolveDurableLedgerPath({ output: options.input }),
+  );
+  const snapshotRevision = Number(
+    cached.metadata?.durableLedger?.revision,
+  );
+  if (
+    ledgerRevision !== null &&
+    (!Number.isSafeInteger(snapshotRevision) || snapshotRevision < ledgerRevision)
+  ) {
     try {
       return {
         snapshot: await refreshSnapshot(options),

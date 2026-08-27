@@ -168,11 +168,43 @@ legacy renderer and is not required for the default dashboard.
 
 The CLI reads from `CODEX_HOME` when set, otherwise `~/.codex`. It uses local
 Codex rollout JSONL files, the session index, and local state metadata. It
-writes its privacy-reduced cache to:
+writes a replaceable, privacy-reduced report snapshot to:
 
 ```text
-~/.token-ledger/token-ledger-snapshot.json
+~/.token-ledger/token-ledger-snapshot-v3.json.gz
 ```
+
+It also maintains the durable local ledger separately at:
+
+```text
+~/.token-ledger/token-ledger-ledger.sqlite
+```
+
+The ledger is the append-and-deduplicate source of truth for committed token
+events, quota samples, source state, and useful thread metadata. The snapshot
+is a generated export and can be replaced or rebuilt without deleting ledger
+history. Refreshes scan both `sessions` and `archived_sessions`; a source that
+is removed is recorded as missing or tombstoned, and its committed observations
+remain available. A file replacement or truncation is recorded as a mutable
+source change and does not re-add earlier observations.
+
+Exact observations are retained for 3,650 days. Older observations are
+compacted into UTC daily buckets with additive totals and source membership;
+the supported report window is never silently compacted away. Existing v3
+snapshots are migrated once, when readable, into explicitly marked
+`migrated_compacted` rows. Those rows preserve totals and ranges but do not
+invent exact event or turn identities, and remain marked as estimated in
+coverage. A missing legacy snapshot is also recorded as checked so a later
+refresh cannot unexpectedly migrate a different file into the same ledger.
+
+Compacted rows are retained for 7,300 days (20 years) before retirement.
+Source, quota, tool, and state-only thread metadata are pruned only after they
+are outside the applicable retention horizon; the supported report window is
+never silently dropped.
+
+The default snapshot and ledger directories are private (`0700`), and their
+files are private (`0600`). An explicit `--input` reads only that deliberate
+snapshot input; it does not use the default durable ledger as a hidden source.
 
 The collector does not export message bodies, reasoning text, tool arguments or
 results, credentials, file contents, or full local paths. Display titles may
