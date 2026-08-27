@@ -129,8 +129,8 @@ Use `trend 14d` for daily columns across two weeks. At 30 days, the terminal
 uses readable multi-day bins: three-day bins at ordinary widths and two-day
 bins on wider terminals. The image view keeps daily columns while they stay
 legible and falls back to the same readable multi-day binning for longer
-windows. The footer's rate-card date describes the attribution card used for
-meter-drain weighting; subscription limits are not billed per token.
+windows. Meter-drain weighting uses the rate card bundled with this release;
+subscription limits are not billed per token.
 
 The CLI automatically checks the local Codex source files before rendering. If
 they are newer than the local cache, it rebuilds the privacy-reduced snapshot.
