@@ -3271,22 +3271,18 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
   assert.match(svg, /Sol/);
   // The fixture's second window follows a genuine weekly expiry, so the
   // dashed reset break appears with its callout.
-  assert.match(svg, /RESET \(100%\)/);
+  assert.match(svg, />RESET<\/text>/);
   // Fast mode renders as a hatch overlay inside the model segment, never as
   // its own pseudo-model, and the KPI reports actual fast tokens.
   assert.match(svg, /fast-mode-hatch/);
   assert.match(svg, /url\(#fast-mode-hatch\)/);
-  assert.match(svg, /of total usage/);
+  assert.match(svg, /of usage/);
   assert.doesNotMatch(svg, /1\.50× rate/);
-  // The lower panels and provenance footer are always present.
+  // The lower analysis sections remain, without the redundant provenance footer.
   assert.match(svg, /WHERE IT WENT · TOP PROJECTS/);
   assert.match(svg, /CACHE EFFICIENCY BY DAY/);
   assert.match(svg, /CACHE EFFICIENCY BY MODEL/);
-  assert.match(svg, /DATA SOURCES/);
-  assert.match(svg, /COVERAGE/);
-  assert.match(svg, /BREAKDOWN/);
-  assert.match(svg, /HISTORY/);
-  assert.match(svg, /RATE CARD/);
+  assert.doesNotMatch(svg, /DATA SOURCES|COVERAGE|BREAKDOWN|HISTORY|RATE CARD/);
   assert.ok((svg.match(/<rect /g) ?? []).length >= 4);
   assert.doesNotMatch(svg, /NaN|Infinity|undefined/);
 
@@ -3452,14 +3448,10 @@ test("trend meter stops at its last sample and marks report time", () => {
   const meterEndXs = [...svg.matchAll(
     /<line [^>]*x2="([\d.]+)"[^>]*data-series="weekly-meter"/g,
   )].map((match) => Number(match[1]));
-  const observationXs = [...svg.matchAll(
-    /<circle cx="([\d.]+)"[^>]*r="3.8"/g,
-  )].map((match) => Number(match[1]));
+  const plotRight = 1_280 - 28 - 66;
   assert.ok(meterEndXs.length > 0);
-  assert.ok(observationXs.length > 0);
-  assert.ok(
-    Math.abs(Math.max(...meterEndXs) - Math.max(...observationXs)) < 0.02,
-  );
+  assert.ok(Math.max(...meterEndXs) < plotRight);
+  assert.doesNotMatch(svg, /r="3.8"/);
   assert.match(svg, /Report through Aug 23, 10:08 AM/);
   assert.match(svg, /Meter last observed Aug 23, 7:59 AM/);
   assert.match(svg, />PARTIAL</);
@@ -3537,7 +3529,7 @@ test("trend report limits reset labels in dense windows", () => {
   const resetLines = svg.match(
     /stroke="rgba\(246,183,60,\.5\)"/g,
   ) ?? [];
-  const resetLabels = svg.match(/>RESTART \(100%\)<\/text>/g) ?? [];
+  const resetLabels = svg.match(/>RESTART<\/text>/g) ?? [];
   assert.equal(resetLines.length, cycleStarts.length - 1);
   assert.equal(resetLabels.length, 4);
 });
@@ -5725,10 +5717,9 @@ test("trend fast shading recognizes both tiers and reports mixed model rates", (
   );
 
   const svg = renderTrendImage({ snapshot, bounds, days: 7 });
-  assert.match(svg, /2\.43×/);
-  assert.match(svg, /2×–2\.5× by model/);
-  assert.match(svg, /some fast usage unrated/);
-  assert.match(svg, /Darker shade = fast mode/);
+  assert.match(svg, /2\.43× avg/);
+  assert.match(svg, /Some fast usage is unrated/);
+  assert.doesNotMatch(svg, /Fast credit rate ·|Darker shade = fast mode/);
 
   const unsupportedSvg = renderTrendImage({
     snapshot: {

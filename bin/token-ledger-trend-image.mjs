@@ -54,6 +54,7 @@ const COLORS = {
   background: "#0e1420",
   panel: "#151d2c",
   panelBorder: "#273246",
+  separator: "rgba(119,131,154,.22)",
   meterPanel: "#1b1712",
   meterPanelBorder: "rgba(246,183,60,.4)",
   ink: "#f2f5fa",
@@ -61,7 +62,6 @@ const COLORS = {
   muted: "#77839a",
   grid: "#1c2534",
   baseline: "#33405a",
-  rule: "rgba(255,255,255,.1)",
   track: "rgba(255,255,255,.09)",
   projectTrack: "rgba(255,255,255,.07)",
   line: "#f6b73c",
@@ -268,17 +268,6 @@ function timeOnlyLabel(timestampMs, timeZone) {
     hour: "numeric",
     minute: "2-digit",
   }).format(new Date(timestampMs));
-}
-
-function rateCardDateLabel(dateString) {
-  const parsed = new Date(`${dateString}T00:00:00Z`);
-  if (!Number.isFinite(parsed.getTime())) return String(dateString ?? "unknown");
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone: "UTC",
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  }).format(parsed);
 }
 
 function binDateLabel(bin, timeZone) {
@@ -521,10 +510,10 @@ export function renderTrendImage({
       unit: "tokens",
       sub: hasFast
         ? {
-            text: `${pct(summary.fastSharePercent)} of total usage${
+            text: `${pct(summary.fastSharePercent)} of usage${
               fastRates.effectiveMultiplier === null
                 ? ""
-                : ` · ${fastRates.effectiveMultiplier.toFixed(2)}× effective`
+                : ` · ${fastRates.effectiveMultiplier.toFixed(2)}× avg`
             }`,
             color: COLORS.secondary,
           }
@@ -532,7 +521,13 @@ export function renderTrendImage({
       bar: hasFast
         ? { fraction: summary.fastSharePercent / 100, fill: FAST_MODE_LABEL_COLOR }
         : null,
-      caption: hasFast ? "Darker shade = fast mode" : null,
+      caption: hasFast
+        ? fastRates.effectiveMultiplier === null
+          ? "Fast credit rate: UNRATED"
+          : fastRates.unratedTokens > 0
+            ? "Some fast usage is unrated"
+            : "Fast mode shown with hatching"
+        : null,
     });
     cards.push({
       accent: COLORS.secondary,
@@ -552,13 +547,6 @@ export function renderTrendImage({
   }
 
   function drawCompactCard(card, x, y, cardWidth, cardHeight) {
-    elements.push(svgRect(x, y, cardWidth, cardHeight, {
-      rx: 8,
-      fill: COLORS.panel,
-      stroke: COLORS.panelBorder,
-      "stroke-width": 1,
-    }));
-    elements.push(svgRect(x, y, 3, cardHeight, { rx: 1.5, fill: card.accent, opacity: 0.85 }));
     elements.push(svgText({
       x: x + 16,
       y: y + 25,
@@ -644,6 +632,14 @@ export function renderTrendImage({
         ));
       });
     }
+  }
+
+  function addVerticalDivider(x, y, height, role) {
+    elements.push(svgLine(x, y + 2, x, y + height - 2, {
+      stroke: COLORS.separator,
+      "stroke-width": 1,
+      "data-role": role,
+    }));
   }
 
   function drawWeeklyCard(x, y, cardWidth, cardHeight) {
@@ -737,7 +733,7 @@ export function renderTrendImage({
         spacing: "-0.26",
       }));
       subLine = meter.firstExhaustedObservedAtMs !== null && meter.resetsAtMs !== null
-        ? `Reached 0% approximately ${durationLabel(meter.resetsAtMs - meter.firstExhaustedObservedAtMs)} before reset`
+        ? `Reached 0% about ${durationLabel(meter.resetsAtMs - meter.firstExhaustedObservedAtMs)} before reset`
         : "Latest reading reports 0% remaining";
     } else {
       elements.push(svgText({
@@ -757,47 +753,20 @@ export function renderTrendImage({
         size: 12.5,
       }));
       if (status === "at-risk" && meter.runwayDays !== null && meter.resetInMs !== null) {
-        subLine = `Current pace reaches 0% approximately ${durationLabel(meter.resetInMs - meter.runwayDays * 86_400_000)} before reset`;
+        subLine = `At this pace: 0% about ${durationLabel(meter.resetInMs - meter.runwayDays * 86_400_000)} before reset`;
       } else if (meter.runwayDays !== null) {
-        subLine = `${meter.runwayDays.toFixed(1)} days left at this pace`;
+        subLine = `${meter.runwayDays.toFixed(1)} days of runway at this pace`;
       } else {
         subLine = "Runway unavailable · no usable meter drain in the active cycle";
       }
     }
     elements.push(svgText({
       x: x + 16,
-      y: y + 84,
+      y: y + 91,
       value: truncateToWidth(subLine, cardWidth - 32, 12.5),
       fill: status === "at-risk" ? COLORS.warn : COLORS.secondary,
       size: 12.5,
     }));
-
-    const readingY = y + 104;
-    const remainingChip = `${meterPct(meter.remainingPercent)} REMAINING`;
-    const remainingChipWidth = textWidth(remainingChip, 10.5, 700) + 14;
-    const readingWidth = rightX - remainingChipWidth - 12 - (x + 16);
-    const fullReading = `OpenAI reading · ${shortDateTimeLabel(meter.lastObservedAtMs, timeZone)}`;
-    elements.push(svgText({
-      x: x + 16,
-      y: readingY,
-      value: textWidth(fullReading, 12) <= readingWidth
-        ? fullReading
-        : truncateToWidth(
-            `OpenAI reading · ${timeOnlyLabel(meter.lastObservedAtMs, timeZone)}`,
-            readingWidth,
-            12,
-          ),
-      fill: COLORS.muted,
-      size: 12,
-    }));
-    elements.push(chip(rightX, readingY - 3, remainingChip, {
-      fill: "rgba(246,183,60,.12)",
-      stroke: "rgba(246,183,60,.55)",
-      color: COLORS.line,
-      size: 10.5,
-      anchor: "end",
-      mono: true,
-    }).markup);
 
     const barY = y + cardHeight - 20;
     const barWidth = cardWidth - 32;
@@ -810,29 +779,19 @@ export function renderTrendImage({
 
   function buildKpiSection(top) {
     const cards = compactCards();
-    if (summary.fastTokens > 0) {
-      const rateLabel = fastRates.effectiveMultiplier === null
-        ? "UNRATED"
-        : fastRates.mixedMultipliers
-          ? `${fastRates.minimumMultiplier}×–${fastRates.maximumMultiplier}× by model`
-          : `${fastRates.effectiveMultiplier.toFixed(2)}×`;
-      const rateSuffix = fastRates.unratedTokens > 0
-        ? " · some fast usage unrated"
-        : "";
-      elements.push(svgText({
-        x: contentRight,
-        y: top - 3,
-        value: `Fast credit rate · ${rateLabel}${rateSuffix} · Darker shade = fast mode`,
-        fill: COLORS.muted,
-        size: 10.5,
-        anchor: "end",
-      }));
-    }
     const cardHeight = 140;
     const gap = 12;
     if (wide) {
       // Weekly card takes ~1.55 compact-card widths on one row.
       const unit = (contentWidth - gap * 4) / (4 + 1.55);
+      for (let index = 1; index < cards.length; index += 1) {
+        addVerticalDivider(
+          outer + index * (unit + gap) - gap / 2,
+          top,
+          cardHeight,
+          "kpi-column-divider",
+        );
+      }
       cards.forEach((card, index) => {
         drawCompactCard(card, outer + index * (unit + gap), top, unit, cardHeight);
       });
@@ -840,6 +799,12 @@ export function renderTrendImage({
       return top + cardHeight;
     }
     const half = (contentWidth - gap) / 2;
+    addVerticalDivider(
+      outer + half + gap / 2,
+      top,
+      cardHeight * 2 + gap,
+      "kpi-column-divider",
+    );
     cards.forEach((card, index) => {
       const row = Math.floor(index / 2);
       const column = index % 2;
@@ -852,29 +817,23 @@ export function renderTrendImage({
 
   // ------------------------------------------------------------- model mix
   function buildModelMixSection(top) {
-    const panelHeight = 46;
-    elements.push(svgRect(outer, top, contentWidth, panelHeight, {
-      rx: 8,
-      fill: COLORS.panel,
-      stroke: COLORS.panelBorder,
-      "stroke-width": 1,
-    }));
-    const labelBaseline = top + panelHeight / 2 + 4;
+    const sectionHeight = 28;
+    const labelBaseline = top + 19;
     elements.push(svgText({
       x: outer + 16,
       y: labelBaseline,
       value: "MODEL MIX",
       fill: COLORS.leftAxis,
-      size: 12,
+      size: 11.5,
       weight: 600,
       spacing: "1.08",
     }));
     elements.push(svgText({
-      x: outer + 16 + spacedWidth("MODEL MIX", 12, 600, 1.08) + 8,
+      x: outer + 16 + spacedWidth("MODEL MIX", 11.5, 600, 1.08) + 8,
       y: labelBaseline,
       value: "(by tokens)",
       fill: COLORS.muted,
-      size: 11.5,
+      size: 11,
     }));
 
     const rows = vm.models.filter((row) => row.totalTokens > 0);
@@ -887,7 +846,7 @@ export function renderTrendImage({
         size: 12.5,
         anchor: "end",
       }));
-      return top + panelHeight;
+      return top + sectionHeight;
     }
 
     // Segments that are too narrow for an inside label move to an external
@@ -914,42 +873,43 @@ export function renderTrendImage({
     for (const row of externalRows) external.push(segmentLabel(row));
     if (external.length) {
       const caption = external.join(" · ");
-      barRight -= textWidth(caption, 12, 500) + 16;
+      barRight -= textWidth(caption, 11, 500) + 16;
       elements.push(svgText({
         x: contentRight - 16,
         y: labelBaseline,
         value: caption,
         fill: COLORS.secondary,
-        size: 12,
+        size: 11,
         weight: 500,
         anchor: "end",
       }));
     }
-    const barY = top + panelHeight / 2 - 10;
+    const barY = top + 7;
+    const barHeight = 14;
     let cursor = barLeft;
     const barWidth = Math.max(60, barRight - barLeft);
     rows.forEach((row, index) => {
       const share = row.totalTokens / summary.totalTokens;
       const segmentWidth = share * barWidth;
-      elements.push(svgRect(cursor, barY, segmentWidth, 20, {
+      elements.push(svgRect(cursor, barY, segmentWidth, barHeight, {
         fill: styleForModel(row.model),
         rx: index === 0 || index === rows.length - 1 ? 3 : null,
       }));
       const label = segmentLabel(row);
-      if (!externalRows.includes(row) && textWidth(label, 12, 600) + 14 <= segmentWidth) {
+      if (!externalRows.includes(row) && textWidth(label, 10.5, 600) + 14 <= segmentWidth) {
         elements.push(svgText({
           x: cursor + segmentWidth / 2,
-          y: barY + 14,
+          y: barY + 10.5,
           value: label,
           fill: "#ffffff",
-          size: 12,
+          size: 10.5,
           weight: 600,
           anchor: "middle",
         }));
       }
       cursor += segmentWidth;
     });
-    return top + panelHeight;
+    return top + sectionHeight;
   }
 
   // ------------------------------------------------------------ daily chart
@@ -1046,7 +1006,6 @@ export function renderTrendImage({
       legendItems.push({ kind: "hatch", label: "Fast mode" });
     }
     if (meterVisible) {
-      legendItems.push({ kind: "dot", label: "OpenAI observation" });
       legendItems.push({ kind: "solid", label: "Reported interval" });
       legendItems.push({ kind: "dashed", label: "Unobserved gap" });
     }
@@ -1065,8 +1024,6 @@ export function renderTrendImage({
       } else if (item.kind === "hatch") {
         elements.push(svgRect(legendX, legendY - 9, 13, 10, { fill: COLORS.leftAxis, rx: 2 }));
         elements.push(svgRect(legendX, legendY - 9, 13, 10, { fill: "url(#fast-mode-hatch)", rx: 2 }));
-      } else if (item.kind === "dot") {
-        elements.push(`<circle cx="${legendX + 10}" cy="${legendY - 4}" r="3.6" fill="${COLORS.line}"/>`);
       } else if (item.kind === "solid") {
         elements.push(svgLine(legendX, legendY - 4, legendX + 20, legendY - 4, {
           stroke: COLORS.line,
@@ -1312,9 +1269,9 @@ export function renderTrendImage({
       }
     });
 
-    // Meter overlay: sampled observations only. Dots mark real readings,
-    // solid runs mark spans confirmed by repeated equal readings, dashed runs
-    // bridge unobserved gaps. The line never extends past the last reading.
+    // Meter overlay: solid runs mark spans confirmed by repeated equal
+    // readings, while dashed runs bridge unobserved gaps. The line never
+    // extends past the last reading.
     if (meterVisible) {
       // Dense windows keep a line per reset but cap the callout chips so the
       // top of the plot stays readable; scheduled expiries win the labels.
@@ -1333,6 +1290,8 @@ export function renderTrendImage({
         }
         return selected;
       })();
+      const resetLabelMarkups = [];
+      const resetLabelBounds = [];
       for (const reset of meter.resets) {
         const x = xForTs(reset.timestampMs);
         elements.push(svgLine(x, plotTop, x, plotBottom, {
@@ -1341,19 +1300,28 @@ export function renderTrendImage({
           "stroke-dasharray": reset.inferred ? "5 6" : null,
         }));
         if (!labeledResets.has(reset)) continue;
-        elements.push(chip(
-          Math.max(plotLeft + 46, Math.min(plotRight - 46, x)),
+        const labelX = Math.max(plotLeft + 32, Math.min(plotRight - 32, x));
+        const resetLabel = chip(
+          labelX,
           plotTop + 13,
-          reset.kind === "weekly-expiry" ? "RESET (100%)" : "RESTART (100%)",
+          reset.kind === "weekly-expiry" ? "RESET" : "RESTART",
           {
-            fill: COLORS.background,
-            stroke: COLORS.line,
-            color: COLORS.line,
+            fill: COLORS.panel,
+            color: COLORS.meterAxis,
             size: 10.5,
+            weight: 600,
             anchor: "middle",
             mono: true,
           },
-        ).markup);
+        );
+        resetLabelBounds.push({
+          left: labelX - resetLabel.width / 2,
+          right: labelX + resetLabel.width / 2,
+          bottom: plotTop + 19,
+        });
+        resetLabelMarkups.push(
+          `<g data-role="meter-reset-label">${resetLabel.markup}</g>`,
+        );
       }
 
       for (const segment of meter.segments) {
@@ -1371,19 +1339,27 @@ export function renderTrendImage({
           },
         ));
       }
-      for (const point of meter.observations) {
-        if (!point.observed) continue;
-        elements.push(`<circle cx="${xForTs(point.timestampMs).toFixed(2)}" cy="${yForRemaining(point.remainingPercent).toFixed(2)}" r="3.8" fill="${COLORS.line}"/>`);
-      }
+      elements.push(...resetLabelMarkups);
       const latest = meter.observations.at(-1);
       if (latest) {
         const label = `${Math.round(latest.remainingPercent)}%`;
         const px = xForTs(latest.timestampMs);
         const py = yForRemaining(latest.remainingPercent);
         const anchorEnd = px > plotRight - 70;
-        elements.push(chip(
-          anchorEnd ? px - 10 : px + 10,
-          Math.max(plotTop + 14, Math.min(plotBottom - 6, py + 1)),
+        const labelX = anchorEnd ? px - 10 : px + 10;
+        const labelWidth = textWidth(label, 11, 700) + 14;
+        const labelLeft = anchorEnd ? labelX - labelWidth : labelX;
+        const labelRight = labelLeft + labelWidth;
+        let labelY = Math.max(plotTop + 14, Math.min(plotBottom - 6, py + 1));
+        const overlapsResetLabel = resetLabelBounds.some((bounds) =>
+          labelLeft < bounds.right + 6 &&
+          labelRight > bounds.left - 6 &&
+          labelY - 13 < bounds.bottom + 6
+        );
+        if (overlapsResetLabel) labelY = plotTop + 38;
+        const latestLabel = chip(
+          labelX,
+          labelY,
           label,
           {
             fill: COLORS.background,
@@ -1393,7 +1369,10 @@ export function renderTrendImage({
             anchor: anchorEnd ? "end" : "start",
             mono: true,
           },
-        ).markup);
+        );
+        elements.push(
+          `<g data-role="meter-latest-label">${latestLabel.markup}</g>`,
+        );
       }
     }
 
@@ -1402,13 +1381,7 @@ export function renderTrendImage({
   }
 
   // ------------------------------------------------------------ lower panels
-  function panelFrame(x, y, panelWidth, panelHeight, title, suffix = null) {
-    elements.push(svgRect(x, y, panelWidth, panelHeight, {
-      rx: 8,
-      fill: COLORS.panel,
-      stroke: COLORS.panelBorder,
-      "stroke-width": 1,
-    }));
+  function panelHeading(x, y, title, suffix = null) {
     elements.push(svgText({
       x: x + 16,
       y: y + 25,
@@ -1430,7 +1403,7 @@ export function renderTrendImage({
   }
 
   function buildCacheByDayPanel(x, y, panelWidth, panelHeight) {
-    panelFrame(x, y, panelWidth, panelHeight, "CACHE EFFICIENCY BY DAY", "(input-weighted)");
+    panelHeading(x, y, "CACHE EFFICIENCY BY DAY", "(input-weighted)");
     const inner = panelWidth - 32;
     const left = x + 16;
 
@@ -1457,13 +1430,16 @@ export function renderTrendImage({
     let floor = Math.max(0, Math.min(80, Math.floor((minRate - 5) / 10) * 10));
     floor = Math.min(floor, 80);
     if (floor > 0) {
-      elements.push(chip(x + panelWidth - 16, y + 21, "ZOOMED SCALE", {
-        fill: "rgba(255,255,255,.06)",
-        stroke: COLORS.baseline,
-        color: COLORS.muted,
+      elements.push(svgText({
+        x: x + panelWidth - 16,
+        y: y + 25,
+        value: "ZOOMED SCALE",
+        fill: COLORS.muted,
         size: 9.5,
+        weight: 600,
+        spacing: "0.65",
         anchor: "end",
-      }).markup);
+      }));
     }
 
     const lineTop = y + 52;
@@ -1579,13 +1555,16 @@ export function renderTrendImage({
           }));
         }
         if (bin.unobserved) {
-          elements.push(chip(centerX, columnsBottom + 13, "UNOBSERVED", {
-            fill: "rgba(255,255,255,.04)",
-            stroke: COLORS.baseline,
-            color: COLORS.muted,
+          elements.push(svgText({
+            x: centerX,
+            y: columnsBottom + 15,
+            value: "UNOBSERVED",
+            fill: COLORS.muted,
             size: 8.5,
+            weight: 600,
+            spacing: "0.45",
             anchor: "middle",
-          }).markup);
+          }));
         } else {
           elements.push(svgText({
             x: centerX,
@@ -1601,19 +1580,13 @@ export function renderTrendImage({
 
     // Summary strip.
     const stripY = y + panelHeight - 32;
-    elements.push(svgRect(left, stripY, inner, 22, {
-      rx: 5,
-      fill: "rgba(34,197,143,.08)",
-      stroke: "rgba(34,197,143,.35)",
-      "stroke-width": 1,
-    }));
     const approxUncached = vm.coverage.estimated;
     elements.push(svgText({
-      x: left + 10,
+      x: left,
       y: stripY + 15,
       value: truncateToWidth(
         `${pct(summary.cacheRatePercent)} input-weighted · ${compact(summary.cachedInputTokens)} of ${compact(summary.inputTokens)} input cached · ${approxUncached ? "≈" : ""}${compact(summary.uncachedInputTokens)} uncached`,
-        inner - 20,
+        inner,
         11,
       ),
       fill: COLORS.cache,
@@ -1622,7 +1595,7 @@ export function renderTrendImage({
   }
 
   function buildProjectsPanel(x, y, panelWidth, panelHeight) {
-    panelFrame(x, y, panelWidth, panelHeight, "WHERE IT WENT · TOP PROJECTS");
+    panelHeading(x, y, "WHERE IT WENT · TOP PROJECTS");
     elements.push(svgText({
       x: x + panelWidth - 16,
       y: y + 25,
@@ -1720,25 +1693,18 @@ export function renderTrendImage({
 
     if (summary.topThreeProjectSharePercent !== null && vm.projects.length) {
       const stripY = y + panelHeight - 32;
-      elements.push(svgRect(x + 16, stripY, panelWidth - 32, 22, {
-        rx: 5,
-        fill: "rgba(126,162,240,.08)",
-        stroke: "rgba(126,162,240,.35)",
-        "stroke-width": 1,
-      }));
       elements.push(svgText({
-        x: x + panelWidth / 2,
+        x: x + 16,
         y: stripY + 15,
         value: `Top ${Math.min(3, vm.projects.length)} projects = ${pct(summary.topThreeProjectSharePercent)} of tokens`,
         fill: COLORS.leftAxis,
         size: 11.5,
-        anchor: "middle",
       }));
     }
   }
 
   function buildModelCachePanel(x, y, panelWidth, panelHeight) {
-    panelFrame(x, y, panelWidth, panelHeight, "CACHE EFFICIENCY BY MODEL", "(input-weighted)");
+    panelHeading(x, y, "CACHE EFFICIENCY BY MODEL", "(input-weighted)");
 
     // Combine minor models past the fourth row so the table always fits.
     const source = vm.models.filter((row) => row.totalTokens > 0);
@@ -1886,6 +1852,18 @@ export function renderTrendImage({
       const cacheWidth = contentWidth * 0.36;
       const projectsWidth = contentWidth * 0.31 - gap;
       const modelWidth = contentWidth - cacheWidth - projectsWidth - gap * 2;
+      addVerticalDivider(
+        outer + cacheWidth + gap / 2,
+        top,
+        height,
+        "lower-column-divider",
+      );
+      addVerticalDivider(
+        outer + cacheWidth + gap + projectsWidth + gap / 2,
+        top,
+        height,
+        "lower-column-divider",
+      );
       buildCacheByDayPanel(outer, top, cacheWidth, height);
       buildProjectsPanel(outer + cacheWidth + gap, top, projectsWidth, height);
       buildModelCachePanel(outer + cacheWidth + projectsWidth + gap * 2, top, modelWidth, height);
@@ -1895,144 +1873,28 @@ export function renderTrendImage({
     const rowTop = top + cacheHeight + gap;
     const half = (contentWidth - gap) / 2;
     const rowHeight = Math.max(projectsHeight, modelHeight);
+    addVerticalDivider(
+      outer + half + gap / 2,
+      rowTop,
+      rowHeight,
+      "lower-column-divider",
+    );
     buildProjectsPanel(outer, rowTop, half, rowHeight);
     buildModelCachePanel(outer + half + gap, rowTop, half, rowHeight);
     return rowTop + rowHeight;
-  }
-
-  // ---------------------------------------------------------------- footer
-  function buildFooterSection(top) {
-    elements.push(svgLine(outer, top, contentRight, top, {
-      stroke: COLORS.rule,
-      "stroke-width": 1,
-    }));
-    const coverage = vm.coverage;
-    const componentsComplete = coverage.componentCoveragePercent >= 99.95;
-    const breakdownLine = componentsComplete
-      ? `${compact(summary.totalTokens)} total · ${compact(summary.inputTokens)} input · ${compact(summary.outputTokens)} output`
-      : `${compact(summary.totalTokens)} total · ${compact(summary.inputTokens)} measured input · ${compact(summary.outputTokens)} measured output`;
-    const rateCardLines = vm.provenance.snapshotRateCardAsOf &&
-      vm.provenance.snapshotRateCardAsOf !== vm.provenance.rateCardAsOf
-      ? [
-          `Current attribution card · ${rateCardDateLabel(vm.provenance.rateCardAsOf)}`,
-          `Snapshot originally rated · ${rateCardDateLabel(vm.provenance.snapshotRateCardAsOf)}`,
-        ]
-      : [`Attribution rates · ${rateCardDateLabel(vm.provenance.rateCardAsOf)}`];
-    const columns = [
-      {
-        label: "DATA SOURCES",
-        lines: [
-          {
-            text: vm.provenance.localOnly ? "Codex local data only" : "External snapshot input",
-          },
-        ],
-      },
-      {
-        label: "COVERAGE",
-        // Resolved to one or two lines below, once the column width is known.
-        coverageParts: [
-          `${coverage.modelCalls.toLocaleString("en-US")} model calls`,
-          `${meterPct(coverage.componentCoveragePercent)} component coverage`,
-        ],
-        parseLine: coverage.parseErrors > 0
-          ? {
-              text: `${coverage.parseErrors.toLocaleString("en-US")} source ${coverage.parseErrors === 1 ? "record" : "records"} could not be parsed`,
-              color: COLORS.warn,
-            }
-          : { text: "0 parse errors", color: COLORS.muted },
-        lines: [],
-      },
-      {
-        label: "BREAKDOWN",
-        lines: [
-          { text: breakdownLine },
-          componentsComplete
-            ? null
-            : { text: "component coverage incomplete", color: COLORS.muted },
-        ].filter(Boolean),
-      },
-      {
-        label: "HISTORY",
-        lines: coverage.estimated
-          ? [
-              { text: "≈ proportional allocation from compacted history" },
-              coverage.maximumResolutionSeconds
-                ? {
-                    text: `Maximum source resolution: ${durationLabel(coverage.maximumResolutionSeconds * 1_000)}`,
-                    color: COLORS.muted,
-                  }
-                : null,
-            ].filter(Boolean)
-          : [{ text: "Exact event data in selected range" }],
-      },
-      {
-        label: "RATE CARD",
-        lines: rateCardLines.map((text, index) => ({
-          text,
-          color: index === 0 ? undefined : COLORS.muted,
-        })),
-      },
-    ];
-
-    const perRow = wide ? columns.length : 3;
-    const rowCount = Math.ceil(columns.length / perRow);
-    const rowHeight = 62;
-    const wideWeights = [0.14, 0.24, 0.21, 0.19, 0.22];
-    columns.forEach((column, index) => {
-      const row = Math.floor(index / perRow);
-      const inRow = Math.min(perRow, columns.length - row * perRow);
-      const rowWidth = row === rowCount - 1 ? contentWidth / inRow : contentWidth / perRow;
-      const columnWidth = wide ? contentWidth * wideWeights[index] : rowWidth;
-      const columnX = wide
-        ? outer + wideWeights.slice(0, index).reduce((sum, weight) => sum + weight * contentWidth, 0)
-        : outer + (index - row * perRow) * rowWidth;
-      const baseY = top + 24 + row * rowHeight;
-      if (index % perRow > 0) {
-        elements.push(svgLine(columnX - 12, baseY - 12, columnX - 12, baseY + 34, {
-          stroke: COLORS.rule,
-          "stroke-width": 1,
-        }));
-      }
-      elements.push(svgText({
-        x: columnX,
-        y: baseY,
-        value: column.label,
-        fill: COLORS.muted,
-        size: 11,
-        spacing: "1.1",
-      }));
-      if (column.coverageParts) {
-        const combined = column.coverageParts.join(" · ");
-        column.lines = textWidth(combined, 12, 600) <= columnWidth - 24
-          ? [{ text: combined }, column.parseLine]
-          : [...column.coverageParts.map((text) => ({ text })), column.parseLine];
-      }
-      column.lines.forEach((line, lineIndex) => {
-        elements.push(svgText({
-          x: columnX,
-          y: baseY + 18 + lineIndex * 16,
-          value: truncateToWidth(line.text, columnWidth - 24, 12, lineIndex === 0 ? 600 : 400),
-          fill: line.color ?? COLORS.secondary,
-          size: 12,
-          weight: lineIndex === 0 ? 600 : 400,
-        }));
-      });
-    });
-    return top + 24 + rowCount * rowHeight;
   }
 
   // ---------------------------------------------------------------- compose
   const body = [];
   const headerBottom = buildHeaderSection();
   const kpiBottom = buildKpiSection(headerBottom + 10);
-  const mixBottom = buildModelMixSection(kpiBottom + 14);
-  const chartBottom = buildDailyChartSection(mixBottom + 14);
+  const mixBottom = buildModelMixSection(kpiBottom + 10);
+  const chartBottom = buildDailyChartSection(mixBottom + 10);
   const lowerBottom = buildLowerSection(chartBottom + 14);
-  const footerBottom = buildFooterSection(lowerBottom + 16);
-  const height = Math.ceil(footerBottom + 14);
+  const height = Math.ceil(lowerBottom + 16);
 
   const description =
-    "Dark report card: total usage, input-weighted cache efficiency, fast-mode share, and active-project KPI cards beside the sampled weekly-limit state; a model-mix strip; stacked daily token columns by model with hatched fast-mode overlays and the sampled weekly meter drawn as observation dots, confirmed intervals, and dashed unobserved gaps; daily cache efficiency, top projects, and per-model cache tables; and a provenance footer.";
+    "Dark report card: total usage, input-weighted cache efficiency, fast-mode share, and active-project KPI cards beside the sampled weekly-limit state; a model-mix strip; stacked daily token columns by model with hatched fast-mode overlays and the sampled weekly meter drawn as solid confirmed intervals and dashed unobserved gaps; plus daily cache efficiency, top projects, and per-model cache tables.";
   body.push(
     `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="trend-title trend-description">`,
     `<title id="trend-title">${escapeXml(`Token Ledger · ${meta.rangeDays}-day trend`)}</title>`,

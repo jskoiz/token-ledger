@@ -81,14 +81,14 @@ equivalent period), input-weighted cache efficiency, the fast-mode share of
 actual tokens, and the active-project count, beside the latest observed
 weekly-limit state. Below that sit a model-mix strip, calendar-day columns of
 local token volume stacked by model, daily cache efficiency with input
-volumes, top projects, a per-model cache table, and a provenance footer.
+volumes, top projects, and a per-model cache table.
 
 ![Token Ledger 7-day report](docs/token-ledger-report-7-day.png)
 
 The weekly-limit line is drawn from sampled OpenAI observations, never
-continuous telemetry: dots mark real readings, solid runs mark spans confirmed
-by repeated equal readings, dashed runs bridge unobserved gaps, and the line
-never extends past the latest reading. When the report is generated partway
+continuous telemetry: solid runs mark spans confirmed by repeated equal
+readings, dashed runs bridge unobserved gaps, and the line never extends past
+the latest reading. When the report is generated partway
 through the final day, that column is marked `PARTIAL` with the actual cutoff
 time, and the prior-period delta compares an equally long partial window.
 Values allocated from compacted history are marked with `≈`; unmarked values

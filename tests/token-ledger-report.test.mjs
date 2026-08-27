@@ -475,18 +475,18 @@ test("the report SVG contains every required section", () => {
     "CACHE EFFICIENCY BY DAY",
     "WHERE IT WENT · TOP PROJECTS",
     "CACHE EFFICIENCY BY MODEL",
-    "DATA SOURCES",
-    "COVERAGE",
-    "BREAKDOWN",
-    "HISTORY",
-    "RATE CARD",
   ]) {
     assert.ok(svg.includes(heading), `missing section heading: ${heading}`);
   }
   assert.match(svg, /fast-mode-hatch/);
   assert.match(svg, /url\(#fast-mode-hatch\)/);
-  assert.match(svg, /RESET \(100%\)/);
-  assert.match(svg, /OpenAI observation/);
+  assert.match(svg, />RESET<\/text>/);
+  assert.ok(
+    svg.lastIndexOf('data-role="meter-reset-label"') >
+      svg.lastIndexOf('data-series="weekly-meter"'),
+  );
+  assert.doesNotMatch(svg, /OpenAI observation/);
+  assert.doesNotMatch(svg, /r="3\.8"/);
   assert.match(svg, /Unobserved gap/);
   // Partial-day treatment for the noon cutoff.
   assert.match(svg, /PARTIAL/);
@@ -497,6 +497,19 @@ test("the report SVG contains every required section", () => {
   assert.ok(!svg.includes("<script>"));
   assert.match(svg, /&lt;script&gt;/);
   assert.doesNotMatch(svg, /NaN|Infinity|undefined/);
+
+  // The compact KPI cards use their label color without decorative side
+  // stripes, and the lower report sections sit directly on the page rather
+  // than adding another layer of card shells and inset summary boxes.
+  assert.doesNotMatch(svg, /width="3\.00" height="140\.00"/);
+  assert.equal((svg.match(/stroke="#273246"/g) ?? []).length, 1);
+  assert.doesNotMatch(svg, /stroke="rgba\(34,197,143,\.35\)"/);
+  assert.doesNotMatch(svg, /stroke="rgba\(126,162,240,\.35\)"/);
+  assert.doesNotMatch(svg, /DATA SOURCES|COVERAGE|BREAKDOWN|HISTORY|RATE CARD/);
+  assert.doesNotMatch(svg, /OpenAI reading|% REMAINING/);
+  assert.equal((svg.match(/data-role="lower-column-divider"/g) ?? []).length, 2);
+  assert.equal((svg.match(/data-role="kpi-column-divider"/g) ?? []).length, 3);
+  assert.match(svg, /stroke="rgba\(119,131,154,\.22\)" stroke-width="1"/);
 });
 
 test("partial and stale markers appear only in their states", () => {
