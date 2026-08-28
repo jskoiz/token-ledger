@@ -1035,6 +1035,7 @@ async function refreshSnapshot(options) {
     const snapshot = await collectUsage(
       {
         output: options.input,
+        privateStateDirectory: options.input === DEFAULT_SNAPSHOT,
         codexHome: options.codexHome,
         includeArchived: options.includeArchived,
         since: options.since,

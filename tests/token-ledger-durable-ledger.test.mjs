@@ -16,6 +16,7 @@ import test from "node:test";
 
 import {
   collectUsage,
+  sourceLocationForPath,
 } from "../lib/token-ledger-importer.mjs";
 import {
   DURABLE_LEDGER_FILENAME,
@@ -176,6 +177,33 @@ test("usage and quota survive rollout source disappearance", async () => {
   }
 });
 
+test("exact observations retain tool-call ownership after source disappearance", async () => {
+  const fixture = await createFixture([100]);
+  try {
+    await appendFile(
+      fixture.file,
+      serialize([{
+        timestamp: "2026-08-20T10:01:00.000Z",
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "shell",
+          call_id: "call-exact-tool",
+        },
+      }]),
+    );
+    const first = await collectUsage(options(fixture));
+    await rm(fixture.file);
+    const afterRemoval = await collectUsage(options(fixture));
+
+    assert.equal(first.events[0].toolCalls, 1);
+    assert.equal(afterRemoval.events[0].toolCalls, 1);
+    assert.equal(afterRemoval.threads[0].toolCalls, 1);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("unchanged and appended sources add each logical event once", async () => {
   const fixture = await createFixture([100]);
   try {
@@ -230,6 +258,40 @@ test("replacement and truncation reconcile without double counting", async () =>
     assert.equal(truncated.coverage.sourceIncomplete, true);
     assert.equal(truncated.coverage.sourceStates.changed, 1);
     assert.equal(ledger.sourceSummary.states[0].changeState, "truncated");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("source replacement refreshes tool ownership without stale call counts", async () => {
+  const fixture = await createFixture([100, 200]);
+  const call = (callId) => ({
+    timestamp: "2026-08-20T10:02:00.000Z",
+    type: "response_item",
+    payload: {
+      type: "function_call",
+      name: "shell",
+      call_id: callId,
+    },
+  });
+  try {
+    await appendFile(fixture.file, serialize([call("call-before-replace")]));
+    const first = await collectUsage(options(fixture));
+
+    await writeFile(
+      fixture.file,
+      serialize([
+        ...rolloutRows([100, 300]),
+        call("call-after-replace"),
+      ]),
+    );
+    const replaced = await collectUsage(options(fixture));
+    await rm(fixture.file);
+    const afterRemoval = await collectUsage(options(fixture));
+
+    assert.equal(first.events.reduce((sum, event) => sum + event.toolCalls, 0), 1);
+    assert.equal(replaced.events.reduce((sum, event) => sum + event.toolCalls, 0), 1);
+    assert.equal(afterRemoval.events.reduce((sum, event) => sum + event.toolCalls, 0), 1);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -412,6 +474,99 @@ test("old compacted observations retain source membership without rescan double 
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
+});
+
+test("compacted observations retain tool-call ownership after source disappearance", async () => {
+  const fixture = await createFixture([100], {
+    baseTimestamp: "2015-08-20T10:00:00.000Z",
+  });
+  try {
+    await appendFile(
+      fixture.file,
+      serialize([{
+        timestamp: "2015-08-20T10:01:00.000Z",
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "shell",
+          call_id: "call-old-tool",
+        },
+      }]),
+    );
+    const first = await collectUsage(options(fixture));
+    const ledgerPath = resolveDurableLedgerPath({
+      stateDirectory: fixture.stateDirectory,
+    });
+    const ledger = await readDurableLedger(ledgerPath);
+
+    assert.equal(first.events[0].toolCalls, 1);
+    assert.equal(ledger.usageRows[0].toolCalls, 1);
+    assert.deepEqual(ledger.usageRows[0].toolCallKeys, ["id|call-old-tool"]);
+
+    await rm(fixture.file);
+    const afterRemoval = await collectUsage(options(fixture));
+    assert.equal(afterRemoval.events[0].toolCalls, 1);
+    assert.equal(afterRemoval.threads[0].toolCalls, 1);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("user-selected output directories keep their existing permissions", async () => {
+  const fixture = await createFixture([100]);
+  const selectedDirectory = resolve(fixture.root, "shared-output");
+  const selectedOutput = resolve(selectedDirectory, "snapshot.json.gz");
+  try {
+    await mkdir(selectedDirectory, { recursive: true });
+    await chmod(selectedDirectory, 0o755);
+    await collectUsage(options(fixture, {
+      output: selectedOutput,
+      stateDirectory: undefined,
+    }));
+
+    const ledgerPath = resolveDurableLedgerPath({ output: selectedOutput });
+    assert.equal((await stat(selectedDirectory)).mode & 0o777, 0o755);
+    assert.equal((await stat(ledgerPath)).mode & 0o777, 0o600);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("user-selected state directories keep their existing permissions", async () => {
+  const fixture = await createFixture([100]);
+  const selectedDirectory = resolve(fixture.root, "shared-state");
+  try {
+    await mkdir(selectedDirectory, { recursive: true });
+    await chmod(selectedDirectory, 0o755);
+    await collectUsage(options(fixture, {
+      stateDirectory: selectedDirectory,
+    }));
+
+    const ledgerPath = resolveDurableLedgerPath({
+      stateDirectory: selectedDirectory,
+    });
+    assert.equal((await stat(selectedDirectory)).mode & 0o777, 0o755);
+    assert.equal((await stat(ledgerPath)).mode & 0o777, 0o600);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("archive source classification normalizes path separators", () => {
+  assert.equal(
+    sourceLocationForPath(
+      "C:\\Users\\tester\\.codex",
+      "C:\\Users\\tester\\.codex/archived_sessions\\2026\\rollout.jsonl",
+    ),
+    "archived",
+  );
+  assert.equal(
+    sourceLocationForPath(
+      "/tmp/codex",
+      "/tmp/codex/sessions/2026/rollout.jsonl",
+    ),
+    "active",
+  );
 });
 
 test("durable storage and exported snapshots keep privacy and permissions", async () => {
