@@ -31,6 +31,8 @@ import {
 
 const THREAD_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const ROLLOUT_NAME = `rollout-${THREAD_ID}.jsonl`;
+const ARCHIVED_THREAD_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const ARCHIVED_ROLLOUT_NAME = `rollout-${ARCHIVED_THREAD_ID}.jsonl`;
 const BASE_TIMESTAMP = "2026-08-20T10:00:00.000Z";
 const WEEKLY_RESET = Date.parse("2026-08-30T10:00:00.000Z") / 1_000;
 
@@ -450,6 +452,93 @@ test("old v3 snapshot migration is idempotent and marks compacted estimates", as
   }
 });
 
+test("partial legacy overlap does not retain credits for rescanned usage", async () => {
+  const fixture = await createFixture([40]);
+  const legacy = {
+    schemaVersion: 3,
+    generatedAt: "2026-08-20T12:00:00.000Z",
+    events: [{
+      timestamp: "2026-08-20T09:00:00.000Z",
+      startAt: "2026-08-20T09:00:00.000Z",
+      endAt: "2026-08-20T12:00:00.000Z",
+      project: "Unknown project",
+      model: "gpt-5.4",
+      rateCardModel: "gpt-5.4",
+      effort: "medium",
+      source: "unknown",
+      useType: "unknown",
+      inputTokens: 190,
+      cachedInputTokens: 10,
+      outputTokens: 10,
+      reasoningTokens: 4,
+      totalTokens: 200,
+      toolCalls: 0,
+      rateCardCredits: 7,
+      callCount: 1,
+      detailedCallCount: 1,
+      inputCallCount: 1,
+      breakdownAvailable: true,
+      threadIds: [THREAD_ID],
+    }],
+  };
+  try {
+    await writePrivateSnapshot(fixture.output, legacy);
+    const snapshot = await collectUsage(options(fixture));
+    const credits = snapshot.events.reduce(
+      (sum, event) => sum + (event.rateCardCredits || 0),
+      0,
+    );
+
+    assert.equal(snapshot.coverage.observedTokens, 200);
+    assert.ok(credits < 7);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("collection cutoff slices migrated compacted ranges", async () => {
+  const fixture = await createFixture([]);
+  const legacy = {
+    schemaVersion: 3,
+    generatedAt: "2026-08-22T00:00:00.000Z",
+    events: [{
+      timestamp: "2026-08-20T00:00:00.000Z",
+      startAt: "2026-08-20T00:00:00.000Z",
+      endAt: "2026-08-22T00:00:00.000Z",
+      project: "cutoff-history",
+      model: "gpt-5.4",
+      rateCardModel: "gpt-5.4",
+      effort: "medium",
+      source: "local",
+      useType: "interactive",
+      inputTokens: 190,
+      cachedInputTokens: 10,
+      outputTokens: 10,
+      reasoningTokens: 4,
+      totalTokens: 200,
+      toolCalls: 0,
+      callCount: 1,
+      detailedCallCount: 1,
+      inputCallCount: 1,
+      breakdownAvailable: true,
+      threadIds: ["cutoff-thread"],
+    }],
+  };
+  try {
+    await writePrivateSnapshot(fixture.output, legacy);
+    const snapshot = await collectUsage(options(fixture, {
+      since: "2026-08-21T00:00:00.000Z",
+    }));
+
+    assert.ok(Math.abs(totalTokens(snapshot) - 100) < 1e-6);
+    assert.ok(Math.abs(snapshot.coverage.migratedCompactedTokens - 100) < 1e-6);
+    assert.equal(snapshot.events.length, 1);
+    assert.equal(snapshot.events[0].rangeAllocationEstimated, true);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("old compacted observations retain source membership without rescan double counts", async () => {
   const fixture = await createFixture([100], {
     baseTimestamp: "2015-08-20T10:00:00.000Z",
@@ -507,6 +596,64 @@ test("compacted observations retain tool-call ownership after source disappearan
     const afterRemoval = await collectUsage(options(fixture));
     assert.equal(afterRemoval.events[0].toolCalls, 1);
     assert.equal(afterRemoval.threads[0].toolCalls, 1);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("compaction keeps active and archived source scopes filterable", async () => {
+  const fixture = await createFixture([100], {
+    baseTimestamp: "2015-08-20T10:00:00.000Z",
+  });
+  const call = (timestamp, callId) => ({
+    timestamp,
+    type: "response_item",
+    payload: {
+      type: "function_call",
+      name: "shell",
+      call_id: callId,
+    },
+  });
+  const archivedDirectory = resolve(
+    fixture.root,
+    "archived_sessions",
+    "2026",
+    "08",
+    "20",
+  );
+  const archivedFile = resolve(archivedDirectory, ARCHIVED_ROLLOUT_NAME);
+  try {
+    await mkdir(archivedDirectory, { recursive: true });
+    await appendFile(
+      fixture.file,
+      serialize([call("2015-08-20T10:01:00.000Z", "call-active")]),
+    );
+    await writeFile(
+      archivedFile,
+      serialize([
+        ...rolloutRows([200], {
+          offset: 10,
+          baseTimestamp: "2015-08-20T10:00:00.000Z",
+        }),
+        call("2015-08-20T10:11:00.000Z", "call-archived"),
+      ]),
+    );
+    const allSources = await collectUsage(options(fixture));
+    const ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+    const activeOnly = await collectUsage(options(fixture, {
+      includeArchived: false,
+    }));
+
+    assert.equal(totalTokens(allSources), 300);
+    assert.equal(allSources.events.reduce((sum, event) => sum + event.toolCalls, 0), 2);
+    assert.equal(ledger.compactedUsageRows, 2);
+    assert.equal(totalTokens(activeOnly), 100);
+    assert.equal(
+      activeOnly.events.reduce((sum, event) => sum + event.toolCalls, 0),
+      1,
+    );
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }

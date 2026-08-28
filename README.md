@@ -201,6 +201,9 @@ Compacted rows are retained for 7,300 days (20 years) before retirement.
 Source, quota, tool, and state-only thread metadata are pruned only after they
 are outside the applicable retention horizon; the supported report window is
 never silently dropped.
+Compacted usage buckets retain their deduplicated source-association scope, so
+`--no-archived` can exclude archived-only history without including it through
+an aggregate that also contains active usage.
 
 The default snapshot and ledger directories are private (`0700`), and their
 files are private (`0600`). An explicit `--input` reads only that deliberate
