@@ -162,6 +162,9 @@ test("usage and quota survive rollout source disappearance", async () => {
 
     await rm(fixture.file);
     const second = await collectUsage(options(fixture));
+    const activeOnly = await collectUsage(options(fixture, {
+      includeArchived: false,
+    }));
     const ledgerPath = resolveDurableLedgerPath({
       stateDirectory: fixture.stateDirectory,
     });
@@ -171,6 +174,8 @@ test("usage and quota survive rollout source disappearance", async () => {
     assert.equal(second.quotaObservations.length, 1);
     assert.equal(second.coverage.sourceIncomplete, true);
     assert.equal(second.coverage.sourceStates.tombstoned, 1);
+    assert.equal(activeOnly.coverage.observedTokens, 100);
+    assert.equal(activeOnly.quotaObservations.length, 1);
     assert.equal(ledger.usageRows.length, 1);
     assert.equal(ledger.quotaRows.length, 1);
     assert.equal(ledger.sourceSummary.states[0].status, "tombstoned");
@@ -196,7 +201,9 @@ test("exact observations retain tool-call ownership after source disappearance",
     );
     const first = await collectUsage(options(fixture));
     await rm(fixture.file);
-    const afterRemoval = await collectUsage(options(fixture));
+    const afterRemoval = await collectUsage(options(fixture, {
+      includeArchived: false,
+    }));
 
     assert.equal(first.events[0].toolCalls, 1);
     assert.equal(afterRemoval.events[0].toolCalls, 1);
@@ -534,6 +541,24 @@ test("collection cutoff slices migrated compacted ranges", async () => {
     assert.ok(Math.abs(snapshot.coverage.migratedCompactedTokens - 100) < 1e-6);
     assert.equal(snapshot.events.length, 1);
     assert.equal(snapshot.events[0].rangeAllocationEstimated, true);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("collection cutoff retains overlapping durable quota readings", async () => {
+  const fixture = await createFixture([100, 200], { usedPercent: 37 });
+  const cutoff = "2026-08-20T10:00:30.000Z";
+  try {
+    await collectUsage(options(fixture));
+    const snapshot = await collectUsage(options(fixture, { since: cutoff }));
+
+    assert.equal(snapshot.quotaObservations.length, 1);
+    assert.equal(snapshot.quotaObservations[0].timestamp, cutoff);
+    assert.equal(
+      snapshot.quotaObservations[0].lastSeenAt,
+      "2026-08-20T10:01:01.000Z",
+    );
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
