@@ -21,11 +21,12 @@ Non-obvious gotchas for running/testing the CLI:
   privacy-reduced snapshot with `--input <file.json> --no-refresh` so it never
   scans the (absent) source directory.
 - Use `tests/fixtures/rolling-24h-projects.json` for a ready-made snapshot, but
-  note its events are dated Aug 2026 — anchor time-windowed views with a
-  matching `--date`, or generate a snapshot whose event timestamps are relative
-  to "now" (see `writeSmokeFixture` in `tools/verify-release.mjs` for the
-  schema). Rolling views like `1d`/`week` show "No model-call events found" when
-  the fixture falls outside the window ending at the current time.
+  note its events are dated Aug 2026. Anchor calendar views such as `week` with
+  a matching `--date`. The rolling `1d` view does not accept `--date`, so generate
+  a snapshot whose event timestamps are relative to "now" instead (see
+  `writeSmokeFixture` in `tools/verify-release.mjs` for the schema). Time-windowed
+  views show "No model-call events found" when the fixture falls outside their
+  selected range.
 - Always pass `--static` (prints once instead of the interactive TUI) and, for
   determinism, `--tz UTC` when running non-interactively. Use `--plain` /
   `NO_COLOR=1` to drop ANSI color.
