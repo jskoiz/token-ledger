@@ -33,6 +33,8 @@ const THREAD_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const ROLLOUT_NAME = `rollout-${THREAD_ID}.jsonl`;
 const ARCHIVED_THREAD_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const ARCHIVED_ROLLOUT_NAME = `rollout-${ARCHIVED_THREAD_ID}.jsonl`;
+const SHARED_THREAD_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const SHARED_ROLLOUT_NAME = `rollout-${SHARED_THREAD_ID}.jsonl`;
 const BASE_TIMESTAMP = "2026-08-20T10:00:00.000Z";
 const WEEKLY_RESET = Date.parse("2026-08-30T10:00:00.000Z") / 1_000;
 
@@ -267,6 +269,75 @@ test("replacement and truncation reconcile without double counting", async () =>
     assert.equal(truncated.coverage.sourceIncomplete, true);
     assert.equal(truncated.coverage.sourceStates.changed, 1);
     assert.equal(ledger.sourceSummary.states[0].changeState, "truncated");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("replacing one source does not rewrite a shared observation", async () => {
+  const fixture = await createFixture([100]);
+  const sharedFile = resolve(fixture.file, "..", SHARED_ROLLOUT_NAME);
+  try {
+    await writeFile(sharedFile, await readFile(fixture.file));
+    const shared = await collectUsage(options(fixture));
+
+    await writeFile(fixture.file, serialize(rolloutRows([200])));
+    const replaced = await collectUsage(options(fixture));
+    await rm(fixture.file);
+    await rm(sharedFile);
+    const afterRemoval = await collectUsage(options(fixture));
+    const ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+
+    assert.equal(totalTokens(shared), 100);
+    assert.equal(totalTokens(replaced), 300);
+    assert.equal(totalTokens(afterRemoval), 300);
+    assert.deepEqual(
+      ledger.usageRows.map((row) => row.totalTokens).sort((left, right) => left - right),
+      [100, 200],
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("original promotion refreshes persisted origin attribution", async () => {
+  const fixture = await createFixture([]);
+  const originalFile = resolve(fixture.file, "..", SHARED_ROLLOUT_NAME);
+  const inheritedRows = rolloutRows([100]);
+  inheritedRows[0].payload.started_at =
+    Date.parse("2026-08-19T10:00:00.000Z") / 1_000;
+  const originalRows = rolloutRows([100]);
+  originalRows[1].payload.model = "gpt-5.6-sol";
+  try {
+    await writeFile(fixture.file, serialize(inheritedRows));
+    await collectUsage(options(fixture));
+    let ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+    assert.equal(ledger.usageRows[0].originalLikely, false);
+    assert.equal(ledger.usageRows[0].originThreadId, THREAD_ID);
+
+    await writeFile(originalFile, serialize(originalRows));
+    await collectUsage(options(fixture));
+    ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+    assert.equal(ledger.usageRows[0].originalLikely, true);
+    assert.equal(ledger.usageRows[0].threadId, SHARED_THREAD_ID);
+    assert.equal(ledger.usageRows[0].originThreadId, SHARED_THREAD_ID);
+    assert.equal(ledger.usageRows[0].model, "gpt-5.6-sol");
+    assert.equal(ledger.usageRows[0].originModel, "gpt-5.6-sol");
+
+    await rm(fixture.file);
+    await rm(originalFile);
+    await collectUsage(options(fixture));
+    ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+    assert.equal(ledger.usageRows[0].originThreadId, SHARED_THREAD_ID);
+    assert.equal(ledger.usageRows[0].originModel, "gpt-5.6-sol");
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
