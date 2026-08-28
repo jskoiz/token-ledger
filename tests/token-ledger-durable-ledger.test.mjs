@@ -12,6 +12,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import {
@@ -442,6 +443,77 @@ test("a failed persistence transaction leaves the last complete ledger usable", 
     const recovered = await collectUsage(options(fixture));
     assert.equal(recovered.coverage.observedTokens, 300);
   } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("source changes before commit roll back transient observations", async () => {
+  const fixture = await createFixture([100, 150]);
+  let replaced = false;
+  try {
+    const snapshot = await collectUsage(options(fixture, {
+      faultInjector: async ({ point }) => {
+        if (point === "before-commit" && !replaced) {
+          replaced = true;
+          await writeFile(fixture.file, serialize(rolloutRows([200])));
+        }
+      },
+    }));
+    await rm(fixture.file);
+    const afterRemoval = await collectUsage(options(fixture));
+    const ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+
+    assert.equal(totalTokens(snapshot), 200);
+    assert.equal(totalTokens(afterRemoval), 200);
+    assert.deepEqual(ledger.usageRows.map((row) => row.totalTokens), [200]);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("write-open rejects newer durable ledger schemas without rewriting them", async () => {
+  const fixture = await createFixture([100]);
+  const ledgerPath = resolveDurableLedgerPath({
+    stateDirectory: fixture.stateDirectory,
+  });
+  let database;
+  try {
+    await mkdir(fixture.stateDirectory, { recursive: true });
+    database = new DatabaseSync(ledgerPath);
+    database.exec(`
+      CREATE TABLE future_only (value TEXT);
+      PRAGMA user_version = 2;
+    `);
+    database.close();
+    database = null;
+
+    await assert.rejects(
+      () => collectUsage(options(fixture)),
+      (error) => error?.code === "ERR_DURABLE_LEDGER_SCHEMA",
+    );
+
+    database = new DatabaseSync(ledgerPath, { readOnly: true });
+    assert.equal(database.prepare("PRAGMA user_version").get().user_version, 2);
+    assert.equal(
+      database.prepare(`
+        SELECT COUNT(*) AS count
+          FROM sqlite_master
+         WHERE type = 'table' AND name = 'source_state'
+      `).get().count,
+      0,
+    );
+    assert.equal(
+      database.prepare("SELECT COUNT(*) AS count FROM future_only").get().count,
+      0,
+    );
+  } finally {
+    try {
+      database?.close();
+    } catch {
+      // Fixture cleanup remains authoritative.
+    }
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
