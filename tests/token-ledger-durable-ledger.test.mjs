@@ -439,6 +439,44 @@ test("active-to-archived movement preserves one source and event set", async () 
   }
 });
 
+test("simultaneous active and archived rollout copies keep separate scope", async () => {
+  const fixture = await createFixture([100]);
+  const archivedDirectory = resolve(
+    fixture.root,
+    "archived_sessions",
+    "2026",
+    "08",
+    "20",
+  );
+  const archivedFile = resolve(archivedDirectory, ROLLOUT_NAME);
+  try {
+    await mkdir(archivedDirectory, { recursive: true });
+    await writeFile(
+      archivedFile,
+      serialize(rolloutRows([200], { offset: 1 })),
+    );
+    const allSources = await collectUsage(options(fixture));
+    const ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+    const activeOnly = await collectUsage(options(fixture, {
+      includeArchived: false,
+    }));
+
+    assert.equal(totalTokens(allSources), 300);
+    assert.equal(totalTokens(activeOnly), 100);
+    assert.deepEqual(
+      ledger.sourceSummary.states.map((state) => state.location).sort(),
+      ["active", "archived"],
+    );
+    assert.equal(new Set(
+      ledger.sourceSummary.states.map((state) => state.sourceId),
+    ).size, 2);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("a failed persistence transaction leaves the last complete ledger usable", async () => {
   const fixture = await createFixture([100]);
   try {
@@ -469,6 +507,20 @@ test("a failed persistence transaction leaves the last complete ledger usable", 
 
     const recovered = await collectUsage(options(fixture));
     assert.equal(recovered.coverage.observedTokens, 300);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("revision reads tolerate Node SQLite corruption error codes", async () => {
+  const fixture = await createFixture([]);
+  const ledgerPath = resolveDurableLedgerPath({
+    stateDirectory: fixture.stateDirectory,
+  });
+  try {
+    await mkdir(fixture.stateDirectory, { recursive: true });
+    await writeFile(ledgerPath, "not a sqlite database");
+    assert.equal(await readDurableLedgerRevision(ledgerPath), null);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
