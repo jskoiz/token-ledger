@@ -480,6 +480,147 @@ test("active move reconciles an archive replaced during active-only tracking", a
   }
 });
 
+test("uncertain replacement preserves memberships until a clean rescan", async () => {
+  const fixture = await createFixture([100, 150], { usedPercent: 37 });
+  const replacement = resolve(fixture.root, "uncertain-replacement.jsonl");
+  const recovered = resolve(fixture.root, "recovered-replacement.jsonl");
+  const validReplacementRows = [
+    ...rolloutRows([200], { usedPercent: 58 }),
+    shellCall("2026-08-20T10:01:00.000Z", "call-new-after-parse-error"),
+  ];
+  try {
+    await appendFile(fixture.file, serialize([
+      shellCall("2026-08-20T10:02:00.000Z", "call-old-before-error-one"),
+      shellCall("2026-08-20T10:03:00.000Z", "call-old-before-error-two"),
+    ]));
+    const initial = await collectUsage(options(fixture));
+
+    await writeFile(
+      replacement,
+      `${serialize(validReplacementRows)}{"type":"event_msg","payload":{"type":"token_count"\n`,
+    );
+    await rename(replacement, fixture.file);
+    const uncertain = await collectUsage(options(fixture));
+    const retained = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+
+    await rm(fixture.file);
+    const afterRemoval = await collectUsage(options(fixture));
+    await writeFile(recovered, serialize(validReplacementRows));
+    await rename(recovered, fixture.file);
+    const clean = await collectUsage(options(fixture));
+    const reconciled = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+
+    assert.equal(totalTokens(initial), 250);
+    assert.equal(initial.quotaObservations.length, 1);
+    assert.equal(totalToolCalls(initial), 2);
+    assert.equal(uncertain.coverage.parseErrors, 1);
+    assert.equal(totalTokens(uncertain), 350);
+    assert.deepEqual(
+      uncertain.quotaObservations.map((quota) => quota.usedPercent).sort(),
+      [37, 58],
+    );
+    assert.equal(totalToolCalls(uncertain), 3);
+    assert.equal(
+      retained.usageRows.reduce((sum, row) => sum + row.totalTokens, 0),
+      350,
+    );
+    assert.equal(retained.quotaRows.length, 2);
+    assert.equal(retained.toolRows.length, 3);
+    assert.equal(totalTokens(afterRemoval), 350);
+    assert.equal(afterRemoval.quotaObservations.length, 2);
+    assert.equal(totalToolCalls(afterRemoval), 3);
+    assert.equal(clean.coverage.parseErrors, 0);
+    assert.equal(totalTokens(clean), 200);
+    assert.deepEqual(
+      clean.quotaObservations.map((quota) => quota.usedPercent),
+      [58],
+    );
+    assert.equal(totalToolCalls(clean), 1);
+    assert.equal(reconciled.usageRows.length, 1);
+    assert.equal(reconciled.quotaRows.length, 1);
+    assert.equal(reconciled.toolRows.length, 1);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("invalid-token uncertainty is scoped to its replaced source", async () => {
+  const fixture = await createFixture([100, 150], { usedPercent: 37 });
+  const secondFile = resolve(
+    fixture.root,
+    "sessions",
+    "2026",
+    "08",
+    "20",
+    SHARED_ROLLOUT_NAME,
+  );
+  const firstReplacement = resolve(fixture.root, "invalid-first-source.jsonl");
+  const secondReplacement = resolve(fixture.root, "valid-second-source.jsonl");
+  const recoveredFirst = resolve(fixture.root, "valid-first-source.jsonl");
+  const invalidToken = tokenCount("2026-08-20T10:02:01.000Z", 500, 58);
+  invalidToken.payload.info.last_token_usage.total_tokens = "invalid";
+  try {
+    await appendFile(fixture.file, serialize([
+      shellCall("2026-08-20T10:02:00.000Z", "call-first-old-one"),
+      shellCall("2026-08-20T10:03:00.000Z", "call-first-old-two"),
+    ]));
+    await writeFile(secondFile, serialize([
+      ...rolloutRows([300, 350], { offset: 10, usedPercent: 45 }),
+      shellCall("2026-08-20T10:12:00.000Z", "call-second-old-one"),
+      shellCall("2026-08-20T10:13:00.000Z", "call-second-old-two"),
+    ]));
+    const initial = await collectUsage(options(fixture));
+
+    await writeFile(firstReplacement, serialize([
+      ...rolloutRows([200], { usedPercent: 58 }),
+      shellCall("2026-08-20T10:01:00.000Z", "call-first-uncertain"),
+      ...turnStart("2026-08-20T10:02:00.000Z", "invalid-turn"),
+      invalidToken,
+    ]));
+    await writeFile(secondReplacement, serialize([
+      ...rolloutRows([400], { offset: 10, usedPercent: 67 }),
+      shellCall("2026-08-20T10:11:00.000Z", "call-second-valid"),
+    ]));
+    await rename(firstReplacement, fixture.file);
+    await rename(secondReplacement, secondFile);
+    const sourceScoped = await collectUsage(options(fixture));
+
+    await writeFile(recoveredFirst, serialize([
+      ...rolloutRows([250], { usedPercent: 59 }),
+      shellCall("2026-08-20T10:01:00.000Z", "call-first-recovered"),
+    ]));
+    await rename(recoveredFirst, fixture.file);
+    const recovered = await collectUsage(options(fixture));
+
+    assert.equal(totalTokens(initial), 900);
+    assert.equal(totalToolCalls(initial), 4);
+    assert.equal(sourceScoped.coverage.invalidTokenRecords, 1);
+    assert.equal(totalTokens(sourceScoped), 750);
+    assert.deepEqual(
+      sourceScoped.quotaObservations
+        .map((quota) => quota.usedPercent)
+        .sort((left, right) => left - right),
+      [37, 58, 67],
+    );
+    assert.equal(totalToolCalls(sourceScoped), 4);
+    assert.equal(recovered.coverage.invalidTokenRecords, 0);
+    assert.equal(totalTokens(recovered), 650);
+    assert.deepEqual(
+      recovered.quotaObservations
+        .map((quota) => quota.usedPercent)
+        .sort((left, right) => left - right),
+      [59, 67],
+    );
+    assert.equal(totalToolCalls(recovered), 2);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("active-only lifecycle keeps simultaneous active and archived copies distinct", async () => {
   const fixture = await createFixture([100]);
   const archivedDirectory = resolve(
