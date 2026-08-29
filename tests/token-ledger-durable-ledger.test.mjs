@@ -2432,6 +2432,153 @@ test("readable non-v3 legacy snapshots remain retryable hard failures", async ()
   }
 });
 
+test("malformed v3 legacy rows cannot burn the one-shot migration", async () => {
+  const fixture = await createFixture([]);
+  const legacySnapshotPath = resolve(fixture.root, "exports", "legacy.json");
+  const ledgerPath = resolveDurableLedgerPath({
+    stateDirectory: fixture.stateDirectory,
+  });
+  const generatedAt = "2026-08-20T12:00:00.000Z";
+  const validLegacy = legacySnapshotForFixture(fixture, {
+    schemaVersion: 3,
+    generatedAt,
+    events: [{
+      timestamp: generatedAt,
+      project: "legacy-project",
+      model: "gpt-5.4",
+      rateCardModel: "gpt-5.4",
+      effort: "medium",
+      source: "local",
+      useType: "interactive",
+      inputTokens: 90,
+      cachedInputTokens: 10,
+      outputTokens: 10,
+      reasoningTokens: 4,
+      totalTokens: 100,
+      toolCalls: 0,
+      callCount: 1,
+      detailedCallCount: 1,
+      inputCallCount: 1,
+      breakdownAvailable: true,
+      threadIds: ["legacy-row-thread"],
+    }],
+    quotaObservations: [{
+      timestamp: generatedAt,
+      lastSeenAt: generatedAt,
+      usedPercent: 22,
+      windowMinutes: 10_080,
+      resetsAt: WEEKLY_RESET,
+      planType: "plus",
+      limitKey: "weekly",
+      scope: "account",
+    }],
+    threads: [{
+      id: "legacy-row-thread",
+      title: "Legacy row thread",
+      project: "legacy-project",
+      model: "gpt-5.4",
+      effort: "medium",
+      source: "local",
+      useType: "interactive",
+      reportedCumulativeTokens: 100,
+      firstActiveAt: generatedAt,
+      lastActiveAt: generatedAt,
+    }],
+  });
+  const invalidCases = [
+    ["usage event", (snapshot) => {
+      snapshot.events[0].timestamp = "not-a-timestamp";
+    }],
+    ["quota array", (snapshot) => {
+      snapshot.quotaObservations = {};
+    }],
+    ["quota row", (snapshot) => {
+      snapshot.quotaObservations[0].usedPercent = -1;
+    }],
+    ["thread row", (snapshot) => {
+      snapshot.threads[0] = null;
+    }],
+    ["thread timestamp", (snapshot) => {
+      snapshot.threads[0].lastActiveAt = "not-a-timestamp";
+    }],
+    ["thread counter", (snapshot) => {
+      snapshot.threads[0].reportedCumulativeTokens = "100";
+    }],
+  ];
+  let stageCalls = 0;
+  let database;
+  try {
+    await mkdir(dirname(legacySnapshotPath), { recursive: true });
+    for (const [label, mutate] of invalidCases) {
+      const malformed = JSON.parse(JSON.stringify(validLegacy));
+      mutate(malformed);
+      const bytes = Buffer.from(`${JSON.stringify(malformed)}\n`, "utf8");
+      await writeFile(legacySnapshotPath, bytes);
+      await assert.rejects(
+        () => collectUsage(options(fixture, {
+          output: legacySnapshotPath,
+          stageSnapshot: async () => {
+            stageCalls += 1;
+            throw new Error("invalid legacy input reached snapshot staging");
+          },
+        })),
+        (error) => {
+          assert.equal(
+            error?.code,
+            "ERR_DURABLE_LEDGER_LEGACY_SNAPSHOT",
+            label,
+          );
+          return true;
+        },
+      );
+      assert.deepEqual(await readFile(legacySnapshotPath), bytes, label);
+      assert.equal(await readDurableLedgerRevision(ledgerPath), 0, label);
+      database = new DatabaseSync(ledgerPath, { readOnly: true });
+      assert.equal(database.prepare(
+        "SELECT value FROM ledger_meta WHERE key = 'legacy_snapshot_checked'",
+      ).get(), undefined, label);
+      assert.equal(database.prepare(
+        "SELECT COUNT(*) AS count FROM migration_runs",
+      ).get().count, 0, label);
+      database.close();
+      database = null;
+    }
+    assert.equal(stageCalls, 0);
+
+    await writeFile(
+      legacySnapshotPath,
+      `${JSON.stringify(validLegacy)}\n`,
+    );
+    const first = await collectUsage(options(fixture, {
+      output: legacySnapshotPath,
+    }));
+    const second = await collectUsage(options(fixture, {
+      output: legacySnapshotPath,
+    }));
+    const ledger = await readDurableLedger(ledgerPath);
+    database = new DatabaseSync(ledgerPath, { readOnly: true });
+
+    assert.equal(totalTokens(first), 100);
+    assert.equal(totalTokens(second), 100);
+    assert.equal(first.quotaObservations.length, 1);
+    assert.equal(ledger.migratedUsageRows, 1);
+    assert.equal(ledger.migratedQuotaRows, 1);
+    assert.equal(
+      ledger.threadRows.filter((row) => row.id === "legacy-row-thread").length,
+      1,
+    );
+    assert.equal(database.prepare(
+      "SELECT COUNT(*) AS count FROM migration_runs",
+    ).get().count, 1);
+    assert.equal(database.prepare(
+      "SELECT value FROM ledger_meta WHERE key = 'legacy_snapshot_checked'",
+    ).get().value, "1");
+  } finally {
+    database?.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("old v3 snapshot migration is idempotent and marks compacted estimates", async () => {
   const fixture = await createFixture([]);
   const generatedAt = "2026-08-20T12:00:00.000Z";
