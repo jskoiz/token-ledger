@@ -512,6 +512,17 @@ export function renderTrendImage({
         label: `≈ ESTIMATED HISTORY${resolution}`,
       });
     }
+    const legacyStatusLabel = new Map([
+      ["collection-scope-unverified", "SCOPE UNVERIFIED"],
+      ["codex-home-unverified", "HOME UNVERIFIED"],
+      ["codex-home-mismatch", "HOME MISMATCH"],
+    ]).get(vm.coverage.legacySnapshotStatus);
+    if (legacyStatusLabel) {
+      warnings.push({
+        kind: "legacy-history",
+        label: `LEGACY HISTORY SKIPPED · ${legacyStatusLabel}`,
+      });
+    }
     if (rateCardMismatch) {
       warnings.push({
         kind: "rate-card-mismatch",

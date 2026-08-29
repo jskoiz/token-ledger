@@ -208,6 +208,12 @@ Compacted usage buckets retain their deduplicated source-association scope, so
 `--no-archived` can exclude archived-only history without including it through
 an aggregate that also contains active usage.
 
+Legacy snapshot history is imported only when its collection scope and hashed
+Codex-home identity are both provable. If either check fails, exact rollout
+collection continues without that legacy history and reports show a compact
+`LEGACY HISTORY SKIPPED` warning. The reason is also recorded as
+`coverage.legacySnapshotStatus` in the generated snapshot.
+
 The default snapshot and ledger directories are private (`0700`), and their
 files are private (`0600`). An explicit `--input` reads only that deliberate
 snapshot input; it does not use the default durable ledger as a hidden source.
@@ -220,6 +226,10 @@ contain user-written text. CLI errors and empty-state source labels show only a
 safe filename label, not an absolute input or source path. When a PNG or report
 is written, the explicit output path is reported so you can find the file. The
 CLI makes no network requests.
+
+For schema health signals, non-destructive recovery guidance, cache/ledger
+coherence, and the repeatable scaling benchmark, see
+[Durable ledger operations](docs/durable-ledger-operations.md).
 
 ## Keyboard controls
 

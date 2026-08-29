@@ -529,6 +529,7 @@ function degradedSnapshot() {
     coverage: {
       parseErrors: 2,
       maximumUsageResolutionSeconds: 86_400,
+      legacySnapshotStatus: "codex-home-unverified",
     },
   });
 }
@@ -605,6 +606,7 @@ test("material integrity warnings are conditional and preserve estimated labels"
     ["external-source", "EXTERNAL SNAPSHOT INPUT"],
     ["source-status", "STALE SNAPSHOT"],
     ["estimated-history", "≈ ESTIMATED HISTORY · 1 day SOURCE BINS"],
+    ["legacy-history", "LEGACY HISTORY SKIPPED · HOME UNVERIFIED"],
     [
       "rate-card-mismatch",
       `RATE CARD 2026-08-17 → ${CODEX_CREDIT_RATE_CARD_AS_OF}`,
@@ -680,7 +682,7 @@ test("degraded warning chips fit and encode at 900, 1280, and 2400 pixels", asyn
       const warningGroups = [...svg.matchAll(
         /<g data-role="integrity-warning"[^>]*>([\s\S]*?)<\/g>/g,
       )];
-      assert.equal(warningGroups.length, 6);
+      assert.equal(warningGroups.length, 7);
       for (const [, markup] of warningGroups) {
         const rect = markup.match(/<rect x="([\d.]+)"[^>]*width="([\d.]+)"/);
         assert.ok(rect, "warning chip has a measurable backing rect");

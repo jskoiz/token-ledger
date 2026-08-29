@@ -49,6 +49,15 @@ function finiteTimestamp(value) {
   return Number.isFinite(timestamp) ? timestamp : null;
 }
 
+function primitiveString(value) {
+  try {
+    const text = String.prototype.valueOf.call(value);
+    return text === value ? text : null;
+  } catch {
+    return null;
+  }
+}
+
 function dateStringFromParts(year, month, day) {
   return [year, month, day]
     .map((value, index) => String(value).padStart(index === 0 ? 4 : 2, "0"))
@@ -660,6 +669,9 @@ export function buildTrendReportViewModel({
       ? (totalTokens / priorEquivalentTokens - 1) * 100
       : null;
   const estimated = daily.some((row) => row.estimated);
+  const rawLegacySnapshotStatus = snapshot.coverage?.legacySnapshotStatus ??
+    snapshot.metadata?.durableLedger?.legacySnapshotStatus;
+  const legacySnapshotStatus = primitiveString(rawLegacySnapshotStatus);
 
   const snapshotGeneratedAtMs = finiteTimestamp(snapshot.generatedAt);
   const viewModel = {
@@ -725,6 +737,7 @@ export function buildTrendReportViewModel({
             Number(snapshot.coverage?.maximumResolutionSeconds) ||
             0,
         ) || null,
+      legacySnapshotStatus,
     },
     provenance: {
       localOnly: (snapshot.provenance?.kind ?? "codex-local-metadata") ===
