@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
 import {
   appendFile,
@@ -16,6 +17,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 
 import {
@@ -116,6 +118,38 @@ test("usage spool retains SQLite statements through long row iteration", async (
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("large refreshes stream spool rows within a bounded JavaScript heap", () => {
+  const benchmark = fileURLToPath(
+    new URL("../tools/benchmark-importer.mjs", import.meta.url),
+  );
+  const child = spawnSync(process.execPath, [
+    "--max-old-space-size=128",
+    benchmark,
+    "--files",
+    "24",
+    "--token-events",
+    "20000",
+    "--warm-runs",
+    "1",
+    "--event-age-days",
+    "4000",
+  ], {
+    encoding: "utf8",
+    timeout: 30_000,
+  });
+
+  assert.equal(
+    child.status,
+    0,
+    `bounded refresh failed: ${child.stderr || child.stdout}`,
+  );
+  const result = JSON.parse(child.stdout);
+  assert.equal(result.durableTotalTokens, 2_000_000);
+  assert.equal(result.parsedOutputEvents, 20_000);
+  assert.equal(result.durableRevision, 1);
+  assert.equal(result.parseErrors, 0);
 });
 
 test("source appends are included before a validated cache is published", async () => {
