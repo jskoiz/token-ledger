@@ -1513,6 +1513,59 @@ test("old compacted observations retain source membership without rescan double 
   }
 });
 
+test("unchanged compacted observations retain membership provenance", async () => {
+  const fixture = await createFixture([100, 200], {
+    baseTimestamp: "2015-08-20T10:00:00.000Z",
+  });
+  try {
+    await collectUsage(options(fixture));
+    const ledgerPath = resolveDurableLedgerPath({
+      stateDirectory: fixture.stateDirectory,
+    });
+    let database = new DatabaseSync(ledgerPath, { readOnly: true });
+    const before = database.prepare(`
+      SELECT event_key AS eventKey, observation_id AS observationId,
+             first_seen_at AS firstSeenAt
+        FROM usage_compaction_membership
+       ORDER BY event_key
+    `).all();
+    database.close();
+
+    await collectUsage(options(fixture));
+    database = new DatabaseSync(ledgerPath, { readOnly: true });
+    const after = database.prepare(`
+      SELECT event_key AS eventKey, observation_id AS observationId,
+             first_seen_at AS firstSeenAt
+        FROM usage_compaction_membership
+       ORDER BY event_key
+    `).all();
+    const indexes = new Map([
+      [
+        "source_event_positions",
+        "source_event_positions_observation",
+      ],
+      [
+        "usage_compaction_membership",
+        "usage_compaction_membership_observation",
+      ],
+      ["usage_sources", "usage_sources_source"],
+      ["tool_sources", "tool_sources_source"],
+      ["quota_sources", "quota_sources_source"],
+    ]);
+    for (const [table, indexName] of indexes) {
+      const names = database.prepare(`PRAGMA index_list(${table})`).all()
+        .map((row) => String(row.name));
+      assert(names.includes(indexName), `${indexName} should index ${table}`);
+    }
+    database.close();
+
+    assert.equal(before.length, 2);
+    assert.deepEqual(after, before);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("compacted observations retain tool-call ownership after source disappearance", async () => {
   const fixture = await createFixture([100], {
     baseTimestamp: "2015-08-20T10:00:00.000Z",
