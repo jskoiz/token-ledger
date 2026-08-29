@@ -1431,8 +1431,12 @@ test("replacement resets retained quota source bounds", async () => {
     })));
     await rename(replacement, fixture.file);
 
+    const allSources = await collectUsage(options(fixture));
     const activeOnly = await collectUsage(options(fixture, {
       includeArchived: false,
+    }));
+    const allSourcesAfterOldSample = await collectUsage(options(fixture, {
+      since: "2026-08-21T00:00:00.000Z",
     }));
     const afterOldSample = await collectUsage(options(fixture, {
       includeArchived: false,
@@ -1440,9 +1444,14 @@ test("replacement resets retained quota source bounds", async () => {
     }));
 
     assert.equal(
+      allSources.quotaObservations[0].lastSeenAt,
+      "2026-08-20T10:00:01.000Z",
+    );
+    assert.equal(
       activeOnly.quotaObservations[0].lastSeenAt,
       "2026-08-20T10:00:01.000Z",
     );
+    assert.equal(allSourcesAfterOldSample.quotaObservations.length, 0);
     assert.equal(afterOldSample.quotaObservations.length, 0);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
