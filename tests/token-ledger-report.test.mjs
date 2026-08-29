@@ -564,6 +564,7 @@ function degradedSnapshot() {
     coverage: {
       parseErrors: 2,
       invalidTokenRecords: 3,
+      invalidQuotaRecords: 4,
       sourceIncomplete: true,
       maximumUsageResolutionSeconds: 86_400,
       legacySnapshotStatus: "codex-home-unverified",
@@ -641,11 +642,13 @@ test("material integrity warnings are conditional and preserve estimated labels"
   });
   const degraded = renderDegraded(1_280);
   assert.equal(degradedVm.coverage.invalidTokenRecords, 3);
+  assert.equal(degradedVm.coverage.invalidQuotaRecords, 4);
   assert.equal(degradedVm.coverage.sourceIncomplete, true);
   assert.doesNotMatch(healthy, /data-role="integrity-warning"/);
   for (const [kind, label] of [
     ["parse-errors", "2 UNPARSED SOURCE RECORDS"],
     ["invalid-token-records", "3 INVALID TOKEN RECORDS EXCLUDED"],
+    ["invalid-quota-records", "4 INVALID QUOTA RECORDS EXCLUDED"],
     ["source-incomplete", "INCOMPLETE SOURCE PROVENANCE"],
     ["component-coverage", "50% COMPONENT COVERAGE"],
     ["external-source", "EXTERNAL SNAPSHOT INPUT"],
@@ -762,7 +765,7 @@ test("degraded warning chips fit and encode at 900, 1280, and 2400 pixels", asyn
       const warningGroups = [...svg.matchAll(
         /<g data-role="integrity-warning"[^>]*>([\s\S]*?)<\/g>/g,
       )];
-      assert.equal(warningGroups.length, 9);
+      assert.equal(warningGroups.length, 10);
       for (const [, markup] of warningGroups) {
         const rect = markup.match(/<rect x="([\d.]+)"[^>]*width="([\d.]+)"/);
         assert.ok(rect, "warning chip has a measurable backing rect");

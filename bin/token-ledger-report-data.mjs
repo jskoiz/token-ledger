@@ -744,6 +744,10 @@ export function buildTrendReportViewModel({
         0,
         Number(snapshot.coverage?.invalidTokenRecords) || 0,
       ),
+      invalidQuotaRecords: Math.max(
+        0,
+        Number(snapshot.coverage?.invalidQuotaRecords) || 0,
+      ),
       sourceIncomplete: snapshot.coverage?.sourceIncomplete === true,
       estimated,
       estimatedBucketCount: daily.filter((row) => row.estimated).length,

@@ -15,9 +15,9 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 
 import {
@@ -33,7 +33,11 @@ import {
   stagePrivateSnapshot,
   writePrivateSnapshot,
 } from "../lib/token-ledger-snapshot.mjs";
-import { codexHomeFingerprint } from "../lib/token-ledger-ledger.mjs";
+import {
+  codexHomeFingerprint,
+  readDurableLedger,
+  resolveDurableLedgerPath,
+} from "../lib/token-ledger-ledger.mjs";
 import {
   buildUsageBuckets,
   normalizeTokenUsage,
@@ -1926,6 +1930,195 @@ test("imported quota observations retain account and named scope", async () => {
     );
     assert.equal(account.scope, "account");
     assert.equal(named.scope, "named");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("quota fields reject malformed values without fabricating durable meters", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-quota-validation-"));
+  const output = resolve(root, "snapshot.json");
+  const timestamp = "2026-08-18T10:00:00.000Z";
+  const resetsAt = Date.parse("2026-08-24T00:00:00.000Z") / 1_000;
+  const validThreadId = "30303030-3030-4030-8030-303030303030";
+  const invalidThreadId = "40404040-4040-4040-8040-404040404040";
+  const validRateLimits = {
+    primary: {
+      window_minutes: 1,
+      used_percent: 0,
+      resets_at: 1,
+    },
+    secondary: {
+      window_minutes: 10_080,
+      used_percent: 100,
+      resets_at: resetsAt,
+    },
+    limit_id: "boundary",
+    plan_type: "plus",
+  };
+  const invalidBuckets = [
+    { window_minutes: 10_080, resets_at: resetsAt },
+    { window_minutes: 10_080, used_percent: null, resets_at: resetsAt },
+    { window_minutes: 10_080, used_percent: "5", resets_at: resetsAt },
+    { window_minutes: 10_080, used_percent: -1, resets_at: resetsAt },
+    { window_minutes: 10_080, used_percent: 100.01, resets_at: resetsAt },
+    {
+      window_minutes: 10_080,
+      used_percent: "__NONFINITE_PERCENT__",
+      resets_at: resetsAt,
+    },
+    { used_percent: 5, resets_at: resetsAt },
+    { window_minutes: null, used_percent: 5, resets_at: resetsAt },
+    { window_minutes: "10080", used_percent: 5, resets_at: resetsAt },
+    { window_minutes: 0, used_percent: 5, resets_at: resetsAt },
+    { window_minutes: -1, used_percent: 5, resets_at: resetsAt },
+    { window_minutes: 1.5, used_percent: 5, resets_at: resetsAt },
+    { window_minutes: 10_080, used_percent: 5 },
+    { window_minutes: 10_080, used_percent: 5, resets_at: null },
+    { window_minutes: 10_080, used_percent: 5, resets_at: "1" },
+    { window_minutes: 10_080, used_percent: 5, resets_at: 0 },
+    { window_minutes: 10_080, used_percent: 5, resets_at: -1 },
+    { window_minutes: 10_080, used_percent: 5, resets_at: 1.5 },
+    {
+      window_minutes: 10_080,
+      used_percent: 5,
+      resets_at: Number.MAX_VALUE,
+    },
+    {
+      window_minutes: 10_080,
+      used_percent: 5,
+      resets_at: "__NONFINITE_RESET__",
+    },
+    "garbage",
+  ];
+  try {
+    const rolloutDirectory = resolve(root, "sessions", "2026", "08", "18");
+    await mkdir(rolloutDirectory, { recursive: true });
+    await writeFile(
+      resolve(rolloutDirectory, `rollout-${validThreadId}.jsonl`),
+      serialize([
+        ...turnStart(timestamp, "turn-valid-boundaries"),
+        {
+          timestamp,
+          type: "event_msg",
+          payload: { type: "token_count", rate_limits: validRateLimits },
+        },
+        tokenCount(timestamp, 100, 100),
+      ]),
+    );
+    const invalidRows = invalidBuckets.map((primary, index) => ({
+      timestamp: new Date(Date.parse(timestamp) + index * 1_000).toISOString(),
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        rate_limits: {
+          primary,
+          limit_id: "invalid",
+          plan_type: "plus",
+        },
+      },
+    }));
+    invalidRows.push({
+      timestamp,
+      type: "event_msg",
+      payload: { type: "token_count", rate_limits: "garbage" },
+    });
+    const invalidContents = serialize([
+      ...turnStart(timestamp, "turn-invalid-quotas"),
+      ...invalidRows,
+    ])
+      .replace('"__NONFINITE_PERCENT__"', "1e309")
+      .replace('"__NONFINITE_RESET__"', "1e309");
+    await writeFile(
+      resolve(rolloutDirectory, `rollout-${invalidThreadId}.jsonl`),
+      invalidContents,
+    );
+
+    const first = await collectUsage({
+      output,
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+    const reloaded = await collectUsage({
+      output,
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+    const ledger = await readDurableLedger(resolveDurableLedgerPath({ output }));
+    const expectedInvalid = invalidBuckets.length + 1;
+
+    assert.equal(first.coverage.invalidQuotaRecords, expectedInvalid);
+    assert.equal(reloaded.coverage.invalidQuotaRecords, expectedInvalid);
+    assert.equal(first.coverage.completeSinceWindowStart, false);
+    assert.deepEqual(
+      first.quotaObservations.map((quota) => quota.usedPercent).sort(
+        (left, right) => left - right,
+      ),
+      [0, 100],
+    );
+    assert.deepEqual(
+      reloaded.quotaObservations.map((quota) => quota.usedPercent).sort(
+        (left, right) => left - right,
+      ),
+      [0, 100],
+    );
+    assert.deepEqual(
+      ledger.quotaRows.map((quota) => quota.usedPercent).sort(
+        (left, right) => left - right,
+      ),
+      [0, 100],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("collector CLI reports excluded quota records", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-quota-cli-"));
+  const output = resolve(root, "snapshot.json");
+  const timestamp = "2026-08-18T10:00:00.000Z";
+  try {
+    const rolloutDirectory = resolve(root, "sessions", "2026", "08", "18");
+    await mkdir(rolloutDirectory, { recursive: true });
+    await writeFile(
+      resolve(
+        rolloutDirectory,
+        "rollout-50505050-5050-4050-8050-505050505050.jsonl",
+      ),
+      serialize([
+        ...turnStart(timestamp, "turn-invalid-quota-cli"),
+        {
+          timestamp,
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            rate_limits: {
+              primary: {
+                window_minutes: 10_080,
+                used_percent: -1,
+                resets_at: Date.parse("2026-08-24T00:00:00.000Z") / 1_000,
+              },
+            },
+          },
+        },
+      ]),
+    );
+    const child = spawnSync(
+      process.execPath,
+      [
+        fileURLToPath(new URL("../lib/token-ledger-importer.mjs", import.meta.url)),
+        "--codex-home",
+        root,
+        "--output",
+        output,
+      ],
+      { encoding: "utf8", timeout: 30_000 },
+    );
+
+    assert.equal(child.status, 0, child.stderr || child.stdout);
+    assert.match(child.stdout, /Invalid quota records excluded: 1/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

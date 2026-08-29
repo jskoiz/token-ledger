@@ -512,6 +512,12 @@ export function renderTrendImage({
         label: `${vm.coverage.invalidTokenRecords.toLocaleString("en-US")} INVALID TOKEN ${vm.coverage.invalidTokenRecords === 1 ? "RECORD" : "RECORDS"} EXCLUDED`,
       });
     }
+    if (vm.coverage.invalidQuotaRecords > 0) {
+      warnings.push({
+        kind: "invalid-quota-records",
+        label: `${vm.coverage.invalidQuotaRecords.toLocaleString("en-US")} INVALID QUOTA ${vm.coverage.invalidQuotaRecords === 1 ? "RECORD" : "RECORDS"} EXCLUDED`,
+      });
+    }
     if (vm.coverage.sourceIncomplete) {
       warnings.push({
         kind: "source-incomplete",

@@ -31,6 +31,8 @@ import {
 import {
   DURABLE_LEDGER_FILENAME,
   codexHomeFingerprint,
+  durableQuotaObservationKey,
+  normalizeQuotaObservationFields,
   readDurableLedger,
   readDurableLedgerRevision,
   resolveDurableLedgerPath,
@@ -325,6 +327,113 @@ test("ledger statement preparation is constant across event volume", async () =>
   );
 });
 
+test("quota normalization accepts only exact provider percentage fields", () => {
+  const valid = [
+    { windowMinutes: 1, resetsAt: 1, usedPercent: 0 },
+    { windowMinutes: 10_080, resetsAt: WEEKLY_RESET, usedPercent: 100 },
+  ];
+  for (const row of valid) {
+    assert.deepEqual(normalizeQuotaObservationFields(row), row);
+    assert.notEqual(
+      durableQuotaObservationKey({ limitKey: "weekly", ...row }),
+      null,
+    );
+  }
+
+  const invalid = [
+    {},
+    { windowMinutes: 10_080, resetsAt: WEEKLY_RESET },
+    { windowMinutes: 10_080, resetsAt: WEEKLY_RESET, usedPercent: null },
+    { windowMinutes: 10_080, resetsAt: WEEKLY_RESET, usedPercent: "0" },
+    { windowMinutes: 10_080, resetsAt: WEEKLY_RESET, usedPercent: -1 },
+    { windowMinutes: 10_080, resetsAt: WEEKLY_RESET, usedPercent: 100.01 },
+    { windowMinutes: 10_080, resetsAt: WEEKLY_RESET, usedPercent: NaN },
+    { windowMinutes: 10_080, resetsAt: WEEKLY_RESET, usedPercent: Infinity },
+    { windowMinutes: 0, resetsAt: WEEKLY_RESET, usedPercent: 10 },
+    { windowMinutes: 1.5, resetsAt: WEEKLY_RESET, usedPercent: 10 },
+    { windowMinutes: "10080", resetsAt: WEEKLY_RESET, usedPercent: 10 },
+    { windowMinutes: 10_080, resetsAt: 0, usedPercent: 10 },
+    { windowMinutes: 10_080, resetsAt: "1", usedPercent: 10 },
+    { windowMinutes: 10_080, resetsAt: 1.5, usedPercent: 10 },
+    { windowMinutes: 10_080, resetsAt: Number.MAX_VALUE, usedPercent: 10 },
+    {
+      windowMinutes: 10_080,
+      resetsAt: Number.MAX_SAFE_INTEGER,
+      usedPercent: 10,
+    },
+    { windowMinutes: 10_080, resetsAt: Infinity, usedPercent: 10 },
+  ];
+  for (const row of invalid) {
+    assert.equal(normalizeQuotaObservationFields(row), null);
+    assert.equal(
+      durableQuotaObservationKey({ limitKey: "weekly", ...row }),
+      null,
+    );
+  }
+});
+
+test("persisted invalid quota fields fail closed before ledger upgrade", async () => {
+  const fixture = await createFixture([100], { usedPercent: 37 });
+  const ledgerPath = resolveDurableLedgerPath({
+    stateDirectory: fixture.stateDirectory,
+  });
+  let database;
+  try {
+    await collectUsage(options(fixture));
+    database = new DatabaseSync(ledgerPath);
+    database.exec(
+      "ALTER TABLE source_state DROP COLUMN quota_reconciliation_pending",
+    );
+    database.prepare(
+      "UPDATE quota_observations SET used_percent = 150",
+    ).run();
+    database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    database.close();
+    database = null;
+    const before = await readFile(ledgerPath);
+
+    await assert.rejects(
+      () => readDurableLedger(ledgerPath),
+      (error) => error?.code === "ERR_DURABLE_LEDGER_QUOTA",
+    );
+    assert.deepEqual(await readFile(ledgerPath), before);
+    await assert.rejects(
+      () => collectUsage(options(fixture)),
+      (error) => error?.code === "ERR_DURABLE_LEDGER_QUOTA",
+    );
+    assert.deepEqual(await readFile(ledgerPath), before);
+
+    database = new DatabaseSync(ledgerPath);
+    assert.equal(
+      database.prepare("PRAGMA table_info(source_state)").all().some(
+        (column) => column.name === "quota_reconciliation_pending",
+      ),
+      false,
+    );
+    database.prepare(
+      "UPDATE quota_observations SET used_percent = 37",
+    ).run();
+    database.close();
+    database = null;
+
+    const recovered = await collectUsage(options(fixture));
+    assert.deepEqual(
+      recovered.quotaObservations.map((quota) => quota.usedPercent),
+      [37],
+    );
+    database = new DatabaseSync(ledgerPath, { readOnly: true });
+    assert.equal(
+      database.prepare("PRAGMA table_info(source_state)").all().some(
+        (column) => column.name === "quota_reconciliation_pending",
+      ),
+      true,
+    );
+  } finally {
+    database?.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("usage and quota survive rollout source disappearance", async () => {
   const fixture = await createFixture([100], { usedPercent: 37 });
   try {
@@ -351,6 +460,76 @@ test("usage and quota survive rollout source disappearance", async () => {
     assert.equal(ledger.usageRows.length, 1);
     assert.equal(ledger.quotaRows.length, 1);
     assert.equal(ledger.sourceSummary.states[0].status, "tombstoned");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("invalid quota replacements retain last-known quota until a clean rescan", async () => {
+  const fixture = await createFixture([100], { usedPercent: 37 });
+  const replacement = resolve(fixture.root, "replacement.jsonl");
+  try {
+    const first = await collectUsage(options(fixture));
+    assert.deepEqual(
+      first.quotaObservations.map((quota) => quota.usedPercent),
+      [37],
+    );
+
+    await writeFile(
+      replacement,
+      serialize(rolloutRows([200], { usedPercent: -25 })),
+    );
+    await rename(replacement, fixture.file);
+    const invalid = await collectUsage(options(fixture));
+    const invalidReload = await collectUsage(options(fixture));
+    let ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+
+    assert.equal(totalTokens(invalid), 200);
+    assert.equal(invalid.coverage.invalidQuotaRecords, 1);
+    assert.deepEqual(
+      invalid.quotaObservations.map((quota) => quota.usedPercent),
+      [37],
+    );
+    assert.deepEqual(
+      invalidReload.quotaObservations.map((quota) => quota.usedPercent),
+      [37],
+    );
+    assert.equal(
+      ledger.sourceSummary.states[0].quotaReconciliationPending,
+      true,
+    );
+    assert.equal(ledger.sourceSummary.states[0].reconciliationPending, true);
+
+    await writeFile(
+      replacement,
+      serialize(rolloutRows([300], { usedPercent: 58 })),
+    );
+    await rename(replacement, fixture.file);
+    const recovered = await collectUsage(options(fixture));
+    const recoveredReload = await collectUsage(options(fixture));
+    ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+
+    assert.equal(totalTokens(recovered), 300);
+    assert.equal(recovered.coverage.invalidQuotaRecords, 0);
+    assert.deepEqual(
+      recovered.quotaObservations.map((quota) => quota.usedPercent),
+      [58],
+    );
+    assert.deepEqual(
+      recoveredReload.quotaObservations.map((quota) => quota.usedPercent),
+      [58],
+    );
+    assert.equal(ledger.quotaRows.length, 1);
+    assert.equal(ledger.quotaRows[0].usedPercent, 58);
+    assert.equal(
+      ledger.sourceSummary.states[0].quotaReconciliationPending,
+      false,
+    );
+    assert.equal(ledger.sourceSummary.states[0].reconciliationPending, false);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -2972,6 +3151,9 @@ test("malformed v3 legacy rows cannot burn the one-shot migration", async () => 
     }],
     ["quota row", (snapshot) => {
       snapshot.quotaObservations[0].usedPercent = -1;
+    }],
+    ["quota percent above range", (snapshot) => {
+      snapshot.quotaObservations[0].usedPercent = 101;
     }],
     ["thread row", (snapshot) => {
       snapshot.threads[0] = null;
