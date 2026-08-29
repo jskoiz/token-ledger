@@ -217,7 +217,8 @@ test("first active-only refresh excludes a rollout moved into the archive", asyn
     assert.equal(initial.events[0].toolCalls, 1);
 
     await mkdir(archivedDirectory, { recursive: true });
-    await rename(fixture.file, archivedFile);
+    await copyFile(fixture.file, archivedFile);
+    await rm(fixture.file);
     const activeOnly = await collectUsage(options(fixture, {
       includeArchived: false,
     }));
