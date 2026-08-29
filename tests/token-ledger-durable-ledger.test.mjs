@@ -243,6 +243,51 @@ test("exact observations retain tool-call ownership after source disappearance",
   }
 });
 
+test("shared observations retain the durable union of partial tool calls", async () => {
+  const fixture = await createFixture([100]);
+  const archivedDirectory = resolve(
+    fixture.root,
+    "archived_sessions",
+    "2026",
+    "08",
+    "20",
+  );
+  const archivedFile = resolve(archivedDirectory, ROLLOUT_NAME);
+  const call = (callId) => ({
+    timestamp: "2026-08-20T10:01:00.000Z",
+    type: "response_item",
+    payload: {
+      type: "function_call",
+      name: "shell",
+      call_id: callId,
+    },
+  });
+  try {
+    await mkdir(archivedDirectory, { recursive: true });
+    await appendFile(
+      fixture.file,
+      serialize([call("call-shared"), call("call-active-only")]),
+    );
+    await writeFile(
+      archivedFile,
+      serialize([...rolloutRows([100]), call("call-shared")]),
+    );
+
+    const allSources = await collectUsage(options(fixture));
+    await rm(fixture.file);
+    const partialSource = await collectUsage(options(fixture));
+    await rm(archivedFile);
+    const afterRemoval = await collectUsage(options(fixture));
+
+    assert.equal(allSources.events[0].toolCalls, 2);
+    assert.equal(partialSource.events[0].toolCalls, 2);
+    assert.equal(partialSource.threads[0].toolCalls, 2);
+    assert.equal(afterRemoval.events[0].toolCalls, 2);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("unchanged and appended sources add each logical event once", async () => {
   const fixture = await createFixture([100]);
   try {
