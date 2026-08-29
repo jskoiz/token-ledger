@@ -52,6 +52,7 @@ function event(day, hour, overrides = {}) {
     breakdownAvailable: overrides.breakdownAvailable,
     rangeAllocationEstimated:
       overrides.rangeAllocationEstimated === true,
+    resolutionSeconds: overrides.resolutionSeconds,
   };
 }
 
@@ -237,6 +238,7 @@ test("estimated state propagates through report aggregates and comparisons", () 
     totalTokens: 1_000,
     serviceTier: "priority",
     rangeAllocationEstimated: true,
+    resolutionSeconds: 86_400,
   });
   const priorEstimated = event(13, 8, {
     model: "gpt-5.6-sol",
@@ -263,6 +265,37 @@ test("estimated state propagates through report aggregates and comparisons", () 
   assert.equal(vm.coverage.estimated, true);
   assert.equal(vm.coverage.estimatedBucketCount, 1);
   assert.equal(vm.coverage.maximumResolutionSeconds, 86_400);
+});
+
+test("estimated warning resolution is scoped to bounded current estimated events", () => {
+  const currentEstimated = event(20, 8, {
+    totalTokens: 1_000,
+    rangeAllocationEstimated: true,
+    resolutionSeconds: 900,
+  });
+  const currentExact = event(21, 8, {
+    totalTokens: 1_000,
+    resolutionSeconds: 86_400,
+  });
+  const priorEstimated = event(13, 8, {
+    totalTokens: 1_000,
+    rangeAllocationEstimated: true,
+    resolutionSeconds: 604_800,
+  });
+  const vm = build(snapshotOf(
+    [currentEstimated, currentExact, priorEstimated],
+    [],
+    {
+      coverage: {
+        parseErrors: 0,
+        maximumUsageResolutionSeconds: 604_800,
+      },
+    },
+  ));
+
+  assert.equal(vm.coverage.estimated, true);
+  assert.equal(vm.summary.priorEquivalentEstimated, true);
+  assert.equal(vm.coverage.maximumResolutionSeconds, 900);
 });
 
 test("mismatched project rows fail reconciliation loudly", () => {
@@ -513,6 +546,7 @@ function degradedSnapshot() {
       cachedInputTokens: 225,
       breakdownAvailable: true,
       rangeAllocationEstimated: true,
+      resolutionSeconds: 86_400,
     }),
     event(21, 8, {
       totalTokens: 500,
@@ -520,6 +554,7 @@ function degradedSnapshot() {
       outputTokens: 50,
       breakdownAvailable: false,
       rangeAllocationEstimated: true,
+      resolutionSeconds: 86_400,
     }),
   ], [], {
     provenance: {
@@ -618,6 +653,41 @@ test("material integrity warnings are conditional and preserve estimated labels"
   assert.match(degraded, />≈1\.00K<\/text>/);
   assert.match(degraded, />≈50\.0%<\/text>/);
   assert.doesNotMatch(degraded, /NaN|Infinity|undefined/);
+});
+
+test("estimated warning preserves supported sub-hour source-bin resolutions", () => {
+  for (const [resolutionSeconds, label] of [
+    [300, "5 minutes"],
+    [900, "15 minutes"],
+  ]) {
+    const snapshot = snapshotOf([
+      event(20, 8, {
+        totalTokens: 1_000,
+        inputTokens: 900,
+        outputTokens: 100,
+        breakdownAvailable: true,
+        rangeAllocationEstimated: true,
+        resolutionSeconds,
+      }),
+    ], [], {
+      coverage: {
+        parseErrors: 0,
+        maximumUsageResolutionSeconds: 86_400,
+      },
+    });
+    const svg = renderTrendImage({
+      snapshot,
+      bounds: bounds7(),
+      days: 7,
+      options: { imageWidth: 1_280 },
+      reportTimeMs: ms(23, 12, 9),
+      sourceStatus: "verified-current",
+    });
+
+    assert.match(svg, /data-kind="estimated-history"/);
+    assert.ok(svg.includes(`≈ ESTIMATED HISTORY · ${label} SOURCE BINS`));
+    assert.doesNotMatch(svg, /ESTIMATED HISTORY · 1 hour SOURCE BINS/);
+  }
 });
 
 test("partial and stale markers appear only in their states", () => {
