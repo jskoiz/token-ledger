@@ -76,11 +76,26 @@ or erase usage.
    delete the ledger to make that warning disappear.
 
 Snapshot encoding is staged in a private temporary file. Source watermarks are
-validated before SQLite commits; after the commit, the staged file is renamed
-atomically while the writer lock is still held. A size-limit failure therefore
-leaves both the prior cache and prior ledger revision intact. A later I/O
-failure can leave the cache behind the ledger, but revision validation marks it
-stale and rebuilds it rather than labeling it verified-current.
+validated twice before the SQLite commit and once immediately after it. Before
+the candidate transaction starts, Token Ledger checkpoints the WAL, stages a
+private baseline copy, syncs it, and then publishes and syncs a recovery marker.
+The marker records the ledger identity, schema, baseline revision, backup size,
+and recovery attempt. Coordinated readers that encounter an active marker
+recover the baseline under the same exclusive writer guard instead of exposing
+the committed-but-unvalidated candidate.
+
+After post-commit validation succeeds, Token Ledger removes and syncs the
+marker before publishing the staged report cache. A crash before that point is
+conservatively recovered to the baseline on the next read or refresh. A crash
+after marker removal can leave the cache behind a valid ledger, but revision
+validation marks it stale and rebuilds it rather than labeling it
+verified-current. Recovery first validates the private backup, then removes
+candidate WAL and shared-memory sidecars, syncs a copied restore file, and
+atomically replaces the main ledger. The marker and original backup remain in
+place until that replacement is validated, so recovery can be repeated after a
+second crash. Missing, corrupt, or mismatched recovery artifacts fail closed
+with `ERR_DURABLE_LEDGER_RECOVERY`; preserve them for diagnosis instead of
+deleting the marker or opening the candidate as authoritative.
 
 ## Repeatable refresh benchmark
 

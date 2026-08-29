@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import {
   appendFile,
   chmod,
   copyFile,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -160,6 +162,61 @@ function options(fixture, extra = {}) {
 
 function totalTokens(snapshot) {
   return snapshot.events.reduce((sum, event) => sum + event.totalTokens, 0);
+}
+
+function recoveryArtifactPaths(ledgerPath) {
+  return {
+    marker: `${ledgerPath}.recovery.json`,
+    backup: `${ledgerPath}.recovery.sqlite`,
+  };
+}
+
+function crashCollection(fixture, point, directUpdate = false) {
+  const importerUrl = new URL(
+    "../lib/token-ledger-importer.mjs",
+    import.meta.url,
+  ).href;
+  const ledgerUrl = new URL(
+    "../lib/token-ledger-ledger.mjs",
+    import.meta.url,
+  ).href;
+  const script = `
+    import { collectUsage } from ${JSON.stringify(importerUrl)};
+    import { updateDurableLedger } from ${JSON.stringify(ledgerUrl)};
+    const selected = JSON.parse(process.env.TOKEN_LEDGER_CRASH_OPTIONS);
+    const faultInjector = ({ point }) => {
+        if (point === process.env.TOKEN_LEDGER_CRASH_POINT) process.exit(86);
+    };
+    if (process.env.TOKEN_LEDGER_DIRECT_UPDATE === "1") {
+      await updateDurableLedger({
+        options: selected,
+        codexHome: selected.codexHome,
+        inventory: { sources: [] },
+        faultInjector,
+      });
+    } else {
+      await collectUsage({ ...selected, faultInjector });
+    }
+  `;
+  const child = spawnSync(
+    process.execPath,
+    ["--input-type=module", "--eval", script],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        TOKEN_LEDGER_CRASH_OPTIONS: JSON.stringify(options(fixture)),
+        TOKEN_LEDGER_CRASH_POINT: point,
+        TOKEN_LEDGER_DIRECT_UPDATE: directUpdate ? "1" : "0",
+      },
+      timeout: 30_000,
+    },
+  );
+  assert.equal(
+    child.status,
+    86,
+    `crash child did not stop at ${point}: ${child.stderr || child.stdout}`,
+  );
 }
 
 function shellCall(timestamp, callId) {
@@ -1867,6 +1924,217 @@ test("source changes after final validation restore the committed attempt", asyn
     await rm(fixture.file);
     const afterRemoval = await collectUsage(options(fixture));
     assert.equal(totalTokens(afterRemoval), 100);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a renamed recovery marker retains its backup if activation fails", async () => {
+  const fixture = await createFixture([100]);
+  try {
+    await collectUsage(options(fixture));
+    const ledgerPath = resolveDurableLedgerPath({
+      stateDirectory: fixture.stateDirectory,
+    });
+    const artifacts = recoveryArtifactPaths(ledgerPath);
+    await appendFile(
+      fixture.file,
+      serialize(rolloutRows([200], { offset: 1 })),
+    );
+
+    await assert.rejects(
+      () => collectUsage(options(fixture, {
+        faultInjector: ({ point }) => {
+          if (point === "after-recovery-marker-rename") {
+            throw new Error("injected marker activation failure");
+          }
+        },
+      })),
+      /injected marker activation failure/,
+    );
+    assert.equal((await stat(artifacts.marker)).mode & 0o777, 0o600);
+    assert.equal((await stat(artifacts.backup)).mode & 0o777, 0o600);
+
+    const recovered = await readDurableLedger(ledgerPath);
+    assert.equal(recovered.revision, 1);
+    assert.deepEqual(recovered.usageRows.map((row) => row.totalTokens), [100]);
+    await assert.rejects(stat(artifacts.marker), { code: "ENOENT" });
+    await assert.rejects(stat(artifacts.backup), { code: "ENOENT" });
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("recovery staging refuses a raced symlink without clobbering its target", async () => {
+  const fixture = await createFixture([100]);
+  const ledgerPath = resolveDurableLedgerPath({
+    stateDirectory: fixture.stateDirectory,
+  });
+  const backupTemporary = `${ledgerPath}.recovery.prepare`;
+  const victim = resolve(fixture.root, "symlink-victim.txt");
+  try {
+    await writeFile(victim, "keep this content\n", { mode: 0o600 });
+    await assert.rejects(
+      () => collectUsage(options(fixture, {
+        faultInjector: async ({ point }) => {
+          if (point === "before-recovery-backup-copy") {
+            await symlink(victim, backupTemporary);
+          }
+        },
+      })),
+      (error) => error?.code === "EEXIST",
+    );
+    assert.equal(await readFile(victim, "utf8"), "keep this content\n");
+    await assert.rejects(lstat(backupTemporary), { code: "ENOENT" });
+
+    const recovered = await collectUsage(options(fixture));
+    assert.equal(totalTokens(recovered), 100);
+    assert.equal(await readDurableLedgerRevision(ledgerPath), 1);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("direct reads recover process crashes before and after commit", async () => {
+  const fixture = await createFixture([100]);
+  try {
+    await collectUsage(options(fixture));
+    const ledgerPath = resolveDurableLedgerPath({
+      stateDirectory: fixture.stateDirectory,
+    });
+    const artifacts = recoveryArtifactPaths(ledgerPath);
+    await appendFile(
+      fixture.file,
+      serialize(rolloutRows([200], { offset: 1 })),
+    );
+
+    crashCollection(fixture, "after-recovery-marker");
+    assert.equal((await stat(artifacts.marker)).mode & 0o777, 0o600);
+    assert.equal((await stat(artifacts.backup)).mode & 0o777, 0o600);
+
+    const recovered = await readDurableLedger(ledgerPath);
+    assert.equal(recovered.revision, 1);
+    assert.deepEqual(recovered.usageRows.map((row) => row.totalTokens), [100]);
+    await assert.rejects(stat(artifacts.marker), { code: "ENOENT" });
+    await assert.rejects(stat(artifacts.backup), { code: "ENOENT" });
+
+    crashCollection(fixture, "after-sqlite-commit");
+    const recoveredAfterCommit = await readDurableLedger(ledgerPath);
+    assert.equal(recoveredAfterCommit.revision, 1);
+    assert.deepEqual(
+      recoveredAfterCommit.usageRows.map((row) => row.totalTokens),
+      [100],
+    );
+    await assert.rejects(stat(artifacts.marker), { code: "ENOENT" });
+    await assert.rejects(stat(artifacts.backup), { code: "ENOENT" });
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("recovery is repeatable after commit and a crash during restore", async () => {
+  const fixture = await createFixture([100]);
+  try {
+    await collectUsage(options(fixture));
+    const ledgerPath = resolveDurableLedgerPath({
+      stateDirectory: fixture.stateDirectory,
+    });
+    const artifacts = recoveryArtifactPaths(ledgerPath);
+    await appendFile(
+      fixture.file,
+      serialize(rolloutRows([200], { offset: 1 })),
+    );
+
+    crashCollection(fixture, "after-sqlite-commit");
+    crashCollection(fixture, "after-recovery-ledger-replace", true);
+    await stat(artifacts.marker);
+    await stat(artifacts.backup);
+
+    const recovered = await readDurableLedger(ledgerPath);
+    assert.equal(recovered.revision, 1);
+    assert.deepEqual(recovered.usageRows.map((row) => row.totalTokens), [100]);
+    const refreshed = await collectUsage(options(fixture));
+    assert.equal(totalTokens(refreshed), 300);
+    assert.equal(await readDurableLedgerRevision(ledgerPath), 2);
+    await assert.rejects(stat(artifacts.marker), { code: "ENOENT" });
+    await assert.rejects(stat(artifacts.backup), { code: "ENOENT" });
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("missing, corrupt, or linked recovery backups fail closed", async () => {
+  for (const damage of ["missing", "corrupt", "symlink"]) {
+    const fixture = await createFixture([100]);
+    try {
+      await collectUsage(options(fixture));
+      const ledgerPath = resolveDurableLedgerPath({
+        stateDirectory: fixture.stateDirectory,
+      });
+      const artifacts = recoveryArtifactPaths(ledgerPath);
+      await appendFile(
+        fixture.file,
+        serialize(rolloutRows([200], { offset: 1 })),
+      );
+      crashCollection(fixture, "after-sqlite-commit");
+      if (damage === "missing") await rm(artifacts.backup);
+      else if (damage === "corrupt") {
+        await writeFile(artifacts.backup, "not a SQLite recovery backup");
+      } else {
+        await rm(artifacts.backup);
+        await symlink(ledgerPath, artifacts.backup);
+      }
+
+      await assert.rejects(
+        () => readDurableLedger(ledgerPath),
+        (error) => error?.code === "ERR_DURABLE_LEDGER_RECOVERY",
+      );
+      assert.equal(await readDurableLedgerRevision(ledgerPath), null);
+      await stat(artifacts.marker);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("staged cleanup errors do not mask committed-attempt failures", async () => {
+  const fixture = await createFixture([100]);
+  try {
+    await collectUsage(options(fixture));
+    await appendFile(
+      fixture.file,
+      serialize(rolloutRows([200], { offset: 1 })),
+    );
+
+    await assert.rejects(
+      () => collectUsage(options(fixture, {
+        stageSnapshot: async (snapshot) => ({
+          snapshot,
+          publish: async () => {},
+          discard: async () => {
+            throw new Error("injected staged cleanup failure");
+          },
+        }),
+        faultInjector: ({ point }) => {
+          if (point === "after-sqlite-commit") {
+            throw new Error("injected authoritative commit failure");
+          }
+        },
+      })),
+      (error) => {
+        assert.equal(error?.message, "injected authoritative commit failure");
+        assert.deepEqual(
+          error?.cleanupErrors?.map((cleanup) => cleanup.message),
+          ["injected staged cleanup failure"],
+        );
+        return true;
+      },
+    );
+    const ledger = await readDurableLedger(resolveDurableLedgerPath({
+      stateDirectory: fixture.stateDirectory,
+    }));
+    assert.equal(ledger.revision, 1);
+    assert.deepEqual(ledger.usageRows.map((row) => row.totalTokens), [100]);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
