@@ -382,16 +382,22 @@ test("turnless usage events reconcile by stable source position", async () => {
   try {
     await writeFile(fixture.file, serialize(legacyRows([100, 200])));
     const first = await collectUsage(options(fixture));
-    await writeFile(fixture.file, serialize(legacyRows([100, 300])));
+    await writeFile(fixture.file, serialize(legacyRows([200, 300])));
     const replaced = await collectUsage(options(fixture));
+    await rm(fixture.file);
+    const afterRemoval = await collectUsage(options(fixture));
     const ledger = await readDurableLedger(
       resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
     );
 
     assert.equal(totalTokens(first), 300);
-    assert.equal(totalTokens(replaced), 400);
+    assert.equal(totalTokens(replaced), 500);
+    assert.equal(totalTokens(afterRemoval), 500);
     assert.equal(ledger.usageRows.length, 2);
-    assert.equal(ledger.sourceSummary.states[0].changeState, "replaced");
+    assert.equal(
+      ledger.usageRows.reduce((sum, row) => sum + row.totalTokens, 0),
+      500,
+    );
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -1211,6 +1217,48 @@ test("collection cutoff retains overlapping durable quota readings", async () =>
       snapshot.quotaObservations[0].lastSeenAt,
       "2026-08-20T10:01:01.000Z",
     );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("active-only quota spans exclude archived observations", async () => {
+  const fixture = await createFixture([100], { usedPercent: 37 });
+  const archivedDirectory = resolve(
+    fixture.root,
+    "archived_sessions",
+    "2026",
+    "08",
+    "21",
+  );
+  const archivedFile = resolve(archivedDirectory, ARCHIVED_ROLLOUT_NAME);
+  try {
+    await mkdir(archivedDirectory, { recursive: true });
+    await writeFile(
+      archivedFile,
+      serialize(rolloutRows([200], {
+        baseTimestamp: "2026-08-21T10:00:00.000Z",
+        usedPercent: 37,
+      })),
+    );
+    const allSources = await collectUsage(options(fixture));
+    const activeOnly = await collectUsage(options(fixture, {
+      includeArchived: false,
+    }));
+    const activeOnlySinceArchivedSample = await collectUsage(options(fixture, {
+      includeArchived: false,
+      since: "2026-08-21T00:00:00.000Z",
+    }));
+
+    assert.equal(
+      allSources.quotaObservations[0].lastSeenAt,
+      "2026-08-21T10:00:01.000Z",
+    );
+    assert.equal(
+      activeOnly.quotaObservations[0].lastSeenAt,
+      "2026-08-20T10:00:01.000Z",
+    );
+    assert.equal(activeOnlySinceArchivedSample.quotaObservations.length, 0);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
