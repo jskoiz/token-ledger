@@ -1458,6 +1458,35 @@ test("replacement resets retained quota source bounds", async () => {
   }
 });
 
+test("replacement prunes orphaned compacted observations", async () => {
+  const baseTimestamp = "2015-08-20T10:00:00.000Z";
+  const fixture = await createFixture([100, 200], { baseTimestamp });
+  const replacement = resolve(fixture.root, "replacement.jsonl");
+  try {
+    const initial = await collectUsage(options(fixture));
+    await writeFile(
+      replacement,
+      serialize(rolloutRows([100], { baseTimestamp })),
+    );
+    await rename(replacement, fixture.file);
+
+    const replaced = await collectUsage(options(fixture));
+    await rm(fixture.file);
+    const afterRemoval = await collectUsage(options(fixture));
+    const ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+
+    assert.equal(totalTokens(initial), 300);
+    assert.equal(totalTokens(replaced), 100);
+    assert.equal(totalTokens(afterRemoval), 100);
+    assert.equal(ledger.compactedUsageRows, 1);
+    assert.equal(ledger.usageRows[0].totalTokens, 100);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("old compacted observations retain source membership without rescan double counts", async () => {
   const fixture = await createFixture([100], {
     baseTimestamp: "2015-08-20T10:00:00.000Z",
