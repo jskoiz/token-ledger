@@ -314,6 +314,46 @@ test("shared observations retain the durable union of partial tool calls", async
   }
 });
 
+test("replacement removes only its stale shared-event membership", async () => {
+  const fixture = await createFixture([100]);
+  const archivedDirectory = resolve(
+    fixture.root,
+    "archived_sessions",
+    "2026",
+    "08",
+    "20",
+  );
+  const archivedFile = resolve(archivedDirectory, ROLLOUT_NAME);
+  const replacement = resolve(fixture.root, "replacement.jsonl");
+  try {
+    await mkdir(archivedDirectory, { recursive: true });
+    await writeFile(archivedFile, await readFile(fixture.file));
+    await collectUsage(options(fixture));
+    await writeFile(replacement, serialize(rolloutRows([200])));
+    await rename(replacement, fixture.file);
+
+    const allSources = await collectUsage(options(fixture));
+    const activeOnly = await collectUsage(options(fixture, {
+      includeArchived: false,
+    }));
+    const ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+    const archivedSourceId = ledger.sourceSummary.states.find(
+      (state) => state.location === "archived",
+    )?.sourceId;
+    const oldObservation = ledger.usageRows.find(
+      (row) => row.totalTokens === 100,
+    );
+
+    assert.equal(totalTokens(allSources), 300);
+    assert.equal(totalTokens(activeOnly), 200);
+    assert.deepEqual([...oldObservation.sourceIds], [archivedSourceId]);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("unchanged and appended sources add each logical event once", async () => {
   const fixture = await createFixture([100]);
   try {
