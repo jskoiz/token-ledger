@@ -4,6 +4,7 @@ import {
   appendFile,
   chmod,
   copyFile,
+  link,
   lstat,
   mkdir,
   mkdtemp,
@@ -1993,6 +1994,131 @@ test("recovery staging refuses a raced symlink without clobbering its target", a
     assert.equal(await readDurableLedgerRevision(ledgerPath), 1);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("main-ledger aliases fail closed before recovery can split revisions", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-main-path-"));
+  const target = resolve(root, "target.sqlite");
+  const symbolicAlias = resolve(root, "symbolic.sqlite");
+  const hardAlias = resolve(root, "hard.sqlite");
+  const inventory = { files: [], lifecycleFiles: [] };
+  const update = (ledgerPath, extra = {}) => updateDurableLedger({
+    options: { ledgerPath },
+    codexHome: root,
+    inventory,
+    ...extra,
+  });
+  try {
+    await update(target);
+    assert.equal(await readDurableLedgerRevision(target), 1);
+    await symlink(target, symbolicAlias);
+
+    let postCommitValidationCalled = false;
+    await assert.rejects(
+      () => update(symbolicAlias, {
+        validateAfterCommit: async () => {
+          postCommitValidationCalled = true;
+          throw new Error("reject committed candidate");
+        },
+      }),
+      (error) => error?.code === "ERR_DURABLE_LEDGER_PATH",
+    );
+    assert.equal(postCommitValidationCalled, false);
+    assert.equal((await lstat(symbolicAlias)).isSymbolicLink(), true);
+    assert.equal(await readDurableLedgerRevision(target), 1);
+    await assert.rejects(
+      () => readDurableLedger(symbolicAlias),
+      (error) => error?.code === "ERR_DURABLE_LEDGER_PATH",
+    );
+
+    await link(target, hardAlias);
+    await assert.rejects(
+      () => update(hardAlias),
+      (error) => error?.code === "ERR_DURABLE_LEDGER_PATH",
+    );
+    await assert.rejects(
+      () => readDurableLedgerRevision(hardAlias),
+      (error) => error?.code === "ERR_DURABLE_LEDGER_PATH",
+    );
+    await rm(hardAlias);
+    assert.equal(await readDurableLedgerRevision(target), 1);
+
+    const names = await readdir(root);
+    assert.equal(
+      names.some((name) => name.startsWith("symbolic.sqlite.")),
+      false,
+    );
+    assert.equal(
+      names.some((name) => name.startsWith("hard.sqlite.")),
+      false,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("non-regular main-ledger paths fail before creating sidecars", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-main-nonregular-"));
+  const ledgerPath = resolve(root, "ledger-directory");
+  try {
+    await mkdir(ledgerPath);
+    await assert.rejects(
+      () => updateDurableLedger({
+        options: { ledgerPath },
+        codexHome: root,
+        inventory: { files: [], lifecycleFiles: [] },
+      }),
+      (error) => error?.code === "ERR_DURABLE_LEDGER_PATH",
+    );
+    await assert.rejects(
+      () => readDurableLedger(ledgerPath),
+      (error) => error?.code === "ERR_DURABLE_LEDGER_PATH",
+    );
+    assert.deepEqual(await readdir(root), ["ledger-directory"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a symlinked parent keeps an ordinary single-link WAL ledger supported", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-parent-link-"));
+  const realStateDirectory = resolve(root, "real-state");
+  const linkedStateDirectory = resolve(root, "linked-state");
+  const linkedLedgerPath = resolveDurableLedgerPath({
+    stateDirectory: linkedStateDirectory,
+  });
+  try {
+    await mkdir(realStateDirectory);
+    await symlink(realStateDirectory, linkedStateDirectory, "dir");
+    await updateDurableLedger({
+      options: { stateDirectory: linkedStateDirectory },
+      codexHome: root,
+      inventory: { files: [], lifecycleFiles: [] },
+      validateAfterCommit: async () => {},
+    });
+
+    assert.equal(await readDurableLedgerRevision(linkedLedgerPath), 1);
+    const ledgerStat = await lstat(linkedLedgerPath);
+    assert.equal(ledgerStat.isFile(), true);
+    assert.equal(ledgerStat.nlink, 1);
+    const database = new DatabaseSync(linkedLedgerPath, { readOnly: true });
+    try {
+      assert.equal(
+        database.prepare("PRAGMA journal_mode").get().journal_mode,
+        "wal",
+      );
+    } finally {
+      database.close();
+    }
+    await assert.rejects(stat(`${linkedLedgerPath}.recovery.json`), {
+      code: "ENOENT",
+    });
+    await assert.rejects(stat(`${linkedLedgerPath}.recovery.sqlite`), {
+      code: "ENOENT",
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 
