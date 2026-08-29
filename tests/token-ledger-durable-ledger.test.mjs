@@ -519,6 +519,49 @@ test("a failed persistence transaction leaves the last complete ledger usable", 
   }
 });
 
+test("overlapping ledger writers cannot commit through the rollback window", async () => {
+  const fixture = await createFixture([100]);
+  let writerGuard;
+  try {
+    await collectUsage(options(fixture));
+    const ledgerPath = resolveDurableLedgerPath({
+      stateDirectory: fixture.stateDirectory,
+    });
+    const priorRevision = await readDurableLedgerRevision(ledgerPath);
+    writerGuard = new DatabaseSync(`${ledgerPath}.writer-lock.sqlite`);
+    writerGuard.exec("BEGIN IMMEDIATE");
+    await appendFile(
+      fixture.file,
+      serialize(rolloutRows([200], { offset: 1 })),
+    );
+
+    await assert.rejects(
+      () => collectUsage(options(fixture)),
+      /database is locked|SQLITE_BUSY/i,
+    );
+    assert.equal(await readDurableLedgerRevision(ledgerPath), priorRevision);
+    const unchanged = await readDurableLedger(ledgerPath);
+    assert.equal(
+      unchanged.usageRows.reduce((sum, row) => sum + row.totalTokens, 0),
+      100,
+    );
+
+    writerGuard.exec("ROLLBACK");
+    writerGuard.close();
+    writerGuard = null;
+    const recovered = await collectUsage(options(fixture));
+    assert.equal(totalTokens(recovered), 300);
+  } finally {
+    try {
+      writerGuard?.exec("ROLLBACK");
+    } catch {
+      // Best-effort test cleanup.
+    }
+    writerGuard?.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("revision reads tolerate Node SQLite corruption error codes", async () => {
   const fixture = await createFixture([]);
   const ledgerPath = resolveDurableLedgerPath({
