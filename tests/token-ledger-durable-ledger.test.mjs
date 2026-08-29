@@ -231,6 +231,81 @@ function snapshotDestinationHash(path) {
     .slice(0, 16);
 }
 
+function stableHash(value, length = 64) {
+  return createHash("sha256")
+    .update(String(value))
+    .digest("hex")
+    .slice(0, length);
+}
+
+function installPreviewQuotaIdentities(
+  ledgerPath,
+  timestamp = "2026-08-20T10:00:01.000Z",
+) {
+  const database = new DatabaseSync(ledgerPath);
+  try {
+    const sourceId = String(database.prepare(
+      "SELECT source_id AS sourceId FROM source_state LIMIT 1",
+    ).get().sourceId);
+    database.exec("BEGIN IMMEDIATE");
+    database.prepare("DELETE FROM quota_sources").run();
+    database.prepare("DELETE FROM quota_observations").run();
+    const insertQuota = database.prepare(`
+      INSERT INTO quota_observations (
+        observation_id, observation_key, identity_kind, limit_key,
+        limit_name, scope, window_minutes, resets_at, used_percent,
+        plan_type, first_seen_at, last_seen_at, migrated, exact_seen
+      ) VALUES (?, ?, 'exact', ?, ?, ?, 10080, ?, 37, 'plus', ?, ?, 0, 1)
+    `);
+    const insertSource = database.prepare(`
+      INSERT INTO quota_sources (
+        observation_id, source_id, first_seen_at, last_seen_at
+      ) VALUES (?, ?, ?, ?)
+    `);
+    for (const legacy of [
+      { rawKey: "anonymous", limitName: null, scope: "account" },
+      { rawKey: "Legacy label", limitName: "Legacy label", scope: "named" },
+    ]) {
+      const limitKey = stableHash(legacy.rawKey, 16);
+      const observationKey = JSON.stringify([
+        limitKey,
+        10_080,
+        WEEKLY_RESET,
+        37,
+      ]);
+      const observationId = `quota-${stableHash(observationKey)}`;
+      insertQuota.run(
+        observationId,
+        observationKey,
+        limitKey,
+        legacy.limitName,
+        legacy.scope,
+        WEEKLY_RESET,
+        timestamp,
+        timestamp,
+      );
+      insertSource.run(observationId, sourceId, timestamp, timestamp);
+    }
+    database.prepare(
+      "DELETE FROM ledger_meta WHERE key = 'quota_identity_contract'",
+    ).run();
+    database.prepare(`
+      UPDATE source_state
+         SET quota_reconciliation_pending = 0
+    `).run();
+    database.exec("COMMIT");
+  } catch (error) {
+    try {
+      database.exec("ROLLBACK");
+    } catch {
+      // Preserve the mutation error.
+    }
+    throw error;
+  } finally {
+    database.close();
+  }
+}
+
 function shellCall(timestamp, callId) {
   return {
     timestamp,
@@ -530,6 +605,263 @@ test("invalid quota replacements retain last-known quota until a clean rescan", 
       false,
     );
     assert.equal(ledger.sourceSummary.states[0].reconciliationPending, false);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("sparse quota labels survive changed readings and reloads", async () => {
+  const fixture = await createFixture([100], { usedPercent: 37 });
+  const replacement = resolve(fixture.root, "replacement.jsonl");
+  const withIdentity = (total, usedPercent, identity) => {
+    const rows = rolloutRows([total], { usedPercent });
+    Object.assign(rows.at(-1).payload.rate_limits, identity);
+    return rows;
+  };
+  try {
+    await writeFile(
+      fixture.file,
+      serialize(withIdentity(100, 37, {
+        limit_id: "codex-secondary",
+        limit_name: "Luna",
+        plan_type: "plus",
+      })),
+    );
+    const first = await collectUsage(options(fixture));
+    assert.equal(first.quotaObservations.length, 1);
+    assert.equal(first.quotaObservations[0].scope, "named");
+    assert.equal(first.quotaObservations[0].limitName, "Luna");
+    const limitKey = first.quotaObservations[0].limitKey;
+
+    await writeFile(
+      replacement,
+      serialize(withIdentity(200, 58, {
+        limit_id: "CODEX_SECONDARY",
+        limit_name: null,
+        plan_type: null,
+      })),
+    );
+    await rename(replacement, fixture.file);
+    const changed = await collectUsage(options(fixture));
+    const reloaded = await collectUsage(options(fixture));
+    const ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+
+    for (const snapshot of [changed, reloaded]) {
+      assert.equal(snapshot.quotaObservations.length, 1);
+      assert.equal(snapshot.quotaObservations[0].usedPercent, 58);
+      assert.equal(snapshot.quotaObservations[0].limitKey, limitKey);
+      assert.equal(snapshot.quotaObservations[0].limitName, "Luna");
+      assert.equal(snapshot.quotaObservations[0].scope, "named");
+    }
+    assert.equal(ledger.quotaRows.length, 1);
+    assert.equal(ledger.quotaRows[0].limitName, "Luna");
+    assert.equal(ledger.quotaRows[0].scope, "named");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("malformed quota identity retains durable quota until a clean rescan", async () => {
+  const fixture = await createFixture([100], { usedPercent: 37 });
+  const replacement = resolve(fixture.root, "replacement.jsonl");
+  try {
+    const first = await collectUsage(options(fixture));
+    assert.deepEqual(
+      first.quotaObservations.map((quota) => quota.usedPercent),
+      [37],
+    );
+
+    const invalidRows = rolloutRows([200], { usedPercent: 58 });
+    invalidRows.at(-1).payload.rate_limits.limit_id = { malformed: true };
+    await writeFile(replacement, serialize(invalidRows));
+    await rename(replacement, fixture.file);
+    const invalid = await collectUsage(options(fixture));
+    const invalidReload = await collectUsage(options(fixture));
+    let ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+
+    assert.equal(totalTokens(invalid), 200);
+    assert.equal(invalid.coverage.invalidQuotaRecords, 1);
+    assert.equal(invalidReload.coverage.invalidQuotaRecords, 1);
+    assert.deepEqual(
+      invalid.quotaObservations.map((quota) => quota.usedPercent),
+      [37],
+    );
+    assert.equal(
+      ledger.sourceSummary.states[0].quotaReconciliationPending,
+      true,
+    );
+
+    const cleanRows = rolloutRows([300], { usedPercent: 58 });
+    cleanRows.at(-1).payload.rate_limits.limit_id = " CODEX ";
+    await writeFile(replacement, serialize(cleanRows));
+    await rename(replacement, fixture.file);
+    const recovered = await collectUsage(options(fixture));
+    const recoveredReload = await collectUsage(options(fixture));
+    ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+
+    assert.equal(totalTokens(recovered), 300);
+    assert.equal(recovered.coverage.invalidQuotaRecords, 0);
+    assert.deepEqual(
+      recovered.quotaObservations.map((quota) => quota.usedPercent),
+      [58],
+    );
+    assert.deepEqual(
+      recoveredReload.quotaObservations.map((quota) => quota.usedPercent),
+      [58],
+    );
+    assert.equal(ledger.quotaRows.length, 1);
+    assert.equal(
+      ledger.sourceSummary.states[0].quotaReconciliationPending,
+      false,
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("preview quota identities converge without rekeying opaque hashes", async () => {
+  const fixture = await createFixture([100], { usedPercent: 37 });
+  const ledgerPath = resolveDurableLedgerPath({
+    stateDirectory: fixture.stateDirectory,
+  });
+  try {
+    const rows = rolloutRows([100], { usedPercent: 37 });
+    rows.at(-1).payload.rate_limits.limit_name = "Legacy label";
+    await writeFile(fixture.file, serialize(rows));
+    await collectUsage(options(fixture));
+    installPreviewQuotaIdentities(ledgerPath);
+
+    const converged = await collectUsage(options(fixture));
+    const reloaded = await collectUsage(options(fixture));
+    const ledger = await readDurableLedger(ledgerPath);
+    const inspection = new DatabaseSync(ledgerPath, { readOnly: true });
+    let marker;
+    try {
+      marker = inspection.prepare(
+        "SELECT value FROM ledger_meta WHERE key = 'quota_identity_contract'",
+      ).get()?.value;
+    } finally {
+      inspection.close();
+    }
+
+    for (const snapshot of [converged, reloaded]) {
+      assert.equal(snapshot.quotaObservations.length, 1);
+      assert.equal(snapshot.quotaObservations[0].limitKey, stableHash("codex", 16));
+      assert.equal(snapshot.quotaObservations[0].limitName, "Legacy label");
+      assert.equal(snapshot.quotaObservations[0].scope, "account");
+    }
+    assert.equal(ledger.quotaRows.length, 1);
+    assert.equal(
+      ledger.sourceSummary.states[0].quotaReconciliationPending,
+      false,
+    );
+    assert.equal(marker, "codex-limit-id-v1");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("quota identity upgrade rolls back and remains pending after malformed scans", async () => {
+  const fixture = await createFixture([100], { usedPercent: 37 });
+  const ledgerPath = resolveDurableLedgerPath({
+    stateDirectory: fixture.stateDirectory,
+  });
+  const replacement = resolve(fixture.root, "replacement.jsonl");
+  const contractState = () => {
+    const database = new DatabaseSync(ledgerPath, { readOnly: true });
+    try {
+      return {
+        marker: database.prepare(
+          "SELECT value FROM ledger_meta WHERE key = 'quota_identity_contract'",
+        ).get()?.value ?? null,
+        pending: Number(database.prepare(`
+          SELECT quota_reconciliation_pending AS pending
+            FROM source_state
+           LIMIT 1
+        `).get()?.pending || 0),
+        quotaRows: Number(database.prepare(
+          "SELECT COUNT(*) AS count FROM quota_observations",
+        ).get()?.count || 0),
+      };
+    } finally {
+      database.close();
+    }
+  };
+  try {
+    const firstRows = rolloutRows([100], { usedPercent: 37 });
+    firstRows.at(-1).payload.rate_limits.limit_name = "Legacy label";
+    await writeFile(fixture.file, serialize(firstRows));
+    await collectUsage(options(fixture));
+    installPreviewQuotaIdentities(ledgerPath);
+
+    const malformedRows = rolloutRows([200], { usedPercent: 58 });
+    Object.assign(malformedRows.at(-1).payload.rate_limits, {
+      limit_id: { malformed: true },
+      limit_name: "Legacy label",
+    });
+    await writeFile(replacement, serialize(malformedRows));
+    await rename(replacement, fixture.file);
+
+    await assert.rejects(
+      collectUsage(options(fixture, {
+        faultInjector: ({ point }) => {
+          if (point === "before-commit") throw new Error("marker rollback");
+        },
+      })),
+      /marker rollback/,
+    );
+    assert.deepEqual(contractState(), {
+      marker: null,
+      pending: 0,
+      quotaRows: 2,
+    });
+
+    const malformed = await collectUsage(options(fixture));
+    const malformedReload = await collectUsage(options(fixture));
+    assert.equal(totalTokens(malformed), 200);
+    assert.equal(malformed.coverage.invalidQuotaRecords, 1);
+    assert.equal(malformedReload.coverage.invalidQuotaRecords, 1);
+    assert.deepEqual(
+      malformed.quotaObservations.map((quota) => quota.usedPercent),
+      [37, 37],
+    );
+    assert.deepEqual(contractState(), {
+      marker: "codex-limit-id-v1",
+      pending: 1,
+      quotaRows: 2,
+    });
+
+    const cleanRows = rolloutRows([300], { usedPercent: 58 });
+    Object.assign(cleanRows.at(-1).payload.rate_limits, {
+      limit_id: "   ",
+      limit_name: "Legacy label",
+    });
+    await writeFile(replacement, serialize(cleanRows));
+    await rename(replacement, fixture.file);
+    const recovered = await collectUsage(options(fixture));
+    const recoveredReload = await collectUsage(options(fixture));
+    const ledger = await readDurableLedger(ledgerPath);
+
+    for (const snapshot of [recovered, recoveredReload]) {
+      assert.equal(totalTokens(snapshot), 300);
+      assert.equal(snapshot.coverage.invalidQuotaRecords, 0);
+      assert.equal(snapshot.quotaObservations.length, 1);
+      assert.equal(snapshot.quotaObservations[0].limitKey, stableHash("codex", 16));
+      assert.equal(snapshot.quotaObservations[0].limitName, "Legacy label");
+      assert.equal(snapshot.quotaObservations[0].scope, "account");
+    }
+    assert.equal(ledger.quotaRows.length, 1);
+    assert.deepEqual(contractState(), {
+      marker: "codex-limit-id-v1",
+      pending: 0,
+      quotaRows: 1,
+    });
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }

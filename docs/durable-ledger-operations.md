@@ -63,6 +63,15 @@ inside one SQLite transaction. The upgrade removes stored working directories,
 Git remotes, and raw source values, then compacts the database so those bytes do
 not remain in free pages. New v2 writes store no raw versions of those values.
 
+Quota identity has one irreducible local boundary. Codex rollout
+`RateLimitSnapshot` records carry a provider limit id, but no ChatGPT user or
+account id. Token Ledger therefore separates quota pools by the canonical
+provider limit id only within one account identity per `CODEX_HOME`; an omitted
+or blank id is the default `codex` pool. Limit names and plan labels are display
+metadata, never identity. Reusing one `CODEX_HOME` and durable ledger across
+different ChatGPT users can stitch equal `codex` ids into one quota timeline;
+use separate Codex homes and ledger locations when account isolation matters.
+
 An early schema-v1 ledger that contains migrated history without a
 reconstructable scope stops with `ERR_DURABLE_LEDGER_MIGRATION_SCOPE`. That
 database is left unchanged because guessing its scope could either double-count

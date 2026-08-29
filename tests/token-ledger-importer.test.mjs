@@ -2033,27 +2033,22 @@ test("coverage preserves unknown totals after safe-counter saturation", async ()
   }
 });
 
-test("imported quota observations retain account and named scope", async () => {
+test("quota identities follow canonical provider ids with optional metadata", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
   const timestamp = "2026-08-18T10:00:00.000Z";
   const resetsAt = Date.parse("2026-08-24T00:00:00.000Z") / 1_000;
-  const quotaRecord = (limitId, limitName, usedPercent) => ({
-    timestamp,
+  const quotaRecord = (offset, rateLimits) => ({
+    timestamp: new Date(Date.parse(timestamp) + offset * 1_000).toISOString(),
     type: "event_msg",
     payload: {
       type: "token_count",
-      rate_limits: Object.assign(
-        {
-          primary: {
-            window_minutes: 10_080,
-            used_percent: usedPercent,
-            resets_at: resetsAt,
-          },
-          limit_id: limitId,
-        },
-        limitName ? { limit_name: limitName } : {},
-      ),
+      rate_limits: rateLimits,
     },
+  });
+  const bucket = (usedPercent) => ({
+    window_minutes: 10_080,
+    used_percent: usedPercent,
+    resets_at: resetsAt,
   });
 
   try {
@@ -2063,8 +2058,25 @@ test("imported quota observations retain account and named scope", async () => {
       resolve(rolloutDirectory, "rollout-scopes.jsonl"),
       serialize([
         ...turnStart(timestamp, "turn-1"),
-        quotaRecord("account-weekly", null, 20),
-        quotaRecord("named-luna", "Luna", 40),
+        // Legacy snapshots may omit every optional identity/label field.
+        quotaRecord(1, { primary: bucket(10) }),
+        quotaRecord(2, {
+          primary: bucket(20),
+          limit_id: "   ",
+          limit_name: "Default display",
+          plan_type: null,
+        }),
+        quotaRecord(3, {
+          primary: bucket(30),
+          limit_id: "CoDeX-Secondary",
+        }),
+        quotaRecord(4, {
+          primary: bucket(40),
+          limit_id: "codex_secondary",
+          limit_name: "Luna",
+          plan_type: "future_plan",
+        }),
+        quotaRecord(5, null),
         tokenCount(timestamp, 100, 100),
       ]),
     );
@@ -2075,14 +2087,74 @@ test("imported quota observations retain account and named scope", async () => {
       includeArchived: true,
       since: null,
     });
-    const account = snapshot.quotaObservations.find(
-      (quota) => quota.limitName === null,
+    assert.equal(snapshot.coverage.invalidQuotaRecords, 0);
+    assert.equal(snapshot.quotaObservations.length, 4);
+    const account = snapshot.quotaObservations.filter(
+      (quota) => quota.scope === "account",
     );
-    const named = snapshot.quotaObservations.find(
-      (quota) => quota.limitName === "Luna",
+    const named = snapshot.quotaObservations.filter(
+      (quota) => quota.scope === "named",
     );
-    assert.equal(account.scope, "account");
-    assert.equal(named.scope, "named");
+    assert.equal(account.length, 2);
+    assert.equal(named.length, 2);
+    assert.equal(new Set(account.map((quota) => quota.limitKey)).size, 1);
+    assert.equal(new Set(named.map((quota) => quota.limitKey)).size, 1);
+    assert.notEqual(account[0].limitKey, named[0].limitKey);
+    assert.deepEqual(
+      account.map((quota) => quota.limitName),
+      ["Default display", "Default display"],
+    );
+    assert.deepEqual(
+      named.map((quota) => quota.limitName),
+      ["Luna", "Luna"],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("malformed present quota identity metadata is excluded", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-quota-identity-"));
+  const timestamp = "2026-08-18T10:00:00.000Z";
+  const resetsAt = Date.parse("2026-08-24T00:00:00.000Z") / 1_000;
+  const bucket = {
+    window_minutes: 10_080,
+    used_percent: 25,
+    resets_at: resetsAt,
+  };
+  const rateLimits = [
+    { primary: bucket, limit_id: 7 },
+    { primary: bucket, limit_name: { label: "Luna" } },
+    { primary: bucket, plan_type: ["plus"] },
+    { primary: bucket, plan_type: "   " },
+    { primary: bucket, limit_name: "   " },
+  ];
+  try {
+    const rolloutDirectory = resolve(root, "sessions", "2026", "08", "18");
+    await mkdir(rolloutDirectory, { recursive: true });
+    await writeFile(
+      resolve(rolloutDirectory, "rollout-invalid-identity.jsonl"),
+      serialize([
+        ...turnStart(timestamp, "turn-invalid-identity"),
+        ...rateLimits.map((rate_limits, index) => ({
+          timestamp: new Date(Date.parse(timestamp) + index * 1_000).toISOString(),
+          type: "event_msg",
+          payload: { type: "token_count", rate_limits },
+        })),
+      ]),
+    );
+
+    const snapshot = await collectUsage({
+      output: resolve(root, "snapshot.json"),
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+
+    assert.equal(snapshot.coverage.invalidQuotaRecords, 4);
+    assert.equal(snapshot.quotaObservations.length, 1);
+    assert.equal(snapshot.quotaObservations[0].limitName, null);
+    assert.equal(snapshot.quotaObservations[0].scope, "account");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

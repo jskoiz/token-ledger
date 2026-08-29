@@ -377,6 +377,44 @@ test("missing and named-only quota pools yield the unavailable state", () => {
   assert.equal(namedOnly.meter.status, "unavailable");
 });
 
+test("quota scope, not optional display labels, selects the account meter", () => {
+  const resetsAt = Math.floor(Date.UTC(2026, 7, 26, 6) / 1_000);
+  const account = build(snapshotOf(
+    [event(20, 8, {})],
+    [
+      quota(20, 2, 40, resetsAt, {
+        limitKey: "default-pool",
+        limitName: "Default display",
+        scope: "account",
+      }),
+      quota(21, 2, 50, resetsAt, {
+        limitKey: "default-pool",
+        limitName: "Default display",
+        scope: "account",
+      }),
+    ],
+  ));
+  assert.notEqual(account.meter.status, "unavailable");
+  assert.equal(account.meter.remainingPercent, 50);
+
+  const named = build(snapshotOf(
+    [event(20, 8, {})],
+    [
+      quota(20, 2, 40, resetsAt, {
+        limitKey: "codex-secondary",
+        limitName: null,
+        scope: "named",
+      }),
+      quota(21, 2, 50, resetsAt, {
+        limitKey: "codex-secondary",
+        limitName: null,
+        scope: "named",
+      }),
+    ],
+  ));
+  assert.equal(named.meter.status, "unavailable");
+});
+
 test("meter geometry samples observations without extrapolating", () => {
   const resetsAtA = Math.floor(Date.UTC(2026, 7, 20, 10) / 1_000);
   const resetsAtB = resetsAtA + WEEK_SECONDS;
