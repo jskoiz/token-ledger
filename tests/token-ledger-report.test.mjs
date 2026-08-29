@@ -563,6 +563,8 @@ function degradedSnapshot() {
     },
     coverage: {
       parseErrors: 2,
+      invalidTokenRecords: 3,
+      sourceIncomplete: true,
       maximumUsageResolutionSeconds: 86_400,
       legacySnapshotStatus: "codex-home-unverified",
     },
@@ -633,10 +635,18 @@ test("the report SVG contains every required section", () => {
 
 test("material integrity warnings are conditional and preserve estimated labels", () => {
   const healthy = renderRich();
+  const degradedSnapshotValue = degradedSnapshot();
+  const degradedVm = build(degradedSnapshotValue, {
+    sourceStatus: "stale-fallback",
+  });
   const degraded = renderDegraded(1_280);
+  assert.equal(degradedVm.coverage.invalidTokenRecords, 3);
+  assert.equal(degradedVm.coverage.sourceIncomplete, true);
   assert.doesNotMatch(healthy, /data-role="integrity-warning"/);
   for (const [kind, label] of [
     ["parse-errors", "2 UNPARSED SOURCE RECORDS"],
+    ["invalid-token-records", "3 INVALID TOKEN RECORDS EXCLUDED"],
+    ["source-incomplete", "INCOMPLETE SOURCE PROVENANCE"],
     ["component-coverage", "50% COMPONENT COVERAGE"],
     ["external-source", "EXTERNAL SNAPSHOT INPUT"],
     ["source-status", "STALE SNAPSHOT"],
@@ -752,7 +762,7 @@ test("degraded warning chips fit and encode at 900, 1280, and 2400 pixels", asyn
       const warningGroups = [...svg.matchAll(
         /<g data-role="integrity-warning"[^>]*>([\s\S]*?)<\/g>/g,
       )];
-      assert.equal(warningGroups.length, 7);
+      assert.equal(warningGroups.length, 9);
       for (const [, markup] of warningGroups) {
         const rect = markup.match(/<rect x="([\d.]+)"[^>]*width="([\d.]+)"/);
         assert.ok(rect, "warning chip has a measurable backing rect");

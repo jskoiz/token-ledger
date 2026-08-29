@@ -33,6 +33,15 @@ The last three statuses mean legacy history was deliberately excluded. Exact
 rollout collection still proceeds, and PNG reports show `LEGACY HISTORY
 SKIPPED` so the omission is not silent.
 
+A missing legacy snapshot is a completed absence check. By contrast, an
+existing malformed, unreadable, oversized, non-regular, or non-v3 snapshot
+stops with `ERR_DURABLE_LEDGER_LEGACY_SNAPSHOT`. That failure does not advance
+the ledger revision, mark the one-shot migration as checked, or publish a new
+cache. Preserve the unreadable artifact in a private backup, then repair or
+replace it with the matching legacy v3 snapshot and retry. If migration is
+intentionally declined, move the preserved artifact out of the configured
+snapshot path; the next successful refresh records that absence as checked.
+
 `sourceIncomplete` means a previously observed source is missing, tombstoned,
 truncated, or replaced. It is a provenance warning, not proof that SQLite is
 corrupt. A true append keeps stable provenance; a larger same-inode rewrite is

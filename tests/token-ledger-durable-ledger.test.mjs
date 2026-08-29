@@ -17,7 +17,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
@@ -31,6 +31,7 @@ import {
   readDurableLedger,
   readDurableLedgerRevision,
   resolveDurableLedgerPath,
+  updateDurableLedger,
 } from "../lib/token-ledger-ledger.mjs";
 import {
   readPrivateSnapshot,
@@ -2242,6 +2243,191 @@ test("v2 ledgers add reconciliation state without breaking read-only access", as
     } catch {
       // Fixture cleanup remains authoritative.
     }
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("source identity compares device and inode as one pair", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-device-identity-"));
+  const stateDirectory = resolve(root, "private-state");
+  const sourcePath = resolve(root, "sessions", ROLLOUT_NAME);
+  const ledgerPath = resolveDurableLedgerPath({ stateDirectory });
+  const source = ({
+    device,
+    inode = 17,
+    size,
+    cursorFingerprint,
+    continuityBytes = null,
+    continuityFingerprint = null,
+  }) => ({
+    path: sourcePath,
+    sourceId: "synthetic-device-source",
+    location: "active",
+    size,
+    mtimeMs: size,
+    ctimeMs: size,
+    dev: device,
+    ino: inode,
+    cursorBytes: size,
+    cursorFingerprint,
+    continuityBytes,
+    continuityFingerprint,
+  });
+  const update = async (entry) => updateDurableLedger({
+    options: { stateDirectory },
+    codexHome: root,
+    inventory: { files: [entry], lifecycleFiles: [entry] },
+    includeArchived: true,
+  });
+  try {
+    await update(source({
+      device: 1,
+      size: 100,
+      cursorFingerprint: "a".repeat(64),
+    }));
+    await update(source({
+      device: 2,
+      size: 100,
+      cursorFingerprint: "b".repeat(64),
+    }));
+    let ledger = await readDurableLedger(ledgerPath);
+    assert.equal(ledger.sourceSummary.states[0].changeState, "replaced");
+    assert.equal(ledger.sourceSummary.states[0].changeCount, 1);
+
+    await rm(stateDirectory, { recursive: true, force: true });
+    await update(source({
+      device: 3,
+      size: 100,
+      cursorFingerprint: "c".repeat(64),
+    }));
+    await update(source({
+      device: 3,
+      size: 120,
+      cursorFingerprint: "d".repeat(64),
+      continuityBytes: 100,
+      continuityFingerprint: "c".repeat(64),
+    }));
+    ledger = await readDurableLedger(ledgerPath);
+    assert.equal(ledger.sourceSummary.states[0].changeState, "stable");
+    assert.equal(ledger.sourceSummary.states[0].changeCount, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("malformed legacy snapshots preserve the one-shot migration retry", async () => {
+  const fixture = await createFixture([]);
+  const legacySnapshotPath = resolve(fixture.root, "exports", "snapshot.json");
+  const ledgerPath = resolveDurableLedgerPath({
+    stateDirectory: fixture.stateDirectory,
+  });
+  const malformed = Buffer.from("{not-json\n", "utf8");
+  const generatedAt = "2026-08-20T12:00:00.000Z";
+  let database;
+  try {
+    await mkdir(dirname(legacySnapshotPath), { recursive: true });
+    await writeFile(legacySnapshotPath, malformed);
+    await assert.rejects(
+      () => collectUsage(options(fixture, { output: legacySnapshotPath })),
+      (error) => {
+        assert.equal(error?.code, "ERR_DURABLE_LEDGER_LEGACY_SNAPSHOT");
+        assert.ok(error.cause instanceof SyntaxError);
+        return true;
+      },
+    );
+    assert.deepEqual(await readFile(legacySnapshotPath), malformed);
+    assert.equal(await readDurableLedgerRevision(ledgerPath), 0);
+    database = new DatabaseSync(ledgerPath, { readOnly: true });
+    assert.equal(database.prepare(
+      "SELECT value FROM ledger_meta WHERE key = 'legacy_snapshot_checked'",
+    ).get(), undefined);
+    assert.equal(database.prepare(
+      "SELECT COUNT(*) AS count FROM migration_runs",
+    ).get().count, 0);
+    database.close();
+    database = null;
+
+    const validLegacy = legacySnapshotForFixture(fixture, {
+      schemaVersion: 3,
+      generatedAt,
+      events: [{
+        timestamp: generatedAt,
+        startAt: generatedAt,
+        endAt: generatedAt,
+        project: "legacy-project",
+        model: "gpt-5.4",
+        rateCardModel: "gpt-5.4",
+        effort: "medium",
+        source: "local",
+        useType: "interactive",
+        inputTokens: 90,
+        cachedInputTokens: 10,
+        outputTokens: 10,
+        reasoningTokens: 4,
+        totalTokens: 100,
+        toolCalls: 0,
+        callCount: 1,
+        detailedCallCount: 1,
+        inputCallCount: 1,
+        breakdownAvailable: true,
+        threadIds: ["legacy-retry-thread"],
+      }],
+    });
+    await writePrivateSnapshot(legacySnapshotPath, validLegacy);
+    const first = await collectUsage(options(fixture, {
+      output: legacySnapshotPath,
+    }));
+    const second = await collectUsage(options(fixture, {
+      output: legacySnapshotPath,
+    }));
+    const ledger = await readDurableLedger(ledgerPath);
+    database = new DatabaseSync(ledgerPath, { readOnly: true });
+
+    assert.equal(totalTokens(first), 100);
+    assert.equal(totalTokens(second), 100);
+    assert.equal(first.metadata.durableLedger.revision, 1);
+    assert.equal(second.metadata.durableLedger.revision, 2);
+    assert.equal(ledger.migratedUsageRows, 1);
+    assert.equal(database.prepare(
+      "SELECT value FROM ledger_meta WHERE key = 'legacy_snapshot_checked'",
+    ).get().value, "1");
+    assert.equal(database.prepare(
+      "SELECT COUNT(*) AS count FROM migration_runs",
+    ).get().count, 1);
+  } finally {
+    database?.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("readable non-v3 legacy snapshots remain retryable hard failures", async () => {
+  const fixture = await createFixture([]);
+  const legacySnapshotPath = resolve(fixture.root, "exports", "snapshot.json");
+  const ledgerPath = resolveDurableLedgerPath({
+    stateDirectory: fixture.stateDirectory,
+  });
+  let database;
+  try {
+    await mkdir(dirname(legacySnapshotPath), { recursive: true });
+    await writeFile(legacySnapshotPath, JSON.stringify({
+      schemaVersion: 4,
+      events: [],
+    }));
+    await assert.rejects(
+      () => collectUsage(options(fixture, { output: legacySnapshotPath })),
+      (error) => {
+        assert.equal(error?.code, "ERR_DURABLE_LEDGER_LEGACY_SNAPSHOT");
+        assert.match(error.message, /unsupported schema/i);
+        return true;
+      },
+    );
+    assert.equal(await readDurableLedgerRevision(ledgerPath), 0);
+    database = new DatabaseSync(ledgerPath, { readOnly: true });
+    assert.equal(database.prepare(
+      "SELECT value FROM ledger_meta WHERE key = 'legacy_snapshot_checked'",
+    ).get(), undefined);
+  } finally {
+    database?.close();
     await rm(fixture.root, { recursive: true, force: true });
   }
 });

@@ -1022,6 +1022,18 @@ function snapshotScopeError(snapshot, options) {
   );
 }
 
+async function snapshotAllowsStaleFallback(snapshot, options) {
+  if (!snapshotMatchesCollectionScope(snapshot, collectionScope(options))) {
+    return false;
+  }
+  const { codexHomeFingerprint } = await import(
+    "../lib/token-ledger-ledger.mjs"
+  );
+  return primitiveString(
+    snapshot.metadata?.durableLedger?.codexHomeFingerprint,
+  ) === codexHomeFingerprint(options.codexHome);
+}
+
 async function refreshSnapshot(options) {
   if (!existsSync(options.codexHome)) {
     throw new Error(
@@ -1072,7 +1084,7 @@ async function refreshSnapshot(options) {
     if (error?.code === "ERR_SNAPSHOT_SIZE_LIMIT" && existsSync(options.input)) {
       try {
         const previous = await readSnapshot(options.input);
-        if (snapshotScopeMatchesOptions(previous, options)) {
+        if (await snapshotAllowsStaleFallback(previous, options)) {
           process.stderr.write(
             "Token Ledger: refresh exceeded the safety limit; continuing with the previous cache, which may be stale.\n",
           );
@@ -1080,7 +1092,7 @@ async function refreshSnapshot(options) {
         }
       } catch {
         // Preserve the original refresh error when the previous cache cannot
-        // prove that it has the requested collection scope.
+        // prove its exact collection scope and Codex-home identity.
       }
     }
     const wrapped = new Error(
@@ -1152,7 +1164,10 @@ async function refreshSnapshotOrUseStaleFallback(options, cached) {
     // Default to surfacing refresh failures. Only bounded cache growth, source
     // races, and SQLite lock contention are safe reasons to reuse known-good
     // cached data; migration, schema, corruption, and unknown failures are not.
-    if (!refreshFailureAllowsStaleFallback(error)) throw error;
+    if (
+      !refreshFailureAllowsStaleFallback(error) ||
+      !(await snapshotAllowsStaleFallback(cached, options))
+    ) throw error;
     return { snapshot: cached, sourceStatus: "stale-fallback" };
   }
 }

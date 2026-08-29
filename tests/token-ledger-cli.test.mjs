@@ -47,6 +47,7 @@ import {
   sourceWatermarksEqual,
 } from "../lib/token-ledger-importer.mjs";
 import {
+  codexHomeFingerprint,
   readDurableLedgerRevision,
   resolveDurableLedgerPath,
 } from "../lib/token-ledger-ledger.mjs";
@@ -2252,6 +2253,7 @@ test("stale refresh fallback only accepts bounded transient failures", () => {
 
   for (const code of [
     "ERR_DURABLE_LEDGER_CODEX_HOME",
+    "ERR_DURABLE_LEDGER_LEGACY_SNAPSHOT",
     "ERR_DURABLE_LEDGER_MIGRATION_SCOPE",
     "ERR_DURABLE_LEDGER_SCHEMA",
     "ERR_SNAPSHOT_NOT_REGULAR",
@@ -2354,6 +2356,76 @@ test("snapshot size fallback stays stale and does not advance ledger revisions",
     assert.equal(await readDurableLedgerRevision(ledgerPath), 1);
     assert.equal(stored.coverage.observedTokens, 100);
     assert.equal(stored.metadata.durableLedger.revision, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("snapshot size fallback requires exact scope and Codex-home provenance", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-fallback-gate-"));
+  const requestedCodexHome = resolve(root, "requested-codex-home");
+  const otherCodexHome = resolve(root, "other-codex-home");
+  const generatedAt = "2026-08-23T10:00:00.000Z";
+  try {
+    await mkdir(requestedCodexHome, { recursive: true });
+    await mkdir(otherCodexHome, { recursive: true });
+
+    const assertRejectedFallback = async (name, previous) => {
+      const snapshotPath = resolve(root, `${name}.json.gz`);
+      await writePrivateSnapshot(snapshotPath, previous);
+      const options = parseArgs([
+        "day",
+        "2026-08-23",
+        "--static",
+        "--plain",
+        "--ascii",
+        "--tz",
+        "UTC",
+      ]);
+      options.codexHome = requestedCodexHome;
+      options.input = snapshotPath;
+      options.inputExplicit = false;
+      options.snapshotWriteOptions = { maxBytes: 1, targetBytes: 1 };
+
+      await assert.rejects(
+        () => loadSnapshot(options),
+        (error) => {
+          assert.equal(error?.code, "ERR_SNAPSHOT_SIZE_LIMIT");
+          return true;
+        },
+      );
+      assert.equal(
+        (await readPrivateSnapshot(snapshotPath)).metadata.durableLedger
+          .codexHomeFingerprint,
+        previous.metadata.durableLedger.codexHomeFingerprint,
+      );
+    };
+
+    const scopedSnapshot = {
+      schemaVersion: 3,
+      generatedAt,
+      provenance: {
+        collection: { since: null, includeArchived: true },
+      },
+      metadata: {
+        durableLedger: {
+          codexHomeFingerprint: codexHomeFingerprint(otherCodexHome),
+          revision: 0,
+        },
+      },
+      events: [],
+    };
+    await assertRejectedFallback("different-home", scopedSnapshot);
+    await assertRejectedFallback("unknown-scope", {
+      ...scopedSnapshot,
+      provenance: undefined,
+      metadata: {
+        durableLedger: {
+          codexHomeFingerprint: codexHomeFingerprint(requestedCodexHome),
+          revision: 0,
+        },
+      },
+    });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

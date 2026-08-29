@@ -1611,6 +1611,78 @@ test("invalid usage makes its source evidence-only", async () => {
   }
 });
 
+test("invalid usage in a separate source makes weekly completeness false", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-completeness-"));
+  const rolloutDirectory = resolve(root, "sessions", "2026", "08", "18");
+  const eventTimestamp = "2026-08-18T10:00:00.000Z";
+  const quotaTimestamp = "2026-08-24T10:00:00.000Z";
+  const resetsAt = Date.parse("2026-08-30T00:00:00.000Z") / 1_000;
+  try {
+    await mkdir(rolloutDirectory, { recursive: true });
+    await writeFile(
+      resolve(
+        rolloutDirectory,
+        "rollout-11111111-1111-4111-8111-111111111111.jsonl",
+      ),
+      serialize([
+        ...turnStart(eventTimestamp, "turn-valid"),
+        tokenCount(eventTimestamp, 100, 100),
+        {
+          timestamp: quotaTimestamp,
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            rate_limits: {
+              primary: {
+                window_minutes: 10_080,
+                used_percent: 40,
+                resets_at: resetsAt,
+              },
+              plan_type: "plus",
+            },
+          },
+        },
+      ]),
+    );
+    await writeFile(
+      resolve(
+        rolloutDirectory,
+        "rollout-22222222-2222-4222-8222-222222222222.jsonl",
+      ),
+      serialize([
+        ...turnStart(quotaTimestamp, "turn-invalid"),
+        {
+          timestamp: quotaTimestamp,
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              last_token_usage: "garbage",
+              total_token_usage: 7,
+            },
+          },
+        },
+      ]),
+    );
+
+    const snapshot = await collectUsage({
+      output: resolve(root, "snapshot.json"),
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+
+    assert.equal(snapshot.coverage.observedTokens, 100);
+    assert.equal(snapshot.quotaObservations.length, 1);
+    assert.equal(snapshot.quotaObservations[0].scope, "account");
+    assert.equal(snapshot.coverage.parseErrors, 0);
+    assert.equal(snapshot.coverage.invalidTokenRecords, 1);
+    assert.equal(snapshot.coverage.completeSinceWindowStart, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("validates token totals and preserves malformed breakdowns as unknown", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-token-validation-"));
   const threadId = "91919191-9191-4919-8919-919191919191";

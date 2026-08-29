@@ -135,11 +135,12 @@ legible and falls back to the same readable multi-day binning for longer
 windows. Meter-drain weighting uses the rate card bundled with this release;
 subscription limits are not billed per token.
 
-The CLI automatically checks the local Codex source files before rendering. If
-they are newer than the local cache, it rebuilds the privacy-reduced snapshot.
-The first refresh may scan historical rollout files; later runs use the cache
-for one hour before checking source freshness again. Use `--refresh` when you
-need to force an immediate rebuild.
+The CLI checks the local Codex source manifest on every automatic load. If it
+differs from the cached watermark, the CLI rebuilds the privacy-reduced
+snapshot; otherwise it reuses the cache immediately. The first refresh may
+scan historical rollout files. The one-hour threshold affects only the
+displayed freshness label, not source validation. Use `--refresh` to force a
+rebuild even when the manifest is unchanged.
 
 The `1d` project dashboard shows a compact snapshot-age line such as
 `SNAPSHOT · fresh · 12m old`. `fresh` means the snapshot is within the
@@ -199,6 +200,11 @@ snapshots are migrated once, when readable, into explicitly marked
 invent exact event or turn identities, and remain marked as estimated in
 coverage. A missing legacy snapshot is also recorded as checked so a later
 refresh cannot unexpectedly migrate a different file into the same ledger.
+An existing malformed, unreadable, oversized, non-regular, or non-v3 snapshot
+instead stops with `ERR_DURABLE_LEDGER_LEGACY_SNAPSHOT` before the ledger
+revision advances. Its bytes and the one-shot migration opportunity are
+preserved so the snapshot can be privately backed up, repaired or replaced,
+and retried.
 
 Compacted rows are retained for 7,300 days (20 years) before retirement.
 Source, quota, tool, and state-only thread metadata are pruned only after they

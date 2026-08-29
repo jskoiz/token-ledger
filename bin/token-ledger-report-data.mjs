@@ -740,6 +740,11 @@ export function buildTrendReportViewModel({
       componentCoveragePercent:
         totalTokens > 0 ? (detailedTokens / totalTokens) * 100 : 100,
       parseErrors: Math.max(0, Number(snapshot.coverage?.parseErrors) || 0),
+      invalidTokenRecords: Math.max(
+        0,
+        Number(snapshot.coverage?.invalidTokenRecords) || 0,
+      ),
+      sourceIncomplete: snapshot.coverage?.sourceIncomplete === true,
       estimated,
       estimatedBucketCount: daily.filter((row) => row.estimated).length,
       maximumResolutionSeconds: maximumEstimatedResolutionSeconds || null,
