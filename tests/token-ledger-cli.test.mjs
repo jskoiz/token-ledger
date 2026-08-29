@@ -79,6 +79,7 @@ import {
   renderTrendImage,
   writeTrendPng,
 } from "../bin/token-ledger-trend-image.mjs";
+import { buildTrendReportViewModel } from "../bin/token-ledger-report-data.mjs";
 import {
   buildCacheReportData,
   priorPeriodSummary,
@@ -4889,6 +4890,105 @@ test("report emits progress while generating the PNG", async () => {
     assert.match(progress, /generating report PNG/);
     assert.match(progress, /encoding report PNG/);
     assert.match(progress, /finished report PNG/);
+  } finally {
+    process.stderr.write = originalWrite;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("standard report preserves split prior-period comparison fragments", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-report-prior-split-"));
+  const snapshotPath = resolve(root, "snapshot.json");
+  const outputPath = resolve(root, "report.png");
+  const expectedPath = resolve(root, "expected.png");
+  const originalWrite = process.stderr.write;
+  const nowMs = Date.parse("2026-08-15T12:00:00.000Z");
+  const snapshot = {
+    schemaVersion: 3,
+    generatedAt: new Date(nowMs).toISOString(),
+    events: [
+      {
+        timestamp: "2026-08-02T00:00:00.000Z",
+        startAt: "2026-08-01T12:00:00.000Z",
+        endAt: "2026-08-02T12:00:00.000Z",
+        project: "prior",
+        model: "gpt-5.6-luna",
+        totalTokens: 1_000,
+        inputTokens: 900,
+        outputTokens: 100,
+        callCount: 2,
+        resolutionSeconds: 86_400,
+      },
+      {
+        timestamp: "2026-08-12T12:00:00.000Z",
+        project: "current",
+        model: "gpt-5.6-luna",
+        totalTokens: 1_000,
+        inputTokens: 900,
+        outputTokens: 100,
+      },
+    ],
+    threads: [],
+    quotaObservations: [],
+  };
+
+  try {
+    await writeFile(snapshotPath, `${JSON.stringify(snapshot)}\n`);
+    process.stderr.write = () => true;
+    const options = parseArgs([
+      "report",
+      "7d",
+      "--date",
+      "2026-08-15",
+      "--tz",
+      "UTC",
+      "--input",
+      snapshotPath,
+      "--image-output",
+      outputPath,
+      "--no-open",
+    ]);
+    await run(options, { nowMs });
+
+    const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+    const analysis = buildRangeAnalysis(snapshot, bounds, {
+      priorBounds: priorPeriodBounds(bounds, 7),
+    });
+    const currentEvents = filterDayEvents(snapshot, bounds, analysis);
+    const projectRows = aggregateProjects(
+      snapshot,
+      currentEvents,
+      options,
+      analysis,
+    );
+    const viewModel = buildTrendReportViewModel({
+      snapshot,
+      bounds,
+      days: 7,
+      reportTimeMs: nowMs,
+      sourceStatus: "explicit-snapshot",
+      projectRows,
+      events: analysis.currentEvents,
+      priorEvents: analysis.priorEvents,
+    });
+    assert.ok(
+      Math.abs(viewModel.summary.priorEquivalentTokens - 500) < 0.001,
+    );
+    assert.ok(Math.abs(viewModel.summary.totalDeltaPercent - 100) < 0.001);
+    assert.equal(viewModel.summary.priorEquivalentEstimated, true);
+    assert.equal(viewModel.summary.totalDeltaEstimated, true);
+
+    const expectedSvg = renderTrendImage({
+      snapshot,
+      bounds,
+      trend: buildUsageTrend(snapshot, bounds, { analysis }),
+      days: 7,
+      options,
+      viewModel,
+    });
+    assert.match(expectedSvg, />≈\+100\.0%<\/text>/);
+    await writeTrendPng(expectedSvg, expectedPath);
+    assert.deepEqual(await readFile(outputPath), await readFile(expectedPath));
   } finally {
     process.stderr.write = originalWrite;
     await rm(root, { recursive: true, force: true });
