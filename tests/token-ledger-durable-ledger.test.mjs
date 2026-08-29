@@ -373,6 +373,30 @@ test("replacement and truncation reconcile without double counting", async () =>
   }
 });
 
+test("turnless usage events reconcile by stable source position", async () => {
+  const fixture = await createFixture([]);
+  const legacyRows = (totals) => totals.map((total, index) => tokenCount(
+    new Date(Date.parse(BASE_TIMESTAMP) + index * 60_000).toISOString(),
+    total,
+  ));
+  try {
+    await writeFile(fixture.file, serialize(legacyRows([100, 200])));
+    const first = await collectUsage(options(fixture));
+    await writeFile(fixture.file, serialize(legacyRows([100, 300])));
+    const replaced = await collectUsage(options(fixture));
+    const ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+
+    assert.equal(totalTokens(first), 300);
+    assert.equal(totalTokens(replaced), 400);
+    assert.equal(ledger.usageRows.length, 2);
+    assert.equal(ledger.sourceSummary.states[0].changeState, "replaced");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("atomic replacement preserves source identity and reconciles positions", async () => {
   const fixture = await createFixture([100, 200]);
   const replacement = resolve(fixture.root, "replacement.jsonl");
