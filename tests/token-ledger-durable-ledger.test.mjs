@@ -947,6 +947,51 @@ test("active-only reads exclude tool calls owned only by archived sources", asyn
   }
 });
 
+test("active-only compacted reads derive tool totals from scoped memberships", async () => {
+  const baseTimestamp = "2015-08-20T10:00:00.000Z";
+  const fixture = await createFixture([100], { baseTimestamp });
+  const archivedDirectory = resolve(
+    fixture.root,
+    "archived_sessions",
+    "2015",
+    "08",
+    "20",
+  );
+  const archivedFile = resolve(archivedDirectory, ARCHIVED_ROLLOUT_NAME);
+  const archivedCall = {
+    timestamp: "2015-08-20T10:01:00.000Z",
+    type: "response_item",
+    payload: {
+      type: "function_call",
+      name: "shell",
+      call_id: "call-archived-compacted",
+    },
+  };
+  try {
+    await mkdir(archivedDirectory, { recursive: true });
+    await writeFile(
+      archivedFile,
+      `${await readFile(fixture.file, "utf8")}${serialize([archivedCall])}`,
+    );
+    const allSources = await collectUsage(options(fixture));
+    await rm(fixture.file);
+    const activeOnly = await collectUsage(options(fixture, {
+      includeArchived: false,
+    }));
+    const activeOnlyLedger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      { includeArchived: false },
+    );
+
+    assert.equal(allSources.events[0].toolCalls, 1);
+    assert.equal(activeOnlyLedger.compactedUsageRows, 1);
+    assert.equal(activeOnly.events[0].toolCalls, 0);
+    assert.deepEqual(activeOnlyLedger.usageRows[0].toolCallKeys, []);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("compaction keeps active and archived source scopes filterable", async () => {
   const fixture = await createFixture([100], {
     baseTimestamp: "2015-08-20T10:00:00.000Z",
