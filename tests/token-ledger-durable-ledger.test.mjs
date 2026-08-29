@@ -257,6 +257,66 @@ function legacySnapshotForFixture(fixture, snapshot) {
   };
 }
 
+test("ledger statement preparation is constant across event volume", async () => {
+  async function measuredCollection(eventCount) {
+    const fixture = await createFixture([]);
+    try {
+      const baseMs = Date.parse(BASE_TIMESTAMP);
+      const rows = Array.from({ length: eventCount }).flatMap((_, index) => {
+        const timestamp = new Date(baseMs + index * 60_000).toISOString();
+        return [
+          ...turnStart(timestamp, `prepare-turn-${index + 1}`),
+          tokenCount(
+            new Date(Date.parse(timestamp) + 1_000).toISOString(),
+            100,
+            index + 1,
+          ),
+          shellCall(
+            new Date(Date.parse(timestamp) + 2_000).toISOString(),
+            `prepare-call-${index + 1}`,
+          ),
+        ];
+      });
+      await writeFile(fixture.file, serialize(rows));
+
+      const originalPrepare = DatabaseSync.prototype.prepare;
+      let prepareCount = 0;
+      DatabaseSync.prototype.prepare = function (sql) {
+        prepareCount += 1;
+        return originalPrepare.call(this, sql);
+      };
+      let snapshot;
+      try {
+        snapshot = await collectUsage(options(fixture));
+      } finally {
+        DatabaseSync.prototype.prepare = originalPrepare;
+      }
+      const ledger = await readDurableLedger(
+        resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      );
+      return { ledger, prepareCount, snapshot };
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  }
+
+  const single = await measuredCollection(1);
+  const many = await measuredCollection(32);
+
+  assert.equal(many.prepareCount, single.prepareCount);
+  assert.equal(totalTokens(many.snapshot), 3_200);
+  assert.equal(many.snapshot.coverage.observedModelCalls, 32);
+  assert.equal(totalToolCalls(many.snapshot), 32);
+  assert.equal(many.snapshot.quotaObservations.length, 32);
+  assert.equal(many.ledger.usageRows.length, 32);
+  assert.equal(many.ledger.toolRows.length, 32);
+  assert.equal(many.ledger.quotaRows.length, 32);
+  assert.equal(
+    many.ledger.usageRows.reduce((sum, row) => sum + row.totalTokens, 0),
+    3_200,
+  );
+});
+
 test("usage and quota survive rollout source disappearance", async () => {
   const fixture = await createFixture([100], { usedPercent: 37 });
   try {
