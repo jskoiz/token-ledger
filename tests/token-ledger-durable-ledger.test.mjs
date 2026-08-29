@@ -1181,6 +1181,36 @@ test("turnless usage events reconcile by stable source position", async () => {
   }
 });
 
+test("exact event identity lookup uses the partial event-key index", async () => {
+  const fixture = await createFixture([100, 200]);
+  let database;
+  try {
+    await collectUsage(options(fixture));
+    const ledgerPath = resolveDurableLedgerPath({
+      stateDirectory: fixture.stateDirectory,
+    });
+    database = new DatabaseSync(ledgerPath, { readOnly: true });
+    const plan = database.prepare(`
+      EXPLAIN QUERY PLAN
+      SELECT observation_id AS observationId
+        FROM usage_observations
+       WHERE identity_kind = 'exact' AND event_key = ?
+    `).all("event-key-placeholder")
+      .map((row) => String(row.detail))
+      .join("\n");
+
+    assert.match(plan, /usage_exact_event_key/);
+    assert.doesNotMatch(plan, /\bSCAN usage_observations\b/);
+  } finally {
+    try {
+      database?.close();
+    } catch {
+      // Fixture cleanup remains authoritative.
+    }
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("atomic replacement preserves source identity and reconciles positions", async () => {
   const fixture = await createFixture([100, 200]);
   const replacement = resolve(fixture.root, "replacement.jsonl");
@@ -3342,6 +3372,10 @@ test("old compacted observations retain source membership without rescan double 
     baseTimestamp: "2015-08-20T10:00:00.000Z",
   });
   try {
+    await appendFile(
+      fixture.file,
+      serialize([shellCall("2015-08-20T10:01:00.000Z", "call-rescan")]),
+    );
     const first = await collectUsage(options(fixture));
     const second = await collectUsage(options(fixture));
     const ledgerPath = resolveDurableLedgerPath({
@@ -3353,10 +3387,15 @@ test("old compacted observations retain source membership without rescan double 
 
     assert.equal(first.coverage.observedTokens, 100);
     assert.equal(second.coverage.observedTokens, 100);
+    assert.equal(totalToolCalls(first), 1);
+    assert.equal(totalToolCalls(second), 1);
     assert.equal(ledger.compactedUsageRows, 1);
     assert.equal(ledger.usageRows[0].identityKind, "compacted");
     assert.equal(ledger.usageRows[0].sourceIds.size, 1);
+    assert.equal(ledger.usageRows[0].toolCalls, 1);
+    assert.deepEqual(ledger.usageRows[0].toolCallKeys, ["id|call-rescan"]);
     assert.equal(afterRemoval.coverage.observedTokens, 100);
+    assert.equal(totalToolCalls(afterRemoval), 1);
     assert.equal(afterRemoval.coverage.sourceIncomplete, true);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
