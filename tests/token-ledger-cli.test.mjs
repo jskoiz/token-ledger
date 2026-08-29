@@ -29,6 +29,7 @@ import {
   loadSnapshot,
   parseArgs,
   redactLocalPaths,
+  refreshFailureAllowsStaleFallback,
   rolling24hBounds,
   rollingDurationBounds,
   run,
@@ -2130,6 +2131,162 @@ test("automatic cache validation rebuilds a missing or behind ledger", async () 
     assert.equal(await readDurableLedgerRevision(ledgerPath), 1);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("automatic cache validation propagates unscoped ledger migration failures", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-migration-cache-"));
+  const codexHome = resolve(root, "codex-home");
+  const sourceDirectory = resolve(codexHome, "sessions", "2026", "08");
+  const sourceFile = resolve(
+    sourceDirectory,
+    "rollout-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl",
+  );
+  const snapshotPath = resolve(root, "snapshot.json.gz");
+  const ledgerPath = resolveDurableLedgerPath({ output: snapshotPath });
+  let database;
+  try {
+    await mkdir(sourceDirectory, { recursive: true });
+    await writeFile(
+      sourceFile,
+      serializeRows(sourceRolloutRows(
+        100,
+        "turn-1",
+        "2026-08-23T10:00:00.000Z",
+      )),
+    );
+    const initial = await collectUsage({
+      output: snapshotPath,
+      codexHome,
+      includeArchived: true,
+      since: null,
+    });
+    await writePrivateSnapshot(snapshotPath, initial);
+    assert.equal(initial.metadata.durableLedger.revision, 1);
+
+    database = new DatabaseSync(ledgerPath);
+    database.exec(`
+      DROP TABLE migration_runs;
+      CREATE TABLE migration_runs (
+        migration_key TEXT PRIMARY KEY,
+        source_fingerprint TEXT NOT NULL,
+        source_label TEXT NOT NULL,
+        generated_at TEXT,
+        migrated_at TEXT NOT NULL,
+        usage_rows INTEGER NOT NULL,
+        quota_rows INTEGER NOT NULL
+      ) WITHOUT ROWID;
+      INSERT INTO migration_runs (
+        migration_key, source_fingerprint, source_label, generated_at,
+        migrated_at, usage_rows, quota_rows
+      ) VALUES (
+        'snapshot-v3-default', 'legacy-fingerprint', 'legacy-snapshot',
+        '2026-08-20T12:00:00.000Z', '2026-08-20T12:00:00.000Z', 1, 0
+      );
+      PRAGMA user_version = 1;
+    `);
+    database.close();
+    database = null;
+    const ledgerBefore = await readFile(ledgerPath);
+    const snapshotBefore = await readFile(snapshotPath);
+
+    const options = parseArgs([
+      "day",
+      "2026-08-23",
+      "--static",
+      "--plain",
+      "--ascii",
+      "--tz",
+      "UTC",
+    ]);
+    options.codexHome = codexHome;
+    options.input = snapshotPath;
+    options.inputExplicit = false;
+
+    await assert.rejects(
+      () => loadSnapshot(options),
+      (error) => {
+        assert.equal(error?.code, "ERR_DURABLE_LEDGER_MIGRATION_SCOPE");
+        assert.match(error.message, /ledger was left untouched/i);
+        return true;
+      },
+    );
+    assert.deepEqual(await readFile(snapshotPath), snapshotBefore);
+    assert.deepEqual(await readFile(ledgerPath), ledgerBefore);
+    database = new DatabaseSync(ledgerPath, { readOnly: true });
+    assert.equal(database.prepare("PRAGMA user_version").get().user_version, 1);
+    assert.equal(
+      database.prepare("SELECT COUNT(*) AS count FROM migration_runs").get().count,
+      1,
+    );
+  } finally {
+    database?.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("stale refresh fallback only accepts bounded transient failures", () => {
+  for (const code of [
+    "ERR_SNAPSHOT_SIZE_LIMIT",
+    "ERR_SOURCE_CHANGED_DURING_COLLECTION",
+    "SQLITE_BUSY",
+    "SQLITE_LOCKED",
+  ]) {
+    assert.equal(
+      refreshFailureAllowsStaleFallback(Object.assign(new Error(code), { code })),
+      true,
+      code,
+    );
+  }
+
+  const sqliteBusy = Object.assign(new Error("database is busy"), {
+    code: "ERR_SQLITE_ERROR",
+    errcode: 5,
+    errstr: "SQLITE_BUSY",
+  });
+  const wrappedBusy = Object.assign(
+    new Error("Could not refresh local snapshot", { cause: sqliteBusy }),
+    { code: "ERR_SQLITE_ERROR" },
+  );
+  assert.equal(refreshFailureAllowsStaleFallback(wrappedBusy), true);
+
+  for (const code of [
+    "ERR_DURABLE_LEDGER_CODEX_HOME",
+    "ERR_DURABLE_LEDGER_MIGRATION_SCOPE",
+    "ERR_DURABLE_LEDGER_SCHEMA",
+    "ERR_SNAPSHOT_NOT_REGULAR",
+    "ERR_BUFFER_TOO_LARGE",
+    "SQLITE_CORRUPT",
+    "SQLITE_NOTADB",
+    "EIO",
+  ]) {
+    assert.equal(
+      refreshFailureAllowsStaleFallback(Object.assign(new Error(code), { code })),
+      false,
+      code,
+    );
+  }
+
+  for (const [errcode, errstr] of [
+    [11, "SQLITE_CORRUPT"],
+    [26, "SQLITE_NOTADB"],
+  ]) {
+    const sqliteCorruption = Object.assign(new Error(errstr), {
+      code: "ERR_SQLITE_ERROR",
+      errcode,
+      errstr,
+    });
+    const wrappedCorruption = Object.assign(
+      new Error("Could not refresh local snapshot", {
+        cause: sqliteCorruption,
+      }),
+      { code: "ERR_SQLITE_ERROR" },
+    );
+    assert.equal(
+      refreshFailureAllowsStaleFallback(wrappedCorruption),
+      false,
+      errstr,
+    );
   }
 });
 

@@ -1085,9 +1085,75 @@ async function refreshSnapshot(options) {
     }
     const wrapped = new Error(
       `Could not refresh local snapshot: ${safeErrorMessage(error, [options.input, options.codexHome])}`,
+      { cause: error },
     );
     wrapped.code = error?.code;
     throw wrapped;
+  }
+}
+
+const RECOVERABLE_REFRESH_ERROR_CODES = new Set([
+  "ERR_SNAPSHOT_SIZE_LIMIT",
+  "ERR_SOURCE_CHANGED_DURING_COLLECTION",
+  "SQLITE_BUSY",
+  "SQLITE_LOCKED",
+]);
+const RECOVERABLE_SQLITE_ERROR_CODES = new Set([5, 6]);
+const RECOVERABLE_SQLITE_ERROR_NAMES = new Set([
+  "SQLITE_BUSY",
+  "SQLITE_LOCKED",
+]);
+const HARD_SQLITE_ERROR_CODES = new Set([11, 26]);
+const HARD_SQLITE_ERROR_NAMES = new Set([
+  "SQLITE_CORRUPT",
+  "SQLITE_NOTADB",
+]);
+
+export function refreshFailureAllowsStaleFallback(error) {
+  const seen = new Set();
+  let recoverable = false;
+  let current = error;
+  while (current instanceof Error) {
+    if (seen.has(current)) return false;
+    seen.add(current);
+    const code = primitiveString(current.code);
+    if (RECOVERABLE_REFRESH_ERROR_CODES.has(code)) recoverable = true;
+    if (
+      code?.startsWith("ERR_DURABLE_LEDGER_") ||
+      (
+        code?.startsWith("ERR_SNAPSHOT_") &&
+        code !== "ERR_SNAPSHOT_SIZE_LIMIT"
+      ) ||
+      code === "ERR_BUFFER_TOO_LARGE" ||
+      HARD_SQLITE_ERROR_NAMES.has(code)
+    ) {
+      return false;
+    }
+    if (code === "ERR_SQLITE_ERROR") {
+      if (RECOVERABLE_SQLITE_ERROR_CODES.has(Number(current.errcode))) {
+        recoverable = true;
+      }
+      if (HARD_SQLITE_ERROR_CODES.has(Number(current.errcode))) {
+        return false;
+      }
+      const name = primitiveString(current.errstr)?.toUpperCase();
+      if (RECOVERABLE_SQLITE_ERROR_NAMES.has(name)) recoverable = true;
+      if (HARD_SQLITE_ERROR_NAMES.has(name)) return false;
+    }
+    current = current.cause;
+  }
+  return recoverable;
+}
+
+async function refreshSnapshotOrUseStaleFallback(options, cached) {
+  try {
+    return await refreshSnapshot(options);
+  } catch (error) {
+    // Default to surfacing refresh failures. Only bounded cache growth, source
+    // races, and SQLite lock contention are safe reasons to reuse known-good
+    // cached data; migration, schema, corruption, and unknown failures are not.
+    if (!refreshFailureAllowsStaleFallback(error)) throw error;
+    return { snapshot: cached, sourceStatus: "stale-fallback" };
   }
 }
 
@@ -1207,12 +1273,7 @@ export async function loadSnapshot(options) {
     return refreshSnapshot(options);
   }
   if (!sourceWatermarksEqual(cached.sourceWatermark, inventory.watermark)) {
-    try {
-      return await refreshSnapshot(options);
-    } catch (error) {
-      if (error?.code === "ERR_DURABLE_LEDGER_CODEX_HOME") throw error;
-      return { snapshot: cached, sourceStatus: "stale-fallback" };
-    }
+    return refreshSnapshotOrUseStaleFallback(options, cached);
   }
   const ledgerRevision = await readDurableLedgerRevision(
     resolveDurableLedgerPath({ output: options.input }),
@@ -1224,12 +1285,7 @@ export async function loadSnapshot(options) {
     !Number.isSafeInteger(snapshotRevision) ||
     ledgerRevision !== snapshotRevision
   ) {
-    try {
-      return await refreshSnapshot(options);
-    } catch (error) {
-      if (error?.code === "ERR_DURABLE_LEDGER_CODEX_HOME") throw error;
-      return { snapshot: cached, sourceStatus: "stale-fallback" };
-    }
+    return refreshSnapshotOrUseStaleFallback(options, cached);
   }
   return { snapshot: cached, sourceStatus: "verified-current" };
 }
