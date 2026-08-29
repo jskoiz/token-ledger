@@ -462,9 +462,16 @@ test("simultaneous active and archived rollout copies keep separate scope", asyn
     const activeOnly = await collectUsage(options(fixture, {
       includeArchived: false,
     }));
+    await rm(fixture.file);
+    const afterActiveRemoval = await collectUsage(options(fixture));
+    const retainedActiveHistory = await collectUsage(options(fixture, {
+      includeArchived: false,
+    }));
 
     assert.equal(totalTokens(allSources), 300);
     assert.equal(totalTokens(activeOnly), 100);
+    assert.equal(totalTokens(afterActiveRemoval), 300);
+    assert.equal(totalTokens(retainedActiveHistory), 100);
     assert.deepEqual(
       ledger.sourceSummary.states.map((state) => state.location).sort(),
       ["active", "archived"],
@@ -547,6 +554,39 @@ test("source changes before commit roll back transient observations", async () =
     assert.equal(totalTokens(snapshot), 200);
     assert.equal(totalTokens(afterRemoval), 200);
     assert.deepEqual(ledger.usageRows.map((row) => row.totalTokens), [200]);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("source changes after validation restore the prior ledger before retry", async () => {
+  const fixture = await createFixture([100]);
+  let changed = false;
+  try {
+    await collectUsage(options(fixture));
+    await appendFile(
+      fixture.file,
+      serialize(rolloutRows([200], { offset: 1 })),
+    );
+    const snapshot = await collectUsage(options(fixture, {
+      faultInjector: async ({ point }) => {
+        if (point === "after-validation" && !changed) {
+          changed = true;
+          await writeFile(fixture.file, serialize(rolloutRows([100])));
+        }
+      },
+    }));
+    const ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+
+    assert.equal(changed, true);
+    assert.equal(totalTokens(snapshot), 100);
+    assert.equal(
+      ledger.usageRows.reduce((sum, row) => sum + row.totalTokens, 0),
+      100,
+    );
+    assert.equal(ledger.usageRows.length, 1);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -1035,9 +1075,12 @@ test("active-only refreshes preserve archived tool ownership durably", async () 
       afterActiveOnlyLedger.usageRows[0].toolCallKeys,
       ["id|call-archived-preserved"],
     );
+    const archivedSourceId = afterActiveOnlyLedger.sourceSummary.states.find(
+      (state) => state.location === "archived",
+    )?.sourceId;
     assert.deepEqual(
       [...afterActiveOnlyLedger.toolRows[0].sourceIds].sort(),
-      [`rollout:${ARCHIVED_THREAD_ID}`],
+      [archivedSourceId],
     );
     await rm(archivedFile);
     const afterArchiveRemoval = await collectUsage(options(fixture));
