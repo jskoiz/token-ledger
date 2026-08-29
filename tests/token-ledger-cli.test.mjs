@@ -976,6 +976,8 @@ test("fractional compacted call counts survive terminal aggregation", () => {
   });
   assert.equal(rows[0].events, 0.5);
   assert.equal(rows[0].models[0].events, 0.5);
+  assert.equal(rows[0].estimated, true);
+  assert.equal(rows[0].models[0].estimated, true);
 
   const output = renderTerminal({
     options: { plain: true, ascii: true, width: 100 },
@@ -3381,7 +3383,10 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
   assert.match(svg, /WHERE IT WENT · TOP PROJECTS/);
   assert.match(svg, /CACHE EFFICIENCY BY DAY/);
   assert.match(svg, /CACHE EFFICIENCY BY MODEL/);
-  assert.doesNotMatch(svg, /DATA SOURCES|COVERAGE|BREAKDOWN|HISTORY|RATE CARD/);
+  assert.doesNotMatch(
+    svg,
+    />DATA SOURCES<\/text>|>COVERAGE<\/text>|>BREAKDOWN<\/text>|>HISTORY<\/text>|>RATE CARD<\/text>/,
+  );
   assert.ok((svg.match(/<rect /g) ?? []).length >= 4);
   assert.doesNotMatch(svg, /NaN|Infinity|undefined/);
 

@@ -725,7 +725,9 @@ export function aggregateProjects(snapshot, events, options = {}, analysis = nul
         rateCardCredits: 0,
         knownCreditTokens: 0,
         models: new Map(),
+        estimated: false,
       };
+    row.estimated ||= allowFractional;
     row.outputTokens = checkedTokenAdd(
       row.outputTokens,
       tokenValue(event.outputTokens, { allowFractional }),
@@ -761,7 +763,9 @@ export function aggregateProjects(snapshot, events, options = {}, analysis = nul
       totalTokens: 0,
       events: 0,
       rateCardCredits: 0,
+      estimated: false,
     };
+    modelRow.estimated ||= allowFractional;
     addSharedTokenContribution(
       sharedTokenScale,
       tokenValue(event.totalTokens, { allowFractional }),

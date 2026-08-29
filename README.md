@@ -94,7 +94,10 @@ time, and the prior-period delta compares an equally long partial window.
 Values allocated from compacted history are marked with `≈`; unmarked values
 come from exact event data. Reports built from an explicit or stale snapshot
 say `Snapshot generated …` (with a `STALE` badge on fallback) instead of
-claiming to be current.
+claiming to be current. Compact warning chips appear only when the report has
+unparsed source records, incomplete token-component coverage, external or
+non-current input, estimated history, or a snapshot/current rate-card
+mismatch.
 
 When run from a terminal, the finished PNG opens in the default image viewer
 automatically so the report lands on screen instead of in a file browser.
