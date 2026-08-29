@@ -101,6 +101,23 @@ async function createRolloutFixture(totals, fileName = "rollout-aaaaaaaa-aaaa-4a
   return { root, directory, file };
 }
 
+test("usage spool retains SQLite statements through row iteration", async () => {
+  const { root } = await createRolloutFixture(Array(100).fill(100));
+  try {
+    const snapshot = await collectUsage({
+      output: resolve(root, "snapshot.json"),
+      codexHome: root,
+      includeArchived: false,
+      since: null,
+    });
+
+    assert.equal(snapshot.coverage.observedModelCalls, 100);
+    assert.equal(snapshot.coverage.observedTokens, 10_000);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("source appends are included before a validated cache is published", async () => {
   const { root, file } = await createRolloutFixture([100]);
   const output = resolve(root, "snapshot.json.gz");
