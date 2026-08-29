@@ -1,15 +1,17 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, rmSync } from "node:fs";
 import {
   appendFile,
   chmod,
+  link,
   mkdtemp,
   readFile,
   readdir,
   rename,
   rm,
   stat,
+  symlink,
   writeFile,
   mkdir,
 } from "node:fs/promises";
@@ -21,6 +23,7 @@ import test from "node:test";
 import { gzipSync } from "node:zlib";
 
 import {
+  cleanupOrphanedUsageSpools,
   collectUsage,
   collectUsageSequential,
   SOURCE_COLLECTION_MAX_ATTEMPTS,
@@ -106,6 +109,156 @@ async function createRolloutFixture(totals, fileName = "rollout-aaaaaaaa-aaaa-4a
   await writeFile(file, serialize(rolloutRows(totals)));
   return { root, directory, file };
 }
+
+test("orphan spool cleanup removes only dead-process private directories", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-spool-cleanup-"));
+  const orphan = resolve(root, "token-ledger-import-999999-abc123");
+  const live = resolve(root, `token-ledger-import-${process.pid}-def456`);
+  const unrelated = resolve(root, "token-ledger-import-unrelated-ghi789");
+  const symlinkTarget = resolve(root, "symlink-target");
+  const linked = resolve(root, "token-ledger-import-999998-jkl012");
+  try {
+    await mkdir(orphan);
+    await mkdir(live);
+    await mkdir(unrelated);
+    await mkdir(symlinkTarget);
+    await writeFile(resolve(orphan, "usage.sqlite"), "orphan canary");
+    await writeFile(resolve(orphan, "usage.sqlite-wal"), "wal canary");
+    await writeFile(resolve(orphan, "usage.sqlite-shm"), "shm canary");
+    await writeFile(resolve(live, "usage.sqlite"), "live canary");
+    await writeFile(resolve(unrelated, "usage.sqlite"), "unrelated canary");
+    await writeFile(resolve(symlinkTarget, "canary"), "linked target canary");
+    await symlink(symlinkTarget, linked, "dir");
+
+    assert.equal(
+      await cleanupOrphanedUsageSpools({ tempDirectory: root }),
+      1,
+    );
+    assert.equal(existsSync(orphan), false);
+    assert.equal(existsSync(live), true);
+    assert.equal(existsSync(unrelated), true);
+    assert.equal(existsSync(linked), true);
+    assert.equal(
+      await readFile(resolve(symlinkTarget, "canary"), "utf8"),
+      "linked target canary",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("orphan spool cleanup rejects hardlinks and raced directory identities", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-spool-race-"));
+  const hardlinkTarget = resolve(root, "hardlink-target");
+  const hardlinkPath = resolve(root, "token-ledger-import-999997-mno345");
+  const raced = resolve(root, "token-ledger-import-999996-pqr678");
+  const relocated = resolve(root, "relocated-original");
+  try {
+    await writeFile(hardlinkTarget, "hardlink canary");
+    await link(hardlinkTarget, hardlinkPath);
+    await mkdir(raced);
+    await writeFile(resolve(raced, "usage.sqlite"), "original canary");
+
+    assert.equal(
+      await cleanupOrphanedUsageSpools({
+        tempDirectory: root,
+        beforeRevalidate: async (candidate) => {
+          if (candidate !== raced) return;
+          await rename(candidate, relocated);
+          await mkdir(candidate);
+          await writeFile(resolve(candidate, "replacement"), "replacement canary");
+        },
+      }),
+      0,
+    );
+    assert.equal(await readFile(hardlinkTarget, "utf8"), "hardlink canary");
+    assert.equal(await readFile(hardlinkPath, "utf8"), "hardlink canary");
+    assert.equal(
+      await readFile(resolve(relocated, "usage.sqlite"), "utf8"),
+      "original canary",
+    );
+    assert.equal(
+      await readFile(resolve(raced, "replacement"), "utf8"),
+      "replacement canary",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("temporary spool stores privacy-reduced source metadata", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-spool-privacy-"));
+  const threadId = "60606060-6060-4060-8060-606060606060";
+  const timestamp = "2026-08-23T10:00:00.000Z";
+  const cwdCanary = "/private/user-secret/repo";
+  const originCanary =
+    "https://private-user:private-password@example.test/org/repo.git";
+  const sourceCanary = "/private/source-canary";
+  let inspected = false;
+  try {
+    const rolloutDirectory = resolve(root, "sessions", "2026", "08", "23");
+    await mkdir(rolloutDirectory, { recursive: true });
+    await writeFile(
+      resolve(rolloutDirectory, `rollout-${threadId}.jsonl`),
+      serialize([
+        {
+          timestamp,
+          type: "session_meta",
+          payload: {
+            id: threadId,
+            cwd: cwdCanary,
+            source: sourceCanary,
+            git: { repository_url: originCanary },
+          },
+        },
+        ...rolloutRows([100]),
+      ]),
+    );
+
+    const snapshot = await collectUsage({
+      output: resolve(root, "snapshot.json"),
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+      faultInjector: ({ point }) => {
+        if (point !== "before-commit" || inspected) return;
+        const prefix = `token-ledger-import-${process.pid}-`;
+        const spoolDirectory = readdirSync(tmpdir()).find((entry) =>
+          entry.startsWith(prefix)
+        );
+        assert.ok(spoolDirectory);
+        const database = new DatabaseSync(
+          resolve(tmpdir(), spoolDirectory, "usage.sqlite"),
+          { readOnly: true },
+        );
+        try {
+          const token = database.prepare(`
+            SELECT cwd, git_origin AS gitOrigin, raw_source AS rawSource
+              FROM token_events
+          `).get();
+          const origin = database.prepare(`
+            SELECT cwd, git_origin AS gitOrigin, raw_source AS rawSource
+              FROM turn_origins
+          `).get();
+          const serialized = JSON.stringify({ token, origin });
+          assert.doesNotMatch(serialized, /user-secret|private-user/);
+          assert.doesNotMatch(serialized, /private-password|source-canary/);
+          assert.equal(token.cwd, "repo");
+          assert.equal(token.gitOrigin, "org/repo");
+          assert.equal(token.rawSource, "/");
+          inspected = true;
+        } finally {
+          database.close();
+        }
+      },
+    });
+
+    assert.equal(inspected, true);
+    assert.equal(snapshot.events[0].project, "org/repo");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("usage spool retains SQLite statements through long row iteration", async () => {
   const { root } = await createRolloutFixture(Array(10_000).fill(100));
@@ -2441,6 +2594,7 @@ test("pruning a queued rollout mid-scan retries the collection and removes the t
       .filter((entry) => entry.startsWith(spoolPrefix))
       .sort();
     let removed = false;
+    let privateSpoolObserved = false;
     const snapshot = await collectUsage(
       {
         output: resolve(root, "snapshot.json"),
@@ -2448,8 +2602,19 @@ test("pruning a queued rollout mid-scan retries the collection and removes the t
         includeArchived: false,
         since: null,
       },
-      ({ current }) => {
+      async ({ current }) => {
         if (current === 1 && !removed) {
+          const activeSpools = (await readdir(tmpdir()))
+            .filter((entry) => entry.startsWith(spoolPrefix))
+            .filter((entry) => !before.includes(entry));
+          assert.equal(activeSpools.length, 1);
+          const spoolDirectory = resolve(tmpdir(), activeSpools[0]);
+          const directoryStat = await stat(spoolDirectory);
+          const databaseStat = await stat(resolve(spoolDirectory, "usage.sqlite"));
+          assert.equal(directoryStat.mode & 0o777, 0o700);
+          assert.equal(databaseStat.mode & 0o777, 0o600);
+          assert.equal(Number(directoryStat.uid), process.getuid?.());
+          privateSpoolObserved = true;
           removed = true;
           if (existsSync(paths[4])) rmSync(paths[4]);
         }
@@ -2460,6 +2625,7 @@ test("pruning a queued rollout mid-scan retries the collection and removes the t
       .sort();
     assert.deepEqual(after, before);
     assert.equal(removed, true);
+    assert.equal(privateSpoolObserved, true);
     assert.equal(snapshot.coverage.filesScanned, 4);
   } finally {
     await rm(root, { recursive: true, force: true });
