@@ -472,6 +472,30 @@ test("atomic replacement preserves source identity and reconciles positions", as
   }
 });
 
+test("shorter atomic replacement removes unmatched source observations", async () => {
+  const fixture = await createFixture([100, 200]);
+  const replacement = resolve(fixture.root, "replacement.jsonl");
+  try {
+    await collectUsage(options(fixture));
+    await writeFile(replacement, serialize(rolloutRows([300])));
+    await rename(replacement, fixture.file);
+
+    const replaced = await collectUsage(options(fixture));
+    await rm(fixture.file);
+    const afterRemoval = await collectUsage(options(fixture));
+    const ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+
+    assert.equal(totalTokens(replaced), 300);
+    assert.equal(totalTokens(afterRemoval), 300);
+    assert.equal(ledger.usageRows.length, 1);
+    assert.equal(ledger.usageRows[0].totalTokens, 300);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("replacing one source does not rewrite a shared observation", async () => {
   const fixture = await createFixture([100]);
   const sharedFile = resolve(fixture.file, "..", SHARED_ROLLOUT_NAME);
@@ -1299,6 +1323,64 @@ test("active-only quota spans exclude archived observations", async () => {
       "2026-08-20T10:00:01.000Z",
     );
     assert.equal(activeOnlySinceArchivedSample.quotaObservations.length, 0);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("replacement reconciles shared quota and tool source ownership", async () => {
+  const fixture = await createFixture([100], { usedPercent: 37 });
+  const archivedDirectory = resolve(
+    fixture.root,
+    "archived_sessions",
+    "2026",
+    "08",
+    "20",
+  );
+  const archivedFile = resolve(archivedDirectory, ROLLOUT_NAME);
+  const replacement = resolve(fixture.root, "replacement.jsonl");
+  const sharedCall = {
+    timestamp: "2026-08-20T10:01:00.000Z",
+    type: "response_item",
+    payload: {
+      type: "function_call",
+      name: "shell",
+      call_id: "call-shared-replacement",
+    },
+  };
+  try {
+    await appendFile(fixture.file, serialize([sharedCall]));
+    await mkdir(archivedDirectory, { recursive: true });
+    await writeFile(archivedFile, await readFile(fixture.file));
+    await collectUsage(options(fixture));
+    await writeFile(replacement, serialize(rolloutRows([200])));
+    await rename(replacement, fixture.file);
+
+    const allSources = await collectUsage(options(fixture));
+    const activeOnly = await collectUsage(options(fixture, {
+      includeArchived: false,
+    }));
+    await rm(archivedFile);
+    const afterArchivedRemoval = await collectUsage(options(fixture));
+
+    assert.equal(totalTokens(allSources), 300);
+    assert.equal(allSources.quotaObservations.length, 1);
+    assert.equal(
+      allSources.events.reduce((sum, event) => sum + event.toolCalls, 0),
+      1,
+    );
+    assert.equal(totalTokens(activeOnly), 200);
+    assert.equal(activeOnly.quotaObservations.length, 0);
+    assert.equal(activeOnly.events[0].toolCalls, 0);
+    assert.equal(totalTokens(afterArchivedRemoval), 300);
+    assert.equal(afterArchivedRemoval.quotaObservations.length, 1);
+    assert.equal(
+      afterArchivedRemoval.events.reduce(
+        (sum, event) => sum + event.toolCalls,
+        0,
+      ),
+      1,
+    );
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
