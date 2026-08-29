@@ -68,7 +68,7 @@ reconstructable scope stops with `ERR_DURABLE_LEDGER_MIGRATION_SCOPE`. That
 database is left unchanged because guessing its scope could either double-count
 or erase usage.
 
-## Non-destructive recovery
+## Crash safety and non-destructive repair
 
 1. Stop concurrent Token Ledger refreshes and copy the ledger plus any SQLite
    `-wal` and `-shm` sidecars to a private backup location.
@@ -85,26 +85,27 @@ or erase usage.
    delete the ledger to make that warning disappear.
 
 Snapshot encoding is staged in a private temporary file. Source watermarks are
-validated twice before the SQLite commit and once immediately after it. Before
-the candidate transaction starts, Token Ledger checkpoints the WAL, stages a
-private baseline copy, syncs it, and then publishes and syncs a recovery marker.
-The marker records the ledger identity, schema, baseline revision, backup size,
-and recovery attempt. Coordinated readers that encounter an active marker
-recover the baseline under the same exclusive writer guard instead of exposing
-the committed-but-unvalidated candidate.
+validated twice before the SQLite commit and once immediately after it. The
+SQLite commit is the durable-ledger linearization point: it atomically exposes
+either the prior complete revision or the new complete revision. Coordinated
+readers use the same writer guard, so they never observe an in-progress
+transaction.
 
-After post-commit validation succeeds, Token Ledger removes and syncs the
-marker before publishing the staged report cache. A crash before that point is
-conservatively recovered to the baseline on the next read or refresh. A crash
-after marker removal can leave the cache behind a valid ledger, but revision
-validation marks it stale and rebuilds it rather than labeling it
-verified-current. Recovery first validates the private backup, then removes
-candidate WAL and shared-memory sidecars, syncs a copied restore file, and
-atomically replaces the main ledger. The marker and original backup remain in
-place until that replacement is validated, so recovery can be repeated after a
-second crash. Missing, corrupt, or mismatched recovery artifacts fail closed
-with `ERR_DURABLE_LEDGER_RECOVERY`; preserve them for diagnosis instead of
-deleting the marker or opening the candidate as authoritative.
+The staged report cache is published only after post-commit source validation
+succeeds. If sources changed after the final pre-commit check, the committed
+ledger revision remains a complete interpretation of the previously validated
+source state, the staged cache is discarded, and collection retries from the
+new source inventory. Repeated source changes can therefore leave the durable
+ledger ahead of the last published cache; the cache's revision mismatch marks
+it stale and forces a later refresh instead of labeling it verified-current.
+
+A crash before commit is rolled back by SQLite. A crash after commit but before
+cache publication leaves a readable complete ledger and the prior cache. The
+same revision check forces the next automatic cache load to refresh and
+converge. Before staging a replacement cache, Token Ledger also removes a
+same-destination temporary file only when it is an ordinary, single-link file
+owned by the current user and its recorded process is demonstrably gone. No
+ledger-sized baseline or restore copy is created during refresh.
 
 ## Repeatable refresh benchmark
 

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   appendFile,
   chmod,
@@ -22,6 +23,7 @@ import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
+import { loadSnapshot } from "../bin/token-ledger.mjs";
 import {
   collectUsage,
   sourceLocationForPath,
@@ -142,13 +144,15 @@ async function createFixture(
   const sessions = resolve(root, "sessions", "2026", "08", "20");
   const stateDirectory = resolve(root, "private-state");
   const output = resolve(root, "exports", "snapshot.json.gz");
+  const crashTempDirectory = resolve(root, "child-tmp");
   const file = resolve(sessions, ROLLOUT_NAME);
   await mkdir(sessions, { recursive: true });
+  await mkdir(crashTempDirectory);
   await writeFile(
     file,
     serialize(rolloutRows(totals, { usedPercent, baseTimestamp })),
   );
-  return { root, file, stateDirectory, output };
+  return { root, file, stateDirectory, output, crashTempDirectory };
 }
 
 function options(fixture, extra = {}) {
@@ -166,39 +170,32 @@ function totalTokens(snapshot) {
   return snapshot.events.reduce((sum, event) => sum + event.totalTokens, 0);
 }
 
-function recoveryArtifactPaths(ledgerPath) {
-  return {
-    marker: `${ledgerPath}.recovery.json`,
-    backup: `${ledgerPath}.recovery.sqlite`,
-  };
+async function replaceRollout(fixture, totals) {
+  const replacement = `${fixture.file}.replacement`;
+  await writeFile(replacement, serialize(rolloutRows(totals)));
+  await rename(replacement, fixture.file);
 }
 
-function crashCollection(fixture, point, directUpdate = false) {
+function crashCollection(fixture, point, { stageSnapshot = false } = {}) {
   const importerUrl = new URL(
     "../lib/token-ledger-importer.mjs",
     import.meta.url,
   ).href;
-  const ledgerUrl = new URL(
-    "../lib/token-ledger-ledger.mjs",
+  const snapshotUrl = new URL(
+    "../lib/token-ledger-snapshot.mjs",
     import.meta.url,
   ).href;
   const script = `
     import { collectUsage } from ${JSON.stringify(importerUrl)};
-    import { updateDurableLedger } from ${JSON.stringify(ledgerUrl)};
+    import { stagePrivateSnapshot } from ${JSON.stringify(snapshotUrl)};
     const selected = JSON.parse(process.env.TOKEN_LEDGER_CRASH_OPTIONS);
     const faultInjector = ({ point }) => {
         if (point === process.env.TOKEN_LEDGER_CRASH_POINT) process.exit(86);
     };
-    if (process.env.TOKEN_LEDGER_DIRECT_UPDATE === "1") {
-      await updateDurableLedger({
-        options: selected,
-        codexHome: selected.codexHome,
-        inventory: { sources: [] },
-        faultInjector,
-      });
-    } else {
-      await collectUsage({ ...selected, faultInjector });
-    }
+    const stageSnapshot = process.env.TOKEN_LEDGER_STAGE_SNAPSHOT === "1"
+      ? (candidate) => stagePrivateSnapshot(selected.output, candidate)
+      : undefined;
+    await collectUsage({ ...selected, faultInjector, stageSnapshot });
   `;
   const child = spawnSync(
     process.execPath,
@@ -207,9 +204,12 @@ function crashCollection(fixture, point, directUpdate = false) {
       encoding: "utf8",
       env: {
         ...process.env,
+        TMPDIR: fixture.crashTempDirectory,
+        TMP: fixture.crashTempDirectory,
+        TEMP: fixture.crashTempDirectory,
         TOKEN_LEDGER_CRASH_OPTIONS: JSON.stringify(options(fixture)),
         TOKEN_LEDGER_CRASH_POINT: point,
-        TOKEN_LEDGER_DIRECT_UPDATE: directUpdate ? "1" : "0",
+        TOKEN_LEDGER_STAGE_SNAPSHOT: stageSnapshot ? "1" : "0",
       },
       timeout: 30_000,
     },
@@ -219,6 +219,14 @@ function crashCollection(fixture, point, directUpdate = false) {
     86,
     `crash child did not stop at ${point}: ${child.stderr || child.stdout}`,
   );
+  return child;
+}
+
+function snapshotDestinationHash(path) {
+  return createHash("sha256")
+    .update(resolve(path))
+    .digest("hex")
+    .slice(0, 16);
 }
 
 function shellCall(timestamp, callId) {
@@ -1761,7 +1769,7 @@ test("a failed persistence transaction leaves the last complete ledger usable", 
   }
 });
 
-test("overlapping ledger writers cannot commit through the rollback window", async () => {
+test("overlapping ledger writers serialize on the writer guard", async () => {
   const fixture = await createFixture([100]);
   let writerGuard;
   try {
@@ -1804,7 +1812,7 @@ test("overlapping ledger writers cannot commit through the rollback window", asy
   }
 });
 
-test("ledger readers exclude rollback restoration until they close", async () => {
+test("ledger readers block writers until they close", async () => {
   const fixture = await createFixture([100]);
   let readerGuard;
   try {
@@ -1883,7 +1891,7 @@ test("source changes before commit roll back transient observations", async () =
   }
 });
 
-test("source changes after validation restore the prior ledger before retry", async () => {
+test("source changes after validation roll back the candidate before retry", async () => {
   const fixture = await createFixture([100]);
   let changed = false;
   try {
@@ -1916,11 +1924,10 @@ test("source changes after validation restore the prior ledger before retry", as
   }
 });
 
-test("source changes after final validation restore the committed attempt", async () => {
+test("a post-commit source race keeps the complete revision and converges", async () => {
   const fixture = await createFixture([100]);
-  let changed = false;
-  let observedCommittedCandidate = false;
-  let observedRestoredBaseline = false;
+  let commitCount = 0;
+  let observedForwardBaseline = false;
   try {
     const initial = await collectUsage(options(fixture));
     await writePrivateSnapshot(fixture.output, initial);
@@ -1935,40 +1942,8 @@ test("source changes after final validation restore the committed attempt", asyn
       faultInjector: async ({ point, path }) => {
         if (
           point === "before-commit" &&
-          changed &&
-          observedCommittedCandidate &&
-          !observedRestoredBaseline
-        ) {
-          const database = new DatabaseSync(path, { readOnly: true });
-          try {
-            assert.equal(
-              Number(database.prepare(
-                "SELECT value FROM ledger_meta WHERE key = 'revision'",
-              ).get().value),
-              1,
-            );
-            assert.equal(
-              database.prepare(
-                "SELECT SUM(total_tokens) AS total FROM usage_observations",
-              ).get().total,
-              100,
-            );
-          } finally {
-            database.close();
-          }
-          const storedDuringRetry = await readPrivateSnapshot(fixture.output);
-          assert.equal(totalTokens(storedDuringRetry), 100);
-          assert.equal(storedDuringRetry.metadata.durableLedger.revision, 1);
-          observedRestoredBaseline = true;
-        }
-        if (point === "after-final-validation" && !changed) {
-          changed = true;
-          await writeFile(fixture.file, serialize(rolloutRows([100])));
-        }
-        if (
-          point === "after-sqlite-commit" &&
-          changed &&
-          !observedCommittedCandidate
+          commitCount === 1 &&
+          !observedForwardBaseline
         ) {
           const database = new DatabaseSync(path, { readOnly: true });
           try {
@@ -1987,7 +1962,16 @@ test("source changes after final validation restore the committed attempt", asyn
           } finally {
             database.close();
           }
-          observedCommittedCandidate = true;
+          const storedDuringRetry = await readPrivateSnapshot(fixture.output);
+          assert.equal(totalTokens(storedDuringRetry), 100);
+          assert.equal(storedDuringRetry.metadata.durableLedger.revision, 1);
+          observedForwardBaseline = true;
+        }
+        if (point === "after-sqlite-commit") {
+          commitCount += 1;
+          if (commitCount === 1) {
+            await replaceRollout(fixture, [400, 500]);
+          }
         }
       },
     }));
@@ -1997,97 +1981,83 @@ test("source changes after final validation restore the committed attempt", asyn
     const ledger = await readDurableLedger(ledgerPath);
     const stored = await readPrivateSnapshot(fixture.output);
 
-    assert.equal(changed, true);
-    assert.equal(observedCommittedCandidate, true);
-    assert.equal(observedRestoredBaseline, true);
-    assert.equal(totalTokens(snapshot), 100);
-    assert.equal(totalTokens(stored), 100);
-    assert.equal(snapshot.metadata.durableLedger.revision, 2);
-    assert.equal(stored.metadata.durableLedger.revision, 2);
-    assert.equal(await readDurableLedgerRevision(ledgerPath), 2);
-    assert.deepEqual(ledger.usageRows.map((row) => row.totalTokens), [100]);
+    assert.equal(commitCount, 2);
+    assert.equal(observedForwardBaseline, true);
+    assert.equal(totalTokens(snapshot), 900);
+    assert.equal(totalTokens(stored), 900);
+    assert.equal(snapshot.metadata.durableLedger.revision, 3);
+    assert.equal(stored.metadata.durableLedger.revision, 3);
+    assert.equal(await readDurableLedgerRevision(ledgerPath), 3);
+    assert.deepEqual(ledger.usageRows.map((row) => row.totalTokens), [400, 500]);
     assert.deepEqual(
-      (await readdir(fixture.stateDirectory)).filter((name) =>
-        name.startsWith(".token-ledger-rollback-")
+      (await readdir(dirname(fixture.output))).filter((name) =>
+        name.startsWith(".token-ledger-")
       ),
       [],
     );
-
-    await rm(fixture.file);
-    const afterRemoval = await collectUsage(options(fixture));
-    assert.equal(totalTokens(afterRemoval), 100);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
 
-test("a renamed recovery marker retains its backup if activation fails", async () => {
+test("exhausted post-commit races keep a readable ledger and old cache", async () => {
   const fixture = await createFixture([100]);
+  let commitCount = 0;
   try {
-    await collectUsage(options(fixture));
+    const initial = await collectUsage(options(fixture));
+    await writePrivateSnapshot(fixture.output, initial);
     const ledgerPath = resolveDurableLedgerPath({
       stateDirectory: fixture.stateDirectory,
     });
-    const artifacts = recoveryArtifactPaths(ledgerPath);
-    await appendFile(
-      fixture.file,
-      serialize(rolloutRows([200], { offset: 1 })),
-    );
+    await replaceRollout(fixture, [100, 200]);
+    const replacements = [
+      [300, 400],
+      [500, 600],
+      [700, 800],
+    ];
 
     await assert.rejects(
       () => collectUsage(options(fixture, {
-        faultInjector: ({ point }) => {
-          if (point === "after-recovery-marker-rename") {
-            throw new Error("injected marker activation failure");
-          }
-        },
-      })),
-      /injected marker activation failure/,
-    );
-    assert.equal((await stat(artifacts.marker)).mode & 0o777, 0o600);
-    assert.equal((await stat(artifacts.backup)).mode & 0o777, 0o600);
-
-    const recovered = await readDurableLedger(ledgerPath);
-    assert.equal(recovered.revision, 1);
-    assert.deepEqual(recovered.usageRows.map((row) => row.totalTokens), [100]);
-    await assert.rejects(stat(artifacts.marker), { code: "ENOENT" });
-    await assert.rejects(stat(artifacts.backup), { code: "ENOENT" });
-  } finally {
-    await rm(fixture.root, { recursive: true, force: true });
-  }
-});
-
-test("recovery staging refuses a raced symlink without clobbering its target", async () => {
-  const fixture = await createFixture([100]);
-  const ledgerPath = resolveDurableLedgerPath({
-    stateDirectory: fixture.stateDirectory,
-  });
-  const backupTemporary = `${ledgerPath}.recovery.prepare`;
-  const victim = resolve(fixture.root, "symlink-victim.txt");
-  try {
-    await writeFile(victim, "keep this content\n", { mode: 0o600 });
-    await assert.rejects(
-      () => collectUsage(options(fixture, {
+        stageSnapshot: (candidate) =>
+          stagePrivateSnapshot(fixture.output, candidate),
         faultInjector: async ({ point }) => {
-          if (point === "before-recovery-backup-copy") {
-            await symlink(victim, backupTemporary);
+          if (point === "after-sqlite-commit") {
+            await replaceRollout(fixture, replacements[commitCount]);
+            commitCount += 1;
           }
         },
       })),
-      (error) => error?.code === "EEXIST",
+      (error) =>
+        error?.code === "ERR_SOURCE_CHANGED_DURING_COLLECTION" &&
+        /no snapshot was published/.test(error.message),
     );
-    assert.equal(await readFile(victim, "utf8"), "keep this content\n");
-    await assert.rejects(lstat(backupTemporary), { code: "ENOENT" });
+    const ledger = await readDurableLedger(ledgerPath);
+    const stored = await readPrivateSnapshot(fixture.output);
 
-    const recovered = await collectUsage(options(fixture));
-    assert.equal(totalTokens(recovered), 100);
-    assert.equal(await readDurableLedgerRevision(ledgerPath), 1);
+    assert.equal(commitCount, 3);
+    assert.equal(ledger.revision, 4);
+    assert.equal(
+      ledger.usageRows.reduce((sum, row) => sum + row.totalTokens, 0),
+      1_100,
+    );
+    assert.equal(stored.metadata.durableLedger.revision, 1);
+    assert.equal(totalTokens(stored), 100);
+    assert.notEqual(
+      stored.metadata.durableLedger.revision,
+      await readDurableLedgerRevision(ledgerPath),
+    );
+    assert.deepEqual(
+      (await readdir(dirname(fixture.output))).filter((name) =>
+        name.startsWith(".token-ledger-")
+      ),
+      [],
+    );
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
 
-test("main-ledger aliases fail closed before recovery can split revisions", async () => {
+test("main-ledger aliases fail closed before opening transactions", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-main-path-"));
   const target = resolve(root, "target.sqlite");
   const symbolicAlias = resolve(root, "symbolic.sqlite");
@@ -2371,120 +2341,239 @@ test("a symlinked parent keeps an ordinary single-link WAL ledger supported", as
     } finally {
       database.close();
     }
-    await assert.rejects(stat(`${linkedLedgerPath}.recovery.json`), {
-      code: "ENOENT",
-    });
-    await assert.rejects(stat(`${linkedLedgerPath}.recovery.sqlite`), {
-      code: "ENOENT",
-    });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("direct reads recover process crashes before and after commit", async () => {
+test("a process crash before commit rolls back the candidate", async () => {
   const fixture = await createFixture([100]);
   try {
-    await collectUsage(options(fixture));
+    const initial = await collectUsage(options(fixture));
+    await writePrivateSnapshot(fixture.output, initial);
     const ledgerPath = resolveDurableLedgerPath({
       stateDirectory: fixture.stateDirectory,
     });
-    const artifacts = recoveryArtifactPaths(ledgerPath);
     await appendFile(
       fixture.file,
       serialize(rolloutRows([200], { offset: 1 })),
     );
 
-    crashCollection(fixture, "after-recovery-marker");
-    assert.equal((await stat(artifacts.marker)).mode & 0o777, 0o600);
-    assert.equal((await stat(artifacts.backup)).mode & 0o777, 0o600);
+    crashCollection(fixture, "before-commit");
+    const ledger = await readDurableLedger(ledgerPath);
+    const stored = await readPrivateSnapshot(fixture.output);
 
-    const recovered = await readDurableLedger(ledgerPath);
-    assert.equal(recovered.revision, 1);
-    assert.deepEqual(recovered.usageRows.map((row) => row.totalTokens), [100]);
-    await assert.rejects(stat(artifacts.marker), { code: "ENOENT" });
-    await assert.rejects(stat(artifacts.backup), { code: "ENOENT" });
-
-    crashCollection(fixture, "after-sqlite-commit");
-    const recoveredAfterCommit = await readDurableLedger(ledgerPath);
-    assert.equal(recoveredAfterCommit.revision, 1);
-    assert.deepEqual(
-      recoveredAfterCommit.usageRows.map((row) => row.totalTokens),
-      [100],
-    );
-    await assert.rejects(stat(artifacts.marker), { code: "ENOENT" });
-    await assert.rejects(stat(artifacts.backup), { code: "ENOENT" });
+    assert.equal(ledger.revision, 1);
+    assert.deepEqual(ledger.usageRows.map((row) => row.totalTokens), [100]);
+    assert.equal(stored.metadata.durableLedger.revision, 1);
+    assert.equal(totalTokens(stored), 100);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
 
-test("recovery is repeatable after commit and a crash during restore", async () => {
+test("a process crash after commit leaves a complete ledger and stale cache", async () => {
   const fixture = await createFixture([100]);
   try {
-    await collectUsage(options(fixture));
+    fixture.stateDirectory = resolve(fixture.root, ".token-ledger");
+    fixture.output = resolve(
+      fixture.stateDirectory,
+      "token-ledger-snapshot-v3.json.gz",
+    );
+    const initial = await collectUsage(options(fixture));
+    await writePrivateSnapshot(fixture.output, initial);
     const ledgerPath = resolveDurableLedgerPath({
       stateDirectory: fixture.stateDirectory,
     });
-    const artifacts = recoveryArtifactPaths(ledgerPath);
     await appendFile(
       fixture.file,
       serialize(rolloutRows([200], { offset: 1 })),
     );
 
-    crashCollection(fixture, "after-sqlite-commit");
-    crashCollection(fixture, "after-recovery-ledger-replace", true);
-    await stat(artifacts.marker);
-    await stat(artifacts.backup);
+    const crashed = crashCollection(
+      fixture,
+      "after-sqlite-commit",
+      { stageSnapshot: true },
+    );
+    const committed = await readDurableLedger(ledgerPath);
+    const oldCache = await readPrivateSnapshot(fixture.output);
+    assert.equal(committed.revision, 2);
+    assert.equal(
+      committed.usageRows.reduce((sum, row) => sum + row.totalTokens, 0),
+      300,
+    );
+    assert.equal(oldCache.metadata.durableLedger.revision, 1);
 
-    const recovered = await readDurableLedger(ledgerPath);
-    assert.equal(recovered.revision, 1);
-    assert.deepEqual(recovered.usageRows.map((row) => row.totalTokens), [100]);
-    const refreshed = await collectUsage(options(fixture));
-    assert.equal(totalTokens(refreshed), 300);
-    assert.equal(await readDurableLedgerRevision(ledgerPath), 2);
-    await assert.rejects(stat(artifacts.marker), { code: "ENOENT" });
-    await assert.rejects(stat(artifacts.backup), { code: "ENOENT" });
-  } finally {
-    await rm(fixture.root, { recursive: true, force: true });
-  }
-});
+    const destinationHash = snapshotDestinationHash(fixture.output);
+    const orphaned = (await readdir(fixture.stateDirectory)).filter((name) =>
+      name.endsWith(".tmp")
+    );
+    assert.equal(orphaned.length, 1);
+    assert.match(
+      orphaned[0],
+      new RegExp(`^\\.token-ledger-${destinationHash}-${crashed.pid}-`),
+    );
+    const orphanPath = resolve(fixture.stateDirectory, orphaned[0]);
+    const otherDestinationCanary = resolve(
+      fixture.stateDirectory,
+      `.token-ledger-${snapshotDestinationHash(resolve(fixture.root, "other.json.gz"))}-${crashed.pid}-00000000-0000-4000-8000-000000000001.tmp`,
+    );
+    const liveCanary = resolve(
+      fixture.stateDirectory,
+      `.token-ledger-${destinationHash}-${process.pid}-00000000-0000-4000-8000-000000000002.tmp`,
+    );
+    const unrelatedCanary = resolve(
+      fixture.stateDirectory,
+      ".token-ledger-unrelated.tmp",
+    );
+    await writeFile(otherDestinationCanary, "different destination\n");
+    await writeFile(liveCanary, "live owner\n");
+    await writeFile(unrelatedCanary, "unrelated\n");
 
-test("missing, corrupt, or linked recovery backups fail closed", async () => {
-  for (const damage of ["missing", "corrupt", "symlink"]) {
-    const fixture = await createFixture([100]);
+    const originalGetuid = process.getuid;
     try {
-      await collectUsage(options(fixture));
-      const ledgerPath = resolveDurableLedgerPath({
-        stateDirectory: fixture.stateDirectory,
-      });
-      const artifacts = recoveryArtifactPaths(ledgerPath);
-      await appendFile(
-        fixture.file,
-        serialize(rolloutRows([200], { offset: 1 })),
+      process.getuid = () => originalGetuid() + 1;
+      const ownershipProbe = await stagePrivateSnapshot(
+        fixture.output,
+        oldCache,
       );
-      crashCollection(fixture, "after-sqlite-commit");
-      if (damage === "missing") await rm(artifacts.backup);
-      else if (damage === "corrupt") {
-        await writeFile(artifacts.backup, "not a SQLite recovery backup");
-      } else {
-        await rm(artifacts.backup);
-        await symlink(ledgerPath, artifacts.backup);
-      }
-
-      await assert.rejects(
-        () => readDurableLedger(ledgerPath),
-        (error) => error?.code === "ERR_DURABLE_LEDGER_RECOVERY",
-      );
-      assert.equal(await readDurableLedgerRevision(ledgerPath), null);
-      await stat(artifacts.marker);
+      await ownershipProbe.discard();
+      await stat(orphanPath);
     } finally {
-      await rm(fixture.root, { recursive: true, force: true });
+      process.getuid = originalGetuid;
     }
+
+    const refreshed = await loadSnapshot({
+      input: fixture.output,
+      codexHome: fixture.root,
+      includeArchived: true,
+      since: null,
+      refresh: false,
+      inputExplicit: false,
+      autoRefresh: true,
+    });
+    assert.equal(refreshed.sourceStatus, "verified-current");
+    assert.equal(totalTokens(refreshed.snapshot), 300);
+    assert.equal(refreshed.snapshot.metadata.durableLedger.revision, 3);
+    assert.equal(await readDurableLedgerRevision(ledgerPath), 3);
+    await assert.rejects(stat(orphanPath), { code: "ENOENT" });
+    assert.equal(
+      await readFile(otherDestinationCanary, "utf8"),
+      "different destination\n",
+    );
+    assert.equal(await readFile(liveCanary, "utf8"), "live owner\n");
+    assert.equal(await readFile(unrelatedCanary, "utf8"), "unrelated\n");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
   }
 });
 
-test("staged cleanup errors do not mask committed-attempt failures", async () => {
+test("snapshot orphan cleanup preserves non-regular and linked canaries", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-orphan-safety-"));
+  const output = resolve(root, "snapshot.json.gz");
+  const victim = resolve(root, "victim.txt");
+  const deadOwner = spawnSync(process.execPath, ["--eval", ""], {
+    encoding: "utf8",
+  });
+  const candidate = (suffix) => resolve(
+    root,
+    `.token-ledger-${snapshotDestinationHash(output)}-${deadOwner.pid}-${suffix}.tmp`,
+  );
+  const ordinary = candidate("00000000-0000-4000-8000-000000000010");
+  const symbolic = candidate("00000000-0000-4000-8000-000000000011");
+  const hard = candidate("00000000-0000-4000-8000-000000000012");
+  const directory = candidate("00000000-0000-4000-8000-000000000013");
+  try {
+    assert.equal(deadOwner.status, 0);
+    assert.throws(
+      () => process.kill(deadOwner.pid, 0),
+      (error) => error?.code === "ESRCH",
+    );
+    await writeFile(victim, "preserve victim bytes\n", { mode: 0o640 });
+    await writeFile(ordinary, "remove orphan\n", { mode: 0o600 });
+    await symlink(victim, symbolic);
+    await link(victim, hard);
+    await mkdir(directory);
+    const victimBefore = await stat(victim);
+
+    const staged = await stagePrivateSnapshot(output, { events: [] });
+    await staged.discard();
+
+    await assert.rejects(stat(ordinary), { code: "ENOENT" });
+    assert.equal((await lstat(symbolic)).isSymbolicLink(), true);
+    assert.equal((await lstat(hard)).isFile(), true);
+    assert.equal((await lstat(directory)).isDirectory(), true);
+    const victimAfter = await stat(victim);
+    assert.equal(await readFile(victim, "utf8"), "preserve victim bytes\n");
+    assert.equal(victimAfter.mode & 0o777, victimBefore.mode & 0o777);
+    assert.equal(victimAfter.nlink, victimBefore.nlink);
+    assert.equal(victimAfter.nlink, 2);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("refresh creates no recovery artifacts or ledger-sized copy", async () => {
+  const fixture = await createFixture([100]);
+  const ledgerPath = resolveDurableLedgerPath({
+    stateDirectory: fixture.stateDirectory,
+  });
+  let database;
+  let observedCommittedFiles = false;
+  try {
+    await collectUsage(options(fixture));
+    database = new DatabaseSync(ledgerPath);
+    database.exec(`
+      CREATE TABLE refresh_padding (payload BLOB NOT NULL);
+      INSERT INTO refresh_padding VALUES (zeroblob(4194304));
+      PRAGMA wal_checkpoint(TRUNCATE);
+    `);
+    database.close();
+    database = null;
+    const ledgerSize = (await stat(ledgerPath)).size;
+    assert.ok(ledgerSize >= 4 * 1_024 * 1_024);
+
+    await appendFile(
+      fixture.file,
+      serialize(rolloutRows([200], { offset: 1 })),
+    );
+    const refreshed = await collectUsage(options(fixture, {
+      faultInjector: async ({ point }) => {
+        if (point !== "after-sqlite-commit") return;
+        const expected = new Set([
+          DURABLE_LEDGER_FILENAME,
+          `${DURABLE_LEDGER_FILENAME}-shm`,
+          `${DURABLE_LEDGER_FILENAME}-wal`,
+          `${DURABLE_LEDGER_FILENAME}.writer-lock.sqlite`,
+          `${DURABLE_LEDGER_FILENAME}.writer-lock.sqlite-shm`,
+          `${DURABLE_LEDGER_FILENAME}.writer-lock.sqlite-wal`,
+        ]);
+        const unexpected = (await readdir(fixture.stateDirectory))
+          .filter((name) => !expected.has(name));
+        assert.deepEqual(unexpected, []);
+        observedCommittedFiles = true;
+      },
+    }));
+
+    assert.equal(observedCommittedFiles, true);
+    assert.equal(totalTokens(refreshed), 300);
+    assert.equal(
+      (await readdir(fixture.stateDirectory)).some((name) =>
+        name.includes(".recovery.")
+      ),
+      false,
+    );
+  } finally {
+    try {
+      database?.close();
+    } catch {
+      // Fixture cleanup remains authoritative.
+    }
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("staged cleanup errors do not mask post-commit failures", async () => {
   const fixture = await createFixture([100]);
   try {
     await collectUsage(options(fixture));
@@ -2520,8 +2609,11 @@ test("staged cleanup errors do not mask committed-attempt failures", async () =>
     const ledger = await readDurableLedger(resolveDurableLedgerPath({
       stateDirectory: fixture.stateDirectory,
     }));
-    assert.equal(ledger.revision, 1);
-    assert.deepEqual(ledger.usageRows.map((row) => row.totalTokens), [100]);
+    assert.equal(ledger.revision, 2);
+    assert.deepEqual(
+      ledger.usageRows.map((row) => row.totalTokens),
+      [100, 200],
+    );
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }

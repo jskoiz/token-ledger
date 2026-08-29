@@ -236,7 +236,7 @@ safe filename label, not an absolute input or source path. When a PNG or report
 is written, the explicit output path is reported so you can find the file. The
 CLI makes no network requests.
 
-For schema health signals, non-destructive recovery guidance, cache/ledger
+For schema health signals, crash-safety guidance, cache/ledger
 coherence, and the repeatable scaling benchmark, see
 [Durable ledger operations](docs/durable-ledger-operations.md).
 
