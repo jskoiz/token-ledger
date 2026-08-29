@@ -2148,6 +2148,176 @@ test("main-ledger aliases fail closed before recovery can split revisions", asyn
   }
 });
 
+test("writer-guard aliases fail closed without mutating their targets", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-guard-path-"));
+  const ledgerPath = resolve(root, "ledger.sqlite");
+  const guardPath = `${ledgerPath}.writer-lock.sqlite`;
+  const victimPath = resolve(root, "victim.sqlite");
+  const update = () => updateDurableLedger({
+    options: { ledgerPath },
+    codexHome: root,
+    inventory: { files: [], lifecycleFiles: [] },
+  });
+  const assertVictimUnchanged = async () => {
+    const victimStat = await stat(victimPath);
+    assert.equal(victimStat.mode & 0o777, 0o644);
+    const database = new DatabaseSync(victimPath, { readOnly: true });
+    try {
+      assert.deepEqual(
+        database.prepare(`
+          SELECT name FROM sqlite_master
+           WHERE type = 'table'
+           ORDER BY name
+        `).all().map((row) => row.name),
+        ["protected"],
+      );
+      assert.equal(
+        database.prepare("SELECT value FROM protected").get().value,
+        "unchanged",
+      );
+    } finally {
+      database.close();
+    }
+  };
+  let victimDatabase;
+  try {
+    await update();
+    assert.equal(await readDurableLedgerRevision(ledgerPath), 1);
+    await rm(guardPath);
+    victimDatabase = new DatabaseSync(victimPath);
+    victimDatabase.exec(`
+      CREATE TABLE protected(value TEXT);
+      INSERT INTO protected VALUES ('unchanged');
+    `);
+    victimDatabase.close();
+    victimDatabase = null;
+    await chmod(victimPath, 0o644);
+
+    await symlink(victimPath, guardPath);
+    await assert.rejects(
+      update,
+      (error) => error?.code === "ERR_DURABLE_LEDGER_PATH",
+    );
+    await assert.rejects(
+      () => readDurableLedgerRevision(ledgerPath),
+      (error) => error?.code === "ERR_DURABLE_LEDGER_PATH",
+    );
+    assert.equal((await lstat(guardPath)).isSymbolicLink(), true);
+    await assertVictimUnchanged();
+    await rm(guardPath);
+
+    await link(victimPath, guardPath);
+    await assert.rejects(
+      update,
+      (error) => error?.code === "ERR_DURABLE_LEDGER_PATH",
+    );
+    await assert.rejects(
+      () => readDurableLedgerRevision(ledgerPath),
+      (error) => error?.code === "ERR_DURABLE_LEDGER_PATH",
+    );
+    assert.equal((await stat(victimPath)).nlink, 2);
+    await assertVictimUnchanged();
+    await rm(guardPath);
+
+    await mkdir(guardPath);
+    await assert.rejects(
+      update,
+      (error) => error?.code === "ERR_DURABLE_LEDGER_PATH",
+    );
+    await assert.rejects(
+      () => readDurableLedgerRevision(ledgerPath),
+      (error) => error?.code === "ERR_DURABLE_LEDGER_PATH",
+    );
+    await assertVictimUnchanged();
+    await rm(guardPath, { recursive: true });
+
+    await update();
+    assert.equal(await readDurableLedgerRevision(ledgerPath), 2);
+    const guardStat = await lstat(guardPath);
+    assert.equal(guardStat.isFile(), true);
+    assert.equal(guardStat.nlink, 1);
+    assert.equal(guardStat.mode & 0o777, 0o600);
+  } finally {
+    victimDatabase?.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("SQLite sidecar aliases fail closed without touching victims", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-sidecar-path-"));
+  const ledgerPath = resolve(root, "ledger.sqlite");
+  const update = () => updateDurableLedger({
+    options: { ledgerPath },
+    codexHome: root,
+    inventory: { files: [], lifecycleFiles: [] },
+  });
+  try {
+    await update();
+    assert.equal(await readDurableLedgerRevision(ledgerPath), 1);
+    const checkpoint = new DatabaseSync(ledgerPath);
+    try {
+      checkpoint.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get();
+    } finally {
+      checkpoint.close();
+    }
+    await rm(`${ledgerPath}-wal`, { force: true });
+    await rm(`${ledgerPath}-shm`, { force: true });
+    for (const suffix of ["-journal", "-wal", "-shm"]) {
+      for (const kind of ["symlink", "hardlink", "directory"]) {
+        const sidecarPath = `${ledgerPath}${suffix}`;
+        const victimPath = resolve(
+          root,
+          `victim-${suffix.slice(1)}-${kind}.bin`,
+        );
+        const original = Buffer.alloc(65_536, suffix.charCodeAt(1));
+        if (kind === "directory") {
+          await mkdir(sidecarPath);
+        } else {
+          await writeFile(victimPath, original, { mode: 0o644 });
+          await chmod(victimPath, 0o644);
+          if (kind === "symlink") await symlink(victimPath, sidecarPath);
+          else await link(victimPath, sidecarPath);
+        }
+
+        await assert.rejects(
+          update,
+          (error) => error?.code === "ERR_DURABLE_LEDGER_PATH",
+          `${suffix} ${kind}`,
+        );
+        await assert.rejects(
+          () => readDurableLedgerRevision(ledgerPath),
+          (error) => error?.code === "ERR_DURABLE_LEDGER_PATH",
+          `${suffix} ${kind} read`,
+        );
+        if (kind !== "directory") {
+          assert.deepEqual(await readFile(victimPath), original);
+          const victimStat = await stat(victimPath);
+          assert.equal(victimStat.mode & 0o777, 0o644);
+          assert.equal(victimStat.nlink, kind === "hardlink" ? 2 : 1);
+        }
+        await rm(sidecarPath, {
+          force: true,
+          recursive: kind === "directory",
+        });
+      }
+    }
+
+    await update();
+    assert.equal(await readDurableLedgerRevision(ledgerPath), 2);
+    const database = new DatabaseSync(ledgerPath, { readOnly: true });
+    try {
+      assert.equal(
+        database.prepare("PRAGMA journal_mode").get().journal_mode,
+        "wal",
+      );
+    } finally {
+      database.close();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("non-regular main-ledger paths fail before creating sidecars", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-main-nonregular-"));
   const ledgerPath = resolve(root, "ledger-directory");

@@ -225,6 +225,9 @@ files are private (`0600`). An explicit `--input` reads only that deliberate
 snapshot input; it does not use the default durable ledger as a hidden source.
 When a custom output or ledger location is supplied, existing parent directory
 permissions are left unchanged; only the ledger sidecar files receive `0600`.
+That custom parent must not be writable by untrusted users because its SQLite
+database, lock, and transient sidecar names remain part of the local storage
+trust boundary.
 
 The collector does not export message bodies, reasoning text, tool arguments or
 results, credentials, file contents, or full local paths. Display titles may
