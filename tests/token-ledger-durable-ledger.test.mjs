@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   appendFile,
   chmod,
+  copyFile,
   mkdir,
   mkdtemp,
   readFile,
@@ -9,6 +10,7 @@ import {
   rename,
   stat,
   symlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -184,6 +186,90 @@ test("usage and quota survive rollout source disappearance", async () => {
     assert.equal(ledger.usageRows.length, 1);
     assert.equal(ledger.quotaRows.length, 1);
     assert.equal(ledger.sourceSummary.states[0].status, "tombstoned");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("first active-only refresh excludes a rollout moved into the archive", async () => {
+  const fixture = await createFixture([100], { usedPercent: 37 });
+  const archivedDirectory = resolve(
+    fixture.root,
+    "archived_sessions",
+    "2026",
+    "08",
+    "20",
+  );
+  const archivedFile = resolve(archivedDirectory, ROLLOUT_NAME);
+  try {
+    await appendFile(fixture.file, serialize([{
+      timestamp: "2026-08-20T10:01:00.000Z",
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        name: "shell",
+        call_id: "call-before-archive",
+      },
+    }]));
+    const initial = await collectUsage(options(fixture));
+    assert.equal(initial.coverage.observedTokens, 100);
+    assert.equal(initial.quotaObservations.length, 1);
+    assert.equal(initial.events[0].toolCalls, 1);
+
+    await mkdir(archivedDirectory, { recursive: true });
+    await rename(fixture.file, archivedFile);
+    const activeOnly = await collectUsage(options(fixture, {
+      includeArchived: false,
+    }));
+    const ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      { includeArchived: false },
+    );
+
+    assert.equal(totalTokens(activeOnly), 0);
+    assert.equal(activeOnly.quotaObservations.length, 0);
+    assert.equal(activeOnly.events.length, 0);
+    assert.equal(ledger.usageRows.length, 0);
+    assert.equal(ledger.quotaRows.length, 0);
+    assert.equal(ledger.toolRows.length, 0);
+    assert.equal(ledger.sourceSummary.states.length, 1);
+    assert.equal(ledger.sourceSummary.states[0].location, "archived");
+    assert.equal(ledger.sourceSummary.states[0].status, "archived");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("active-only lifecycle keeps simultaneous active and archived copies distinct", async () => {
+  const fixture = await createFixture([100]);
+  const archivedDirectory = resolve(
+    fixture.root,
+    "archived_sessions",
+    "2026",
+    "08",
+    "20",
+  );
+  const archivedFile = resolve(archivedDirectory, ROLLOUT_NAME);
+  try {
+    await collectUsage(options(fixture));
+    await mkdir(archivedDirectory, { recursive: true });
+    await copyFile(fixture.file, archivedFile);
+
+    const activeOnly = await collectUsage(options(fixture, {
+      includeArchived: false,
+    }));
+    const allSources = await collectUsage(options(fixture));
+    const ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+
+    assert.equal(totalTokens(activeOnly), 100);
+    assert.equal(totalTokens(allSources), 100);
+    assert.equal(ledger.sourceSummary.states.length, 2);
+    assert.deepEqual(
+      ledger.sourceSummary.states.map((state) => state.location).sort(),
+      ["active", "archived"],
+    );
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -519,9 +605,38 @@ test("larger same-inode overwrite removes unmatched source observations", async 
     const replaced = await collectUsage(options(fixture));
     await rm(fixture.file);
     const afterRemoval = await collectUsage(options(fixture));
+    const ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
 
     assert.equal(totalTokens(replaced), 300);
     assert.equal(totalTokens(afterRemoval), 300);
+    assert.equal(replaced.coverage.sourceIncomplete, true);
+    assert.equal(replaced.coverage.sourceStates.changed, 1);
+    assert.equal(ledger.sourceSummary.states[0].changeState, "replaced");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("metadata-only touches with identical content remain stable", async () => {
+  const fixture = await createFixture([100]);
+  try {
+    await collectUsage(options(fixture));
+    const ledgerPath = resolveDurableLedgerPath({
+      stateDirectory: fixture.stateDirectory,
+    });
+    const touchedAt = new Date(Date.now() + 2_000);
+    await utimes(fixture.file, touchedAt, touchedAt);
+
+    const touched = await collectUsage(options(fixture));
+    const ledger = await readDurableLedger(ledgerPath);
+
+    assert.equal(totalTokens(touched), 100);
+    assert.equal(touched.coverage.sourceIncomplete, false);
+    assert.equal(touched.coverage.sourceStates.changed, 0);
+    assert.equal(ledger.sourceSummary.states[0].changeState, "stable");
+    assert.equal(ledger.sourceSummary.states[0].changeCount, 0);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }

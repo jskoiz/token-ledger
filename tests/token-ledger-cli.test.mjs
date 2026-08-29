@@ -2130,6 +2130,75 @@ test("automatic cache validation rebuilds a missing or behind ledger", async () 
   }
 });
 
+test("snapshot size fallback stays stale and does not advance ledger revisions", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-size-fallback-"));
+  const codexHome = resolve(root, "codex-home");
+  const sourceDirectory = resolve(codexHome, "sessions", "2026", "08");
+  const sourceFile = resolve(
+    sourceDirectory,
+    "rollout-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl",
+  );
+  const snapshotPath = resolve(root, "snapshot.json.gz");
+  const ledgerPath = resolveDurableLedgerPath({ output: snapshotPath });
+  try {
+    await mkdir(sourceDirectory, { recursive: true });
+    await writeFile(
+      sourceFile,
+      serializeRows(sourceRolloutRows(
+        100,
+        "turn-1",
+        "2026-08-23T10:00:00.000Z",
+      )),
+    );
+    const initial = await collectUsage({
+      output: snapshotPath,
+      codexHome,
+      includeArchived: true,
+      since: null,
+    });
+    await writePrivateSnapshot(snapshotPath, initial);
+    assert.equal(initial.metadata.durableLedger.revision, 1);
+    assert.equal(await readDurableLedgerRevision(ledgerPath), 1);
+
+    await appendFile(
+      sourceFile,
+      serializeRows(sourceRolloutRows(
+        200,
+        "turn-2",
+        "2026-08-23T10:01:00.000Z",
+      )),
+    );
+    const options = parseArgs([
+      "day",
+      "2026-08-23",
+      "--static",
+      "--plain",
+      "--ascii",
+      "--tz",
+      "UTC",
+    ]);
+    options.codexHome = codexHome;
+    options.input = snapshotPath;
+    options.inputExplicit = false;
+    options.snapshotWriteOptions = { maxBytes: 1, targetBytes: 1 };
+
+    const firstFallback = await loadSnapshot(options);
+    const secondFallback = await loadSnapshot(options);
+    const stored = await readPrivateSnapshot(snapshotPath);
+
+    for (const fallback of [firstFallback, secondFallback]) {
+      assert.equal(fallback.sourceStatus, "stale-fallback");
+      assert.equal(fallback.snapshot.coverage.observedTokens, 100);
+      assert.equal(fallback.snapshot.metadata.durableLedger.revision, 1);
+    }
+    assert.equal(await readDurableLedgerRevision(ledgerPath), 1);
+    assert.equal(stored.coverage.observedTokens, 100);
+    assert.equal(stored.metadata.durableLedger.revision, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("snapshot freshness labels the one-hour cache age without exposing paths", () => {
   const now = Date.parse("2026-08-20T00:00:00.000Z");
   assert.deepEqual(

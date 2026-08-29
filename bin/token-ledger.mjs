@@ -1036,6 +1036,7 @@ async function refreshSnapshot(options) {
     );
     process.stderr.write("Token Ledger: refreshing local snapshot…\n");
     progressStarted = true;
+    let writeResult = null;
     const snapshot = await collectUsage(
       {
         output: options.input,
@@ -1043,14 +1044,21 @@ async function refreshSnapshot(options) {
         codexHome: options.codexHome,
         includeArchived: options.includeArchived,
         since: options.since,
+        publishSnapshot: async (candidate) => {
+          writeResult = await writePrivateSnapshot(
+            options.input,
+            candidate,
+            options.snapshotWriteOptions,
+          );
+          return writeResult.snapshot;
+        },
       },
       ({ current, total }) => {
         process.stderr.write(`\rToken Ledger: scanned ${current}/${total} rollout files`);
       },
     );
     process.stderr.write("\n");
-    const writeResult = await writePrivateSnapshot(options.input, snapshot);
-    const storedSnapshot = writeResult.snapshot;
+    const storedSnapshot = snapshot;
     process.stderr.write(
       `Token Ledger: cached ${(writeResult.bytesWritten / 1_000_000).toFixed(1)} MB ${writeResult.encoding} snapshot (${(writeResult.jsonBytes / 1_000_000).toFixed(1)} MB JSON before encoding; ${storedSnapshot.events.length.toLocaleString()} buckets for ${storedSnapshot.coverage.observedModelCalls.toLocaleString()} calls; ${(writeResult.maxBytes / 1_000_000).toFixed(1)} MB limit).\n`,
     );
@@ -1059,7 +1067,7 @@ async function refreshSnapshot(options) {
         "Token Ledger: snapshot is above 70% of its safety limit; older buckets will compact automatically as it grows.\n",
       );
     }
-    return storedSnapshot;
+    return { snapshot: storedSnapshot, sourceStatus: "verified-current" };
   } catch (error) {
     if (progressStarted) process.stderr.write("\n");
     if (error?.code === "ERR_SNAPSHOT_SIZE_LIMIT" && existsSync(options.input)) {
@@ -1069,7 +1077,7 @@ async function refreshSnapshot(options) {
           process.stderr.write(
             "Token Ledger: refresh exceeded the safety limit; continuing with the previous cache, which may be stale.\n",
           );
-          return previous;
+          return { snapshot: previous, sourceStatus: "stale-fallback" };
         }
       } catch {
         // Preserve the original refresh error when the previous cache cannot
@@ -1143,10 +1151,7 @@ export function snapshotFreshness(snapshot = {}, nowMs = Date.now()) {
 // this status separate from the age label shown in terminal output.
 export async function loadSnapshot(options) {
   if (options.refresh) {
-    return {
-      snapshot: await refreshSnapshot(options),
-      sourceStatus: "verified-current",
-    };
+    return refreshSnapshot(options);
   }
   if (!existsSync(options.input)) {
     if (options.inputExplicit || !options.autoRefresh) {
@@ -1154,20 +1159,14 @@ export async function loadSnapshot(options) {
         `Snapshot not found: ${safeDisplayLabel(options.input, "snapshot")}`,
       );
     }
-    return {
-      snapshot: await refreshSnapshot(options),
-      sourceStatus: "verified-current",
-    };
+    return refreshSnapshot(options);
   }
   const cached = await readSnapshot(options.input);
   if (!snapshotScopeMatchesOptions(cached, options)) {
     if (options.inputExplicit || !options.autoRefresh) {
       throw snapshotScopeError(cached, options);
     }
-    return {
-      snapshot: await refreshSnapshot(options),
-      sourceStatus: "verified-current",
-    };
+    return refreshSnapshot(options);
   }
 
   if (options.inputExplicit) {
@@ -1206,17 +1205,11 @@ export async function loadSnapshot(options) {
   if (
     cachedCodexHomeFingerprint !== codexHomeFingerprint(options.codexHome)
   ) {
-    return {
-      snapshot: await refreshSnapshot(options),
-      sourceStatus: "verified-current",
-    };
+    return refreshSnapshot(options);
   }
   if (!sourceWatermarksEqual(cached.sourceWatermark, inventory.watermark)) {
     try {
-      return {
-        snapshot: await refreshSnapshot(options),
-        sourceStatus: "verified-current",
-      };
+      return await refreshSnapshot(options);
     } catch (error) {
       if (error?.code === "ERR_DURABLE_LEDGER_CODEX_HOME") throw error;
       return { snapshot: cached, sourceStatus: "stale-fallback" };
@@ -1233,10 +1226,7 @@ export async function loadSnapshot(options) {
     ledgerRevision !== snapshotRevision
   ) {
     try {
-      return {
-        snapshot: await refreshSnapshot(options),
-        sourceStatus: "verified-current",
-      };
+      return await refreshSnapshot(options);
     } catch (error) {
       if (error?.code === "ERR_DURABLE_LEDGER_CODEX_HOME") throw error;
       return { snapshot: cached, sourceStatus: "stale-fallback" };
