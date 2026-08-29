@@ -592,6 +592,36 @@ test("source changes after validation restore the prior ledger before retry", as
   }
 });
 
+test("source changes after commit do not retry an already committed attempt", async () => {
+  const fixture = await createFixture([100, 200]);
+  let changed = false;
+  try {
+    const committed = await collectUsage(options(fixture, {
+      faultInjector: async ({ point }) => {
+        if (point === "after-commit" && !changed) {
+          changed = true;
+          await writeFile(fixture.file, serialize(rolloutRows([100])));
+        }
+      },
+    }));
+    const ledgerPath = resolveDurableLedgerPath({
+      stateDirectory: fixture.stateDirectory,
+    });
+    const ledger = await readDurableLedger(ledgerPath);
+
+    assert.equal(changed, true);
+    assert.equal(totalTokens(committed), 300);
+    assert.equal(await readDurableLedgerRevision(ledgerPath), 1);
+    assert.equal(
+      ledger.usageRows.reduce((sum, row) => sum + row.totalTokens, 0),
+      300,
+    );
+    assert.equal(ledger.usageRows.length, 2);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("write-open rejects newer durable ledger schemas without rewriting them", async () => {
   const fixture = await createFixture([100]);
   const ledgerPath = resolveDurableLedgerPath({
