@@ -24,6 +24,7 @@ import {
   aggregateProjects,
   dayBounds,
   filterDayEvents,
+  loadSnapshot,
   parseArgs,
   redactLocalPaths,
   rolling24hBounds,
@@ -2024,6 +2025,46 @@ test("automatic refresh ignores a newer cache mtime when the source watermark ch
       refreshed.sourceWatermark,
       changedSource.watermark,
     ));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("automatic cache validation rejects a different Codex home", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-home-cache-"));
+  const codexHomeA = resolve(root, "codex-home-a");
+  const codexHomeB = resolve(root, "codex-home-b");
+  const snapshotPath = resolve(root, "snapshot.json.gz");
+  try {
+    await mkdir(codexHomeA, { recursive: true });
+    await mkdir(codexHomeB, { recursive: true });
+    const snapshot = await collectUsage({
+      output: snapshotPath,
+      codexHome: codexHomeA,
+      includeArchived: true,
+      since: null,
+    });
+    await writePrivateSnapshot(snapshotPath, snapshot);
+
+    const options = parseArgs([
+      "day",
+      "2026-08-23",
+      "--static",
+      "--plain",
+      "--ascii",
+      "--tz",
+      "UTC",
+    ]);
+    options.codexHome = codexHomeB;
+    options.input = snapshotPath;
+    options.inputExplicit = false;
+
+    await assert.rejects(
+      () => loadSnapshot(options),
+      (error) =>
+        error?.code === "ERR_DURABLE_LEDGER_CODEX_HOME" &&
+        /different Codex data directory/i.test(error.message),
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

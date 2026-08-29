@@ -30,6 +30,7 @@ import {
   readPrivateSnapshot,
   writePrivateSnapshot,
 } from "../lib/token-ledger-snapshot.mjs";
+import { codexHomeFingerprint } from "../lib/token-ledger-ledger.mjs";
 import {
   buildUsageBuckets,
   normalizeTokenUsage,
@@ -129,6 +130,10 @@ test("source appends are included before a validated cache is published", async 
       persisted.sourceWatermark,
       current.watermark,
     ));
+    assert.equal(
+      persisted.metadata.durableLedger.codexHomeFingerprint,
+      codexHomeFingerprint(root),
+    );
     assert.ok(!JSON.stringify(persisted).includes(root));
   } finally {
     await rm(root, { recursive: true, force: true });

@@ -1072,9 +1072,11 @@ async function refreshSnapshot(options) {
         // prove that it has the requested collection scope.
       }
     }
-    throw new Error(
+    const wrapped = new Error(
       `Could not refresh local snapshot: ${safeErrorMessage(error, [options.input, options.codexHome])}`,
     );
+    wrapped.code = error?.code;
+    throw wrapped;
   }
 }
 
@@ -1189,20 +1191,33 @@ export async function loadSnapshot(options) {
       `Could not inspect local Codex source: ${safeErrorMessage(error, [options.codexHome])}`,
     );
   }
+  const {
+    codexHomeFingerprint,
+    readDurableLedgerRevision,
+    resolveDurableLedgerPath,
+  } = await import("../lib/token-ledger-ledger.mjs");
+  const cachedCodexHomeFingerprint = primitiveString(
+    cached.metadata?.durableLedger?.codexHomeFingerprint,
+  );
+  if (
+    cachedCodexHomeFingerprint !== codexHomeFingerprint(options.codexHome)
+  ) {
+    return {
+      snapshot: await refreshSnapshot(options),
+      sourceStatus: "verified-current",
+    };
+  }
   if (!sourceWatermarksEqual(cached.sourceWatermark, inventory.watermark)) {
     try {
       return {
         snapshot: await refreshSnapshot(options),
         sourceStatus: "verified-current",
       };
-    } catch {
+    } catch (error) {
+      if (error?.code === "ERR_DURABLE_LEDGER_CODEX_HOME") throw error;
       return { snapshot: cached, sourceStatus: "stale-fallback" };
     }
   }
-  const {
-    readDurableLedgerRevision,
-    resolveDurableLedgerPath,
-  } = await import("../lib/token-ledger-ledger.mjs");
   const ledgerRevision = await readDurableLedgerRevision(
     resolveDurableLedgerPath({ output: options.input }),
   );
@@ -1218,7 +1233,8 @@ export async function loadSnapshot(options) {
         snapshot: await refreshSnapshot(options),
         sourceStatus: "verified-current",
       };
-    } catch {
+    } catch (error) {
+      if (error?.code === "ERR_DURABLE_LEDGER_CODEX_HOME") throw error;
       return { snapshot: cached, sourceStatus: "stale-fallback" };
     }
   }
