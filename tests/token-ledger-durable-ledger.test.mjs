@@ -302,6 +302,35 @@ test("replacement and truncation reconcile without double counting", async () =>
   }
 });
 
+test("atomic replacement preserves source identity and reconciles positions", async () => {
+  const fixture = await createFixture([100, 200]);
+  const replacement = resolve(fixture.root, "replacement.jsonl");
+  try {
+    await collectUsage(options(fixture));
+    const beforeLedger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+    await writeFile(replacement, serialize(rolloutRows([100, 300])));
+    await rename(replacement, fixture.file);
+
+    const replaced = await collectUsage(options(fixture));
+    const ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+
+    assert.equal(totalTokens(replaced), 400);
+    assert.equal(ledger.usageRows.length, 2);
+    assert.equal(ledger.sourceSummary.states.length, 1);
+    assert.equal(
+      ledger.sourceSummary.states[0].sourceId,
+      beforeLedger.sourceSummary.states[0].sourceId,
+    );
+    assert.equal(ledger.sourceSummary.states[0].changeState, "replaced");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("replacing one source does not rewrite a shared observation", async () => {
   const fixture = await createFixture([100]);
   const sharedFile = resolve(fixture.file, "..", SHARED_ROLLOUT_NAME);
@@ -479,6 +508,54 @@ test("simultaneous active and archived rollout copies keep separate scope", asyn
     assert.equal(new Set(
       ledger.sourceSummary.states.map((state) => state.sourceId),
     ).size, 2);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("atomic replacement keeps one simultaneous rollout copy isolated", async () => {
+  const fixture = await createFixture([100]);
+  const archivedDirectory = resolve(
+    fixture.root,
+    "archived_sessions",
+    "2026",
+    "08",
+    "20",
+  );
+  const archivedFile = resolve(archivedDirectory, ROLLOUT_NAME);
+  const replacement = resolve(fixture.root, "replacement.jsonl");
+  try {
+    await mkdir(archivedDirectory, { recursive: true });
+    await writeFile(
+      archivedFile,
+      serialize(rolloutRows([200], { offset: 1 })),
+    );
+    await collectUsage(options(fixture));
+    const beforeLedger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+    await writeFile(replacement, serialize(rolloutRows([300])));
+    await rename(replacement, fixture.file);
+
+    const replaced = await collectUsage(options(fixture));
+    const ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+    const sourceIdByLocation = (value) => new Map(
+      value.sourceSummary.states.map((state) => [state.location, state.sourceId]),
+    );
+
+    assert.equal(totalTokens(replaced), 500);
+    assert.equal(ledger.sourceSummary.states.length, 2);
+    assert.deepEqual(
+      sourceIdByLocation(ledger),
+      sourceIdByLocation(beforeLedger),
+    );
+    assert.equal(
+      ledger.sourceSummary.states.find((state) => state.location === "active")
+        ?.changeState,
+      "replaced",
+    );
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
