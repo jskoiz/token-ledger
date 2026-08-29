@@ -160,6 +160,22 @@ function totalTokens(snapshot) {
   return snapshot.events.reduce((sum, event) => sum + event.totalTokens, 0);
 }
 
+function shellCall(timestamp, callId) {
+  return {
+    timestamp,
+    type: "response_item",
+    payload: {
+      type: "function_call",
+      name: "shell",
+      call_id: callId,
+    },
+  };
+}
+
+function totalToolCalls(snapshot) {
+  return snapshot.events.reduce((sum, event) => sum + event.toolCalls, 0);
+}
+
 function legacySnapshotForFixture(fixture, snapshot) {
   return {
     ...snapshot,
@@ -272,22 +288,9 @@ test("active-only refresh preserves an atomically replaced archive source", asyn
   );
   const archivedFile = resolve(archivedDirectory, ARCHIVED_ROLLOUT_NAME);
   const replacement = resolve(fixture.root, "archived-replacement.jsonl");
-  const toolCall = (timestamp, callId) => ({
-    timestamp,
-    type: "response_item",
-    payload: {
-      type: "function_call",
-      name: "shell",
-      call_id: callId,
-    },
-  });
-  const toolCalls = (snapshot) => snapshot.events.reduce(
-    (sum, event) => sum + event.toolCalls,
-    0,
-  );
   try {
     await appendFile(fixture.file, serialize([
-      toolCall("2026-08-20T10:01:00.000Z", "call-active-retained"),
+      shellCall("2026-08-20T10:01:00.000Z", "call-active-retained"),
     ]));
     await mkdir(archivedDirectory, { recursive: true });
     await writeFile(
@@ -297,7 +300,7 @@ test("active-only refresh preserves an atomically replaced archive source", asyn
           baseTimestamp: "2026-08-21T10:00:00.000Z",
           usedPercent: 58,
         }),
-        toolCall("2026-08-21T10:01:00.000Z", "call-archive-retained"),
+        shellCall("2026-08-21T10:01:00.000Z", "call-archive-retained"),
       ]),
     );
 
@@ -320,10 +323,10 @@ test("active-only refresh preserves an atomically replaced archive source", asyn
 
     assert.equal(totalTokens(initial), 300);
     assert.equal(initial.quotaObservations.length, 2);
-    assert.equal(toolCalls(initial), 2);
+    assert.equal(totalToolCalls(initial), 2);
     assert.equal(totalTokens(activeOnly), 100);
     assert.equal(activeOnly.quotaObservations.length, 1);
-    assert.equal(toolCalls(activeOnly), 1);
+    assert.equal(totalToolCalls(activeOnly), 1);
     assert.equal(
       retainedAfterActiveOnly.usageRows.reduce(
         (sum, row) => sum + row.totalTokens,
@@ -335,10 +338,143 @@ test("active-only refresh preserves an atomically replaced archive source", asyn
     assert.equal(retainedAfterActiveOnly.toolRows.length, 2);
     assert.equal(totalTokens(afterArchivedDeletion), 300);
     assert.equal(afterArchivedDeletion.quotaObservations.length, 2);
-    assert.equal(toolCalls(afterArchivedDeletion), 2);
+    assert.equal(totalToolCalls(afterArchivedDeletion), 2);
     assert.equal(totalTokens(activeOnlyAfterDeletion), 100);
     assert.equal(activeOnlyAfterDeletion.quotaObservations.length, 1);
-    assert.equal(toolCalls(activeOnlyAfterDeletion), 1);
+    assert.equal(totalToolCalls(activeOnlyAfterDeletion), 1);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("full refresh reconciles an archive replaced during active-only tracking", async () => {
+  const fixture = await createFixture([]);
+  const archivedDirectory = resolve(
+    fixture.root,
+    "archived_sessions",
+    "2026",
+    "08",
+    "20",
+  );
+  const archivedFile = resolve(archivedDirectory, ROLLOUT_NAME);
+  const replacement = resolve(fixture.root, "smaller-archive.jsonl");
+  try {
+    await mkdir(archivedDirectory, { recursive: true });
+    await writeFile(archivedFile, serialize([
+      ...rolloutRows([100, 150], { usedPercent: 37 }),
+      shellCall("2026-08-20T10:02:00.000Z", "call-old-archive-one"),
+      shellCall("2026-08-20T10:03:00.000Z", "call-old-archive-two"),
+    ]));
+    await rm(fixture.file);
+    const initial = await collectUsage(options(fixture));
+
+    await writeFile(replacement, serialize([
+      ...rolloutRows([200], { usedPercent: 58 }),
+      shellCall("2026-08-20T10:01:00.000Z", "call-new-archive"),
+    ]));
+    assert.equal(
+      (await stat(replacement)).size < (await stat(archivedFile)).size,
+      true,
+    );
+    await rename(replacement, archivedFile);
+
+    const activeOnly = await collectUsage(options(fixture, {
+      includeArchived: false,
+    }));
+    const retainedBeforeRescan = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+    const rescanned = await collectUsage(options(fixture));
+    const reconciled = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+    await rm(archivedFile);
+    const afterDeletion = await collectUsage(options(fixture));
+
+    assert.equal(totalTokens(initial), 250);
+    assert.equal(initial.quotaObservations[0].usedPercent, 37);
+    assert.equal(totalToolCalls(initial), 2);
+    assert.equal(totalTokens(activeOnly), 0);
+    assert.equal(activeOnly.quotaObservations.length, 0);
+    assert.equal(totalToolCalls(activeOnly), 0);
+    assert.equal(
+      retainedBeforeRescan.usageRows.reduce(
+        (sum, row) => sum + row.totalTokens,
+        0,
+      ),
+      250,
+    );
+    assert.equal(retainedBeforeRescan.quotaRows[0].usedPercent, 37);
+    assert.equal(retainedBeforeRescan.toolRows.length, 2);
+    assert.equal(totalTokens(rescanned), 200);
+    assert.equal(rescanned.quotaObservations.length, 1);
+    assert.equal(rescanned.quotaObservations[0].usedPercent, 58);
+    assert.equal(totalToolCalls(rescanned), 1);
+    assert.equal(reconciled.usageRows.length, 1);
+    assert.equal(reconciled.quotaRows.length, 1);
+    assert.equal(reconciled.toolRows.length, 1);
+    assert.equal(reconciled.sourceSummary.states[0].changeCount, 1);
+    assert.equal(totalTokens(afterDeletion), 200);
+    assert.equal(afterDeletion.quotaObservations[0].usedPercent, 58);
+    assert.equal(totalToolCalls(afterDeletion), 1);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("active move reconciles an archive replaced during active-only tracking", async () => {
+  const fixture = await createFixture([]);
+  const archivedDirectory = resolve(
+    fixture.root,
+    "archived_sessions",
+    "2026",
+    "08",
+    "20",
+  );
+  const archivedFile = resolve(archivedDirectory, ROLLOUT_NAME);
+  const replacement = resolve(fixture.root, "smaller-active-move.jsonl");
+  try {
+    await mkdir(archivedDirectory, { recursive: true });
+    await writeFile(archivedFile, serialize([
+      ...rolloutRows([100, 150], { usedPercent: 37 }),
+      shellCall("2026-08-20T10:02:00.000Z", "call-old-before-move-one"),
+      shellCall("2026-08-20T10:03:00.000Z", "call-old-before-move-two"),
+    ]));
+    await rm(fixture.file);
+    await collectUsage(options(fixture));
+
+    await writeFile(replacement, serialize([
+      ...rolloutRows([200], { usedPercent: 58 }),
+      shellCall("2026-08-20T10:01:00.000Z", "call-new-after-move"),
+    ]));
+    await rename(replacement, archivedFile);
+    const activeOnlyBeforeMove = await collectUsage(options(fixture, {
+      includeArchived: false,
+    }));
+    await rename(archivedFile, fixture.file);
+
+    const rescanned = await collectUsage(options(fixture));
+    const activeOnlyAfterMove = await collectUsage(options(fixture, {
+      includeArchived: false,
+    }));
+    const ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+
+    assert.equal(totalTokens(activeOnlyBeforeMove), 0);
+    assert.equal(activeOnlyBeforeMove.quotaObservations.length, 0);
+    assert.equal(totalToolCalls(activeOnlyBeforeMove), 0);
+    assert.equal(totalTokens(rescanned), 200);
+    assert.equal(rescanned.quotaObservations[0].usedPercent, 58);
+    assert.equal(totalToolCalls(rescanned), 1);
+    assert.equal(totalTokens(activeOnlyAfterMove), 200);
+    assert.equal(activeOnlyAfterMove.quotaObservations[0].usedPercent, 58);
+    assert.equal(totalToolCalls(activeOnlyAfterMove), 1);
+    assert.equal(ledger.usageRows.length, 1);
+    assert.equal(ledger.quotaRows.length, 1);
+    assert.equal(ledger.toolRows.length, 1);
+    assert.equal(ledger.sourceSummary.states[0].location, "active");
+    assert.equal(ledger.sourceSummary.states[0].changeCount, 1);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
