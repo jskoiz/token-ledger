@@ -6,6 +6,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   rename,
   stat,
@@ -31,6 +32,7 @@ import {
 } from "../lib/token-ledger-ledger.mjs";
 import {
   readPrivateSnapshot,
+  stagePrivateSnapshot,
   writePrivateSnapshot,
 } from "../lib/token-ledger-snapshot.mjs";
 
@@ -1438,6 +1440,111 @@ test("source changes after validation restore the prior ledger before retry", as
       100,
     );
     assert.equal(ledger.usageRows.length, 1);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("source changes after final validation restore the committed attempt", async () => {
+  const fixture = await createFixture([100]);
+  let changed = false;
+  let observedCommittedCandidate = false;
+  let observedRestoredBaseline = false;
+  try {
+    const initial = await collectUsage(options(fixture));
+    await writePrivateSnapshot(fixture.output, initial);
+    await appendFile(
+      fixture.file,
+      serialize(rolloutRows([200], { offset: 1 })),
+    );
+
+    const snapshot = await collectUsage(options(fixture, {
+      stageSnapshot: (candidate) =>
+        stagePrivateSnapshot(fixture.output, candidate),
+      faultInjector: async ({ point, path }) => {
+        if (
+          point === "before-commit" &&
+          changed &&
+          observedCommittedCandidate &&
+          !observedRestoredBaseline
+        ) {
+          const database = new DatabaseSync(path, { readOnly: true });
+          try {
+            assert.equal(
+              Number(database.prepare(
+                "SELECT value FROM ledger_meta WHERE key = 'revision'",
+              ).get().value),
+              1,
+            );
+            assert.equal(
+              database.prepare(
+                "SELECT SUM(total_tokens) AS total FROM usage_observations",
+              ).get().total,
+              100,
+            );
+          } finally {
+            database.close();
+          }
+          const storedDuringRetry = await readPrivateSnapshot(fixture.output);
+          assert.equal(totalTokens(storedDuringRetry), 100);
+          assert.equal(storedDuringRetry.metadata.durableLedger.revision, 1);
+          observedRestoredBaseline = true;
+        }
+        if (point === "after-final-validation" && !changed) {
+          changed = true;
+          await writeFile(fixture.file, serialize(rolloutRows([100])));
+        }
+        if (
+          point === "after-sqlite-commit" &&
+          changed &&
+          !observedCommittedCandidate
+        ) {
+          const database = new DatabaseSync(path, { readOnly: true });
+          try {
+            assert.equal(
+              Number(database.prepare(
+                "SELECT value FROM ledger_meta WHERE key = 'revision'",
+              ).get().value),
+              2,
+            );
+            assert.equal(
+              database.prepare(
+                "SELECT SUM(total_tokens) AS total FROM usage_observations",
+              ).get().total,
+              300,
+            );
+          } finally {
+            database.close();
+          }
+          observedCommittedCandidate = true;
+        }
+      },
+    }));
+    const ledgerPath = resolveDurableLedgerPath({
+      stateDirectory: fixture.stateDirectory,
+    });
+    const ledger = await readDurableLedger(ledgerPath);
+    const stored = await readPrivateSnapshot(fixture.output);
+
+    assert.equal(changed, true);
+    assert.equal(observedCommittedCandidate, true);
+    assert.equal(observedRestoredBaseline, true);
+    assert.equal(totalTokens(snapshot), 100);
+    assert.equal(totalTokens(stored), 100);
+    assert.equal(snapshot.metadata.durableLedger.revision, 2);
+    assert.equal(stored.metadata.durableLedger.revision, 2);
+    assert.equal(await readDurableLedgerRevision(ledgerPath), 2);
+    assert.deepEqual(ledger.usageRows.map((row) => row.totalTokens), [100]);
+    assert.deepEqual(
+      (await readdir(fixture.stateDirectory)).filter((name) =>
+        name.startsWith(".token-ledger-rollback-")
+      ),
+      [],
+    );
+
+    await rm(fixture.file);
+    const afterRemoval = await collectUsage(options(fixture));
+    assert.equal(totalTokens(afterRemoval), 100);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
