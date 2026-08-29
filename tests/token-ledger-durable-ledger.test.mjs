@@ -261,6 +261,89 @@ test("first active-only refresh excludes a rollout moved into the archive", asyn
   }
 });
 
+test("active-only refresh preserves an atomically replaced archive source", async () => {
+  const fixture = await createFixture([100], { usedPercent: 37 });
+  const archivedDirectory = resolve(
+    fixture.root,
+    "archived_sessions",
+    "2026",
+    "08",
+    "21",
+  );
+  const archivedFile = resolve(archivedDirectory, ARCHIVED_ROLLOUT_NAME);
+  const replacement = resolve(fixture.root, "archived-replacement.jsonl");
+  const toolCall = (timestamp, callId) => ({
+    timestamp,
+    type: "response_item",
+    payload: {
+      type: "function_call",
+      name: "shell",
+      call_id: callId,
+    },
+  });
+  const toolCalls = (snapshot) => snapshot.events.reduce(
+    (sum, event) => sum + event.toolCalls,
+    0,
+  );
+  try {
+    await appendFile(fixture.file, serialize([
+      toolCall("2026-08-20T10:01:00.000Z", "call-active-retained"),
+    ]));
+    await mkdir(archivedDirectory, { recursive: true });
+    await writeFile(
+      archivedFile,
+      serialize([
+        ...rolloutRows([200], {
+          baseTimestamp: "2026-08-21T10:00:00.000Z",
+          usedPercent: 58,
+        }),
+        toolCall("2026-08-21T10:01:00.000Z", "call-archive-retained"),
+      ]),
+    );
+
+    const initial = await collectUsage(options(fixture));
+    await copyFile(archivedFile, replacement);
+    await rename(replacement, archivedFile);
+
+    const activeOnly = await collectUsage(options(fixture, {
+      includeArchived: false,
+    }));
+    const retainedAfterActiveOnly = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+
+    await rm(archivedFile);
+    const afterArchivedDeletion = await collectUsage(options(fixture));
+    const activeOnlyAfterDeletion = await collectUsage(options(fixture, {
+      includeArchived: false,
+    }));
+
+    assert.equal(totalTokens(initial), 300);
+    assert.equal(initial.quotaObservations.length, 2);
+    assert.equal(toolCalls(initial), 2);
+    assert.equal(totalTokens(activeOnly), 100);
+    assert.equal(activeOnly.quotaObservations.length, 1);
+    assert.equal(toolCalls(activeOnly), 1);
+    assert.equal(
+      retainedAfterActiveOnly.usageRows.reduce(
+        (sum, row) => sum + row.totalTokens,
+        0,
+      ),
+      300,
+    );
+    assert.equal(retainedAfterActiveOnly.quotaRows.length, 2);
+    assert.equal(retainedAfterActiveOnly.toolRows.length, 2);
+    assert.equal(totalTokens(afterArchivedDeletion), 300);
+    assert.equal(afterArchivedDeletion.quotaObservations.length, 2);
+    assert.equal(toolCalls(afterArchivedDeletion), 2);
+    assert.equal(totalTokens(activeOnlyAfterDeletion), 100);
+    assert.equal(activeOnlyAfterDeletion.quotaObservations.length, 1);
+    assert.equal(toolCalls(activeOnlyAfterDeletion), 1);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("active-only lifecycle keeps simultaneous active and archived copies distinct", async () => {
   const fixture = await createFixture([100]);
   const archivedDirectory = resolve(
