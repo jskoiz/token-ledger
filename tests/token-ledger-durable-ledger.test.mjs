@@ -160,6 +160,26 @@ function totalTokens(snapshot) {
   return snapshot.events.reduce((sum, event) => sum + event.totalTokens, 0);
 }
 
+function legacySnapshotForFixture(fixture, snapshot) {
+  return {
+    ...snapshot,
+    provenance: {
+      ...snapshot.provenance,
+      collection: snapshot.provenance?.collection || {
+        since: null,
+        includeArchived: true,
+      },
+    },
+    metadata: {
+      ...snapshot.metadata,
+      durableLedger: {
+        ...snapshot.metadata?.durableLedger,
+        codexHomeFingerprint: codexHomeFingerprint(fixture.root),
+      },
+    },
+  };
+}
+
 test("usage and quota survive rollout source disappearance", async () => {
   const fixture = await createFixture([100], { usedPercent: 37 });
   try {
@@ -1104,7 +1124,7 @@ test("write-open rejects newer durable ledger schemas without rewriting them", a
     database = new DatabaseSync(ledgerPath);
     database.exec(`
       CREATE TABLE future_only (value TEXT);
-      PRAGMA user_version = 2;
+      PRAGMA user_version = 3;
     `);
     database.close();
     database = null;
@@ -1115,7 +1135,7 @@ test("write-open rejects newer durable ledger schemas without rewriting them", a
     );
 
     database = new DatabaseSync(ledgerPath, { readOnly: true });
-    assert.equal(database.prepare("PRAGMA user_version").get().user_version, 2);
+    assert.equal(database.prepare("PRAGMA user_version").get().user_version, 3);
     assert.equal(
       database.prepare(`
         SELECT COUNT(*) AS count
@@ -1193,7 +1213,10 @@ test("old v3 snapshot migration is idempotent and marks compacted estimates", as
     }],
   };
   try {
-    await writePrivateSnapshot(fixture.output, legacy);
+    await writePrivateSnapshot(
+      fixture.output,
+      legacySnapshotForFixture(fixture, legacy),
+    );
     const first = await collectUsage(options(fixture));
     const ledgerPath = resolveDurableLedgerPath({
       stateDirectory: fixture.stateDirectory,
@@ -1252,7 +1275,10 @@ test("partial legacy overlap does not retain credits for rescanned usage", async
     }],
   };
   try {
-    await writePrivateSnapshot(fixture.output, legacy);
+    await writePrivateSnapshot(
+      fixture.output,
+      legacySnapshotForFixture(fixture, legacy),
+    );
     const snapshot = await collectUsage(options(fixture));
     const credits = snapshot.events.reduce(
       (sum, event) => sum + (event.rateCardCredits || 0),
@@ -1297,7 +1323,10 @@ test("legacy overlap subtracts rescanned observations after compaction", async (
     }],
   };
   try {
-    await writePrivateSnapshot(fixture.output, legacy);
+    await writePrivateSnapshot(
+      fixture.output,
+      legacySnapshotForFixture(fixture, legacy),
+    );
     const snapshot = await collectUsage(options(fixture));
     const ledger = await readDurableLedger(
       resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
@@ -1352,7 +1381,10 @@ test("active-only legacy migrations survive --no-archived refreshes", async () =
     }],
   };
   try {
-    await writePrivateSnapshot(fixture.output, legacy);
+    await writePrivateSnapshot(
+      fixture.output,
+      legacySnapshotForFixture(fixture, legacy),
+    );
     const snapshot = await collectUsage(options(fixture, {
       includeArchived: false,
     }));
@@ -1365,9 +1397,140 @@ test("active-only legacy migrations survive --no-archived refreshes", async () =
     assert.equal(snapshot.coverage.migratedCompactedTokens, 100);
     assert.equal(snapshot.quotaObservations.length, 1);
     assert.equal(ledger.migration.includeArchived, false);
+    assert.equal(ledger.migration.collectionSince, null);
+    assert.equal(ledger.migration.scopeKnown, true);
     assert.equal(ledger.migratedUsageRows, 1);
     assert.equal(ledger.migratedQuotaRows, 1);
   } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("active-only migration does not subtract unrelated archived exact usage", async () => {
+  const fixture = await createFixture([]);
+  const archivedDirectory = resolve(
+    fixture.root,
+    "archived_sessions",
+    "2026",
+    "08",
+    "21",
+  );
+  const archivedFile = resolve(archivedDirectory, ARCHIVED_ROLLOUT_NAME);
+  const timestamp = "2026-08-21T10:00:01.000Z";
+  const legacy = legacySnapshotForFixture(fixture, {
+    schemaVersion: 3,
+    generatedAt: "2026-08-22T00:00:00.000Z",
+    provenance: {
+      collection: { since: null, includeArchived: false },
+    },
+    events: [{
+      timestamp,
+      startAt: timestamp,
+      endAt: timestamp,
+      project: "Unknown project",
+      model: "gpt-5.4",
+      rateCardModel: "gpt-5.4",
+      effort: "medium",
+      source: "unknown",
+      useType: "unknown",
+      inputTokens: 90,
+      cachedInputTokens: 10,
+      outputTokens: 10,
+      reasoningTokens: 4,
+      totalTokens: 100,
+      toolCalls: 0,
+      callCount: 1,
+      detailedCallCount: 1,
+      inputCallCount: 1,
+      breakdownAvailable: true,
+      threadIds: ["active-history-thread"],
+    }],
+  });
+  try {
+    await mkdir(archivedDirectory, { recursive: true });
+    await writeFile(
+      archivedFile,
+      serialize(rolloutRows([100], {
+        baseTimestamp: "2026-08-21T10:00:00.000Z",
+      })),
+    );
+    await writePrivateSnapshot(fixture.output, legacy);
+
+    const activeOnly = await collectUsage(options(fixture, {
+      includeArchived: false,
+    }));
+    const full = await collectUsage(options(fixture));
+    const ledgerPath = resolveDurableLedgerPath({
+      stateDirectory: fixture.stateDirectory,
+    });
+    const activeLedger = await readDurableLedger(ledgerPath, {
+      includeArchived: false,
+    });
+    const fullLedger = await readDurableLedger(ledgerPath);
+
+    assert.equal(totalTokens(activeOnly), 100);
+    assert.equal(totalTokens(full), 200);
+    assert.equal(
+      activeLedger.usageRows.reduce((sum, row) => sum + row.totalTokens, 0),
+      100,
+    );
+    assert.equal(
+      fullLedger.usageRows.reduce((sum, row) => sum + row.totalTokens, 0),
+      200,
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("legacy migration requires matching collection and Codex-home provenance", async () => {
+  const fixture = await createFixture([]);
+  const legacy = {
+    schemaVersion: 3,
+    generatedAt: "2026-08-20T12:00:00.000Z",
+    provenance: {
+      collection: { since: null, includeArchived: true },
+    },
+    events: [{
+      timestamp: "2026-08-20T10:00:01.000Z",
+      project: "unverified-history",
+      model: "gpt-5.4",
+      rateCardModel: "gpt-5.4",
+      effort: "medium",
+      source: "local",
+      useType: "interactive",
+      inputTokens: 90,
+      cachedInputTokens: 10,
+      outputTokens: 10,
+      reasoningTokens: 4,
+      totalTokens: 100,
+      callCount: 1,
+      detailedCallCount: 1,
+      inputCallCount: 1,
+      breakdownAvailable: true,
+    }],
+  };
+  let database;
+  try {
+    await writePrivateSnapshot(fixture.output, legacy);
+    const snapshot = await collectUsage(options(fixture));
+    const ledgerPath = resolveDurableLedgerPath({
+      stateDirectory: fixture.stateDirectory,
+    });
+    const ledger = await readDurableLedger(ledgerPath);
+    database = new DatabaseSync(ledgerPath, { readOnly: true });
+
+    assert.equal(totalTokens(snapshot), 0);
+    assert.equal(ledger.migration, null);
+    assert.equal(ledger.legacySnapshotStatus, "codex-home-unverified");
+    assert.equal(
+      database.prepare(
+        "SELECT value FROM ledger_meta WHERE key = 'legacy_snapshot_status'",
+      ).get().value,
+      "codex-home-unverified",
+    );
+  } finally {
+    database?.close();
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
@@ -1377,6 +1540,12 @@ test("collection cutoff slices migrated compacted ranges", async () => {
   const legacy = {
     schemaVersion: 3,
     generatedAt: "2026-08-22T00:00:00.000Z",
+    provenance: {
+      collection: {
+        since: "2026-08-20T00:00:00.000Z",
+        includeArchived: true,
+      },
+    },
     events: [{
       timestamp: "2026-08-20T00:00:00.000Z",
       startAt: "2026-08-20T00:00:00.000Z",
@@ -1401,15 +1570,25 @@ test("collection cutoff slices migrated compacted ranges", async () => {
     }],
   };
   try {
-    await writePrivateSnapshot(fixture.output, legacy);
+    await writePrivateSnapshot(
+      fixture.output,
+      legacySnapshotForFixture(fixture, legacy),
+    );
     const snapshot = await collectUsage(options(fixture, {
       since: "2026-08-21T00:00:00.000Z",
     }));
+    const ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
 
     assert.ok(Math.abs(totalTokens(snapshot) - 100) < 1e-6);
     assert.ok(Math.abs(snapshot.coverage.migratedCompactedTokens - 100) < 1e-6);
     assert.equal(snapshot.events.length, 1);
     assert.equal(snapshot.events[0].rangeAllocationEstimated, true);
+    assert.equal(
+      ledger.migration.collectionSince,
+      "2026-08-20T00:00:00.000Z",
+    );
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -2016,6 +2195,235 @@ test("user-selected state directories keep their existing permissions", async ()
   }
 });
 
+test("existing default private state directory is tightened to 0700", async () => {
+  const fixture = await createFixture([100]);
+  const defaultDirectory = resolve(fixture.root, ".token-ledger");
+  const output = resolve(defaultDirectory, "token-ledger-snapshot-v3.json.gz");
+  try {
+    await mkdir(defaultDirectory, { recursive: true });
+    await chmod(defaultDirectory, 0o755);
+    await collectUsage(options(fixture, {
+      output,
+      stateDirectory: undefined,
+      privateStateDirectory: true,
+    }));
+
+    assert.equal((await stat(defaultDirectory)).mode & 0o777, 0o700);
+    assert.equal(
+      (await stat(resolveDurableLedgerPath({ output }))).mode & 0o777,
+      0o600,
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("schema v1 upgrades transactionally and scrubs persisted private metadata", async () => {
+  const fixture = await createFixture([100]);
+  const cwdCanary = "/private/credential-path-canary";
+  const remoteCanary = "https://user:secret@example.test/private.git";
+  const sourceCanary = "/private/raw-source-canary.jsonl";
+  const homeCanary = "/private/canonical-codex-home-canary";
+  const ledgerPath = resolveDurableLedgerPath({
+    stateDirectory: fixture.stateDirectory,
+  });
+  let database;
+  try {
+    await collectUsage(options(fixture));
+    database = new DatabaseSync(ledgerPath);
+    database.exec(`
+      DROP TABLE migration_runs;
+      CREATE TABLE migration_runs (
+        migration_key TEXT PRIMARY KEY,
+        source_fingerprint TEXT NOT NULL,
+        source_label TEXT NOT NULL,
+        generated_at TEXT,
+        migrated_at TEXT NOT NULL,
+        usage_rows INTEGER NOT NULL,
+        quota_rows INTEGER NOT NULL
+      ) WITHOUT ROWID;
+    `);
+    database.prepare(`
+      UPDATE usage_observations
+         SET token_cwd = ?, token_git_origin = ?, token_raw_source = ?,
+             origin_cwd = ?, origin_git_origin = ?, origin_raw_source = ?
+    `).run(
+      cwdCanary,
+      remoteCanary,
+      sourceCanary,
+      cwdCanary,
+      remoteCanary,
+      sourceCanary,
+    );
+    database.prepare(`
+      INSERT INTO ledger_meta(key, value) VALUES ('codex_home', ?)
+    `).run(homeCanary);
+    database.exec("PRAGMA user_version = 1");
+    database.close();
+    database = null;
+
+    await collectUsage(options(fixture));
+
+    database = new DatabaseSync(ledgerPath, { readOnly: true });
+    assert.equal(database.prepare("PRAGMA user_version").get().user_version, 2);
+    const migrationColumns = new Set(database.prepare(
+      "PRAGMA table_info(migration_runs)",
+    ).all().map((column) => column.name));
+    assert.equal(migrationColumns.has("collection_since"), true);
+    assert.equal(migrationColumns.has("include_archived"), true);
+    assert.equal(migrationColumns.has("scope_known"), true);
+    assert.equal(migrationColumns.has("codex_home_fingerprint"), true);
+    const persisted = database.prepare(`
+      SELECT token_cwd AS tokenCwd, token_git_origin AS tokenGitOrigin,
+             token_raw_source AS tokenRawSource, origin_cwd AS originCwd,
+             origin_git_origin AS originGitOrigin,
+             origin_raw_source AS originRawSource
+        FROM usage_observations
+       LIMIT 1
+    `).get();
+    assert.deepEqual({ ...persisted }, {
+      tokenCwd: "",
+      tokenGitOrigin: null,
+      tokenRawSource: null,
+      originCwd: null,
+      originGitOrigin: null,
+      originRawSource: null,
+    });
+    assert.equal(
+      database.prepare(
+        "SELECT COUNT(*) AS count FROM ledger_meta WHERE key = 'codex_home'",
+      ).get().count,
+      0,
+    );
+    assert.match(
+      database.prepare(
+        "SELECT value FROM ledger_meta WHERE key = 'codex_home_fingerprint'",
+      ).get().value,
+      /^[0-9a-f]{64}$/,
+    );
+    database.close();
+    database = null;
+
+    const storedBytes = await readFile(ledgerPath, "utf8");
+    for (const canary of [cwdCanary, remoteCanary, sourceCanary, homeCanary]) {
+      assert.equal(storedBytes.includes(canary), false);
+    }
+  } finally {
+    database?.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("unscoped early-v1 migrated history is rejected without mutation", async () => {
+  const fixture = await createFixture([100]);
+  const ledgerPath = resolveDurableLedgerPath({
+    stateDirectory: fixture.stateDirectory,
+  });
+  let database;
+  try {
+    await collectUsage(options(fixture));
+    database = new DatabaseSync(ledgerPath);
+    database.exec(`
+      DROP TABLE migration_runs;
+      CREATE TABLE migration_runs (
+        migration_key TEXT PRIMARY KEY,
+        source_fingerprint TEXT NOT NULL,
+        source_label TEXT NOT NULL,
+        generated_at TEXT,
+        migrated_at TEXT NOT NULL,
+        usage_rows INTEGER NOT NULL,
+        quota_rows INTEGER NOT NULL
+      ) WITHOUT ROWID;
+      INSERT INTO migration_runs (
+        migration_key, source_fingerprint, source_label, generated_at,
+        migrated_at, usage_rows, quota_rows
+      ) VALUES (
+        'snapshot-v3-default', 'legacy-fingerprint', 'legacy-snapshot',
+        '2026-08-20T12:00:00.000Z', '2026-08-20T12:00:00.000Z', 1, 0
+      );
+      PRAGMA user_version = 1;
+    `);
+    database.close();
+    database = null;
+    const before = await readFile(ledgerPath);
+
+    await assert.rejects(
+      collectUsage(options(fixture)),
+      (error) => {
+        assert.equal(error?.code, "ERR_DURABLE_LEDGER_MIGRATION_SCOPE");
+        assert.match(error.message, /ledger was left untouched/i);
+        assert.match(error.message, /keep it as a backup/i);
+        return true;
+      },
+    );
+
+    assert.deepEqual(await readFile(ledgerPath), before);
+    database = new DatabaseSync(ledgerPath, { readOnly: true });
+    assert.equal(database.prepare("PRAGMA user_version").get().user_version, 1);
+    assert.equal(
+      new Set(database.prepare("PRAGMA table_info(migration_runs)").all()
+        .map((column) => column.name)).has("include_archived"),
+      false,
+    );
+    assert.equal(
+      database.prepare("SELECT COUNT(*) AS count FROM migration_runs").get().count,
+      1,
+    );
+  } finally {
+    database?.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("scoped v1 migration records upgrade without changing exact totals", async () => {
+  const fixture = await createFixture([100]);
+  const ledgerPath = resolveDurableLedgerPath({
+    stateDirectory: fixture.stateDirectory,
+  });
+  let database;
+  try {
+    await collectUsage(options(fixture));
+    database = new DatabaseSync(ledgerPath);
+    database.exec(`
+      DROP TABLE migration_runs;
+      CREATE TABLE migration_runs (
+        migration_key TEXT PRIMARY KEY,
+        source_fingerprint TEXT NOT NULL,
+        source_label TEXT NOT NULL,
+        generated_at TEXT,
+        migrated_at TEXT NOT NULL,
+        include_archived INTEGER NOT NULL,
+        usage_rows INTEGER NOT NULL,
+        quota_rows INTEGER NOT NULL
+      ) WITHOUT ROWID;
+      INSERT INTO migration_runs (
+        migration_key, source_fingerprint, source_label, generated_at,
+        migrated_at, include_archived, usage_rows, quota_rows
+      ) VALUES (
+        'snapshot-v3-default', 'legacy-fingerprint', 'legacy-snapshot',
+        '2026-08-20T12:00:00.000Z', '2026-08-20T12:00:00.000Z', 0, 0, 0
+      );
+      PRAGMA user_version = 1;
+    `);
+    database.close();
+    database = null;
+
+    const snapshot = await collectUsage(options(fixture));
+    const ledger = await readDurableLedger(ledgerPath);
+
+    assert.equal(totalTokens(snapshot), 100);
+    assert.equal(ledger.revision, 2);
+    assert.equal(ledger.migration.includeArchived, false);
+    assert.equal(ledger.migration.collectionSince, null);
+    assert.equal(ledger.migration.scopeKnown, false);
+    database = new DatabaseSync(ledgerPath, { readOnly: true });
+    assert.equal(database.prepare("PRAGMA user_version").get().user_version, 2);
+  } finally {
+    database?.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("archive source classification normalizes path separators", () => {
   assert.equal(
     sourceLocationForPath(
@@ -2036,18 +2444,35 @@ test("archive source classification normalizes path separators", () => {
 test("durable storage and exported snapshots keep privacy and permissions", async () => {
   const fixture = await createFixture([100]);
   const secretPrompt = "do not export this prompt";
+  const cwdCanary = "/private/new-write-cwd-canary";
+  const remoteCanary = "https://user:secret@example.test/new-write.git";
+  const sourceCanary = "/private/new-write-source-canary.jsonl";
+  let database;
   try {
-    await appendFile(
+    await writeFile(
       fixture.file,
-      serialize([{
-        timestamp: BASE_TIMESTAMP,
-        type: "event_msg",
-        payload: {
-          type: "message",
-          message: secretPrompt,
-          cwd: fixture.root,
+      serialize([
+        {
+          timestamp: BASE_TIMESTAMP,
+          type: "session_meta",
+          payload: {
+            id: THREAD_ID,
+            source: sourceCanary,
+            cwd: cwdCanary,
+            git: { repository_url: remoteCanary },
+          },
         },
-      }]),
+        ...rolloutRows([100]),
+        {
+          timestamp: BASE_TIMESTAMP,
+          type: "event_msg",
+          payload: {
+            type: "message",
+            message: secretPrompt,
+            cwd: fixture.root,
+          },
+        },
+      ]),
     );
     const snapshot = await collectUsage(options(fixture));
     const writeResult = await writePrivateSnapshot(fixture.output, snapshot);
@@ -2059,6 +2484,9 @@ test("durable storage and exported snapshots keep privacy and permissions", asyn
     assert.equal(writeResult.snapshot.coverage.observedTokens, 100);
     assert.equal(encoded.includes(fixture.root), false);
     assert.equal(encoded.includes(secretPrompt), false);
+    assert.equal(encoded.includes(cwdCanary), false);
+    assert.equal(encoded.includes(remoteCanary), false);
+    assert.equal(encoded.includes(sourceCanary), false);
     assert.equal((await stat(fixture.stateDirectory)).mode & 0o777, 0o700);
     assert.equal((await stat(ledgerPath)).mode & 0o777, 0o600);
     assert.equal((await stat(fixture.output)).mode & 0o777, 0o600);
@@ -2070,6 +2498,24 @@ test("durable storage and exported snapshots keep privacy and permissions", asyn
       (await readPrivateSnapshot(fixture.output)).coverage.observedTokens,
       100,
     );
+    database = new DatabaseSync(ledgerPath, { readOnly: true });
+    const persisted = database.prepare(`
+      SELECT token_cwd AS tokenCwd, token_git_origin AS tokenGitOrigin,
+             token_raw_source AS tokenRawSource
+        FROM usage_observations
+       LIMIT 1
+    `).get();
+    assert.deepEqual({ ...persisted }, {
+      tokenCwd: "",
+      tokenGitOrigin: null,
+      tokenRawSource: null,
+    });
+    database.close();
+    database = null;
+    const storedBytes = await readFile(ledgerPath, "utf8");
+    assert.equal(storedBytes.includes(cwdCanary), false);
+    assert.equal(storedBytes.includes(remoteCanary), false);
+    assert.equal(storedBytes.includes(sourceCanary), false);
     for (const suffix of ["-wal", "-shm"]) {
       try {
         assert.equal((await stat(`${ledgerPath}${suffix}`)).mode & 0o777, 0o600);
@@ -2078,6 +2524,7 @@ test("durable storage and exported snapshots keep privacy and permissions", asyn
       }
     }
   } finally {
+    database?.close();
     await chmod(fixture.file, 0o600).catch(() => {});
     await rm(fixture.root, { recursive: true, force: true });
   }
