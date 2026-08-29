@@ -9,6 +9,11 @@ import {
   collectUsage,
   collectUsageSequential,
 } from "../lib/token-ledger-importer.mjs";
+import {
+  DURABLE_LEDGER_RETENTION_DAYS,
+  readDurableLedger,
+  resolveDurableLedgerPath,
+} from "../lib/token-ledger-ledger.mjs";
 
 function positiveInteger(argv, name, fallback) {
   const index = argv.indexOf(name);
@@ -145,18 +150,50 @@ try {
 
   const before = process.resourceUsage().maxRSS;
   const runWallTimeMs = [];
+  const output = resolve(root, "snapshot.json");
   let snapshot;
   for (let run = 0; run < warmRuns; run += 1) {
     const started = performance.now();
     snapshot = await (sequential ? collectUsageSequential : collectUsage)({
-      output: resolve(root, "snapshot.json"),
+      output,
       codexHome: root,
       includeArchived: false,
       since: null,
     });
     runWallTimeMs.push(Number((performance.now() - started).toFixed(1)));
   }
+  const ledger = await readDurableLedger(resolveDurableLedgerPath({ output }));
+  const durableTotalTokens = ledger.usageRows.reduce(
+    (sum, row) => sum + Number(row.totalTokens || 0),
+    0,
+  );
+  if (tokenEvents && durableTotalTokens !== tokenEvents * 100) {
+    throw new Error(
+      `Durable benchmark total mismatch: ${durableTotalTokens} vs ${tokenEvents * 100}.`,
+    );
+  }
+  if (
+    tokenEvents &&
+    eventAgeDays > DURABLE_LEDGER_RETENTION_DAYS &&
+    ledger.compactedUsageRows === 0
+  ) {
+    throw new Error("Durable benchmark did not compact its old token events.");
+  }
+  if (ledger.revision !== warmRuns) {
+    throw new Error(
+      `Durable benchmark revision mismatch: ${ledger.revision} vs ${warmRuns}.`,
+    );
+  }
   const after = process.resourceUsage().maxRSS;
+  const warmSamples = runWallTimeMs.slice(1).sort((left, right) => left - right);
+  const warmMedianWallTimeMs = warmSamples.length === 0
+    ? null
+    : warmSamples.length % 2 === 1
+      ? warmSamples[Math.floor(warmSamples.length / 2)]
+      : Number((
+          (warmSamples[warmSamples.length / 2 - 1] +
+            warmSamples[warmSamples.length / 2]) / 2
+        ).toFixed(1));
   const bytes = contents.reduce(
     (sum, content) => sum + Buffer.byteLength(content),
     0,
@@ -174,11 +211,14 @@ try {
         eventAgeDays: tokenEvents ? eventAgeDays : null,
         bytes,
         runWallTimeMs,
-        wallTimeMs: runWallTimeMs.reduce((sum, value) => sum + value, 0),
-        warmWallTimeMs: runWallTimeMs.at(-1),
+        coldWallTimeMs: runWallTimeMs[0],
+        warmMedianWallTimeMs,
         peakRssKb: Math.max(before, after),
         peakRssDeltaKb: Math.max(0, after - before),
         parsedOutputEvents: snapshot.coverage.observedModelCalls,
+        durableRevision: ledger.revision,
+        durableCompactedBuckets: ledger.compactedUsageRows,
+        durableTotalTokens,
         parseErrors: snapshot.coverage.parseErrors,
       },
       null,

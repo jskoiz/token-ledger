@@ -28,6 +28,7 @@ import {
 import {
   DEFAULT_SNAPSHOT_MAX_BYTES,
   readPrivateSnapshot,
+  stagePrivateSnapshot,
   writePrivateSnapshot,
 } from "../lib/token-ledger-snapshot.mjs";
 import { codexHomeFingerprint } from "../lib/token-ledger-ledger.mjs";
@@ -635,6 +636,45 @@ test("private snapshots replace atomically and enforce mode 0600", async () => {
       events: [],
       synthetic: true,
     });
+    assert.equal((await stat(output)).mode & 0o777, 0o600);
+    assert.deepEqual(
+      (await readdir(root)).filter((name) => name.endsWith(".tmp")),
+      [],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("staged snapshots stay private until publication and discard cleanly", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-stage-write-"));
+  const output = resolve(root, "snapshot.json");
+  try {
+    await writePrivateSnapshot(output, { version: "previous", events: [] });
+    const discarded = await stagePrivateSnapshot(output, {
+      version: "discarded",
+      events: [],
+    });
+    assert.equal((await readPrivateSnapshot(output)).version, "previous");
+    assert.equal(
+      (await readdir(root)).filter((name) => name.endsWith(".tmp")).length,
+      1,
+    );
+    await discarded.discard();
+    assert.equal((await readPrivateSnapshot(output)).version, "previous");
+    assert.deepEqual(
+      (await readdir(root)).filter((name) => name.endsWith(".tmp")),
+      [],
+    );
+
+    const published = await stagePrivateSnapshot(output, {
+      version: "published",
+      events: [],
+    });
+    assert.equal((await readPrivateSnapshot(output)).version, "previous");
+    await published.publish();
+    await published.discard();
+    assert.equal((await readPrivateSnapshot(output)).version, "published");
     assert.equal((await stat(output)).mode & 0o777, 0o600);
     assert.deepEqual(
       (await readdir(root)).filter((name) => name.endsWith(".tmp")),

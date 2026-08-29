@@ -5,6 +5,7 @@ import {
   appendFile,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   rm,
   stat,
@@ -18,6 +19,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   readPrivateSnapshot,
+  stagePrivateSnapshot,
   writePrivateSnapshot,
 } from "../lib/token-ledger-snapshot.mjs";
 import {
@@ -2194,6 +2196,84 @@ test("snapshot size fallback stays stale and does not advance ledger revisions",
     assert.equal(await readDurableLedgerRevision(ledgerPath), 1);
     assert.equal(stored.coverage.observedTokens, 100);
     assert.equal(stored.metadata.durableLedger.revision, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("exhausted source retries never publish an uncommitted snapshot", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-staged-retry-"));
+  const codexHome = resolve(root, "codex-home");
+  const sourceDirectory = resolve(codexHome, "sessions", "2026", "08");
+  const sourceFile = resolve(
+    sourceDirectory,
+    "rollout-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl",
+  );
+  const snapshotPath = resolve(root, "snapshot.json.gz");
+  const ledgerPath = resolveDurableLedgerPath({ output: snapshotPath });
+  let mutation = 0;
+  try {
+    await mkdir(sourceDirectory, { recursive: true });
+    await writeFile(
+      sourceFile,
+      serializeRows(sourceRolloutRows(
+        100,
+        "turn-initial",
+        "2026-08-23T10:00:00.000Z",
+      )),
+    );
+    const initial = await collectUsage({
+      output: snapshotPath,
+      codexHome,
+      includeArchived: true,
+      since: null,
+    });
+    await writePrivateSnapshot(snapshotPath, initial);
+    await appendFile(
+      sourceFile,
+      serializeRows(sourceRolloutRows(
+        200,
+        "turn-pending",
+        "2026-08-23T10:01:00.000Z",
+      )),
+    );
+
+    await assert.rejects(
+      () => collectUsage({
+        output: snapshotPath,
+        codexHome,
+        includeArchived: true,
+        since: null,
+        stageSnapshot: (candidate) =>
+          stagePrivateSnapshot(snapshotPath, candidate),
+        faultInjector: async ({ point }) => {
+          if (point !== "after-validation") return;
+          mutation += 1;
+          const rows = Array.from({ length: mutation + 1 }, (_, index) =>
+            sourceRolloutRows(
+              300 + mutation * 100 + index,
+              `turn-mutation-${mutation}-${index}`,
+              new Date(
+                Date.parse("2026-08-23T11:00:00.000Z") +
+                  (mutation * 10 + index) * 60_000,
+              ).toISOString(),
+            )
+          ).flat();
+          await writeFile(sourceFile, serializeRows(rows));
+        },
+      }),
+      (error) => error?.code === "ERR_SOURCE_CHANGED_DURING_COLLECTION",
+    );
+
+    const stored = await readPrivateSnapshot(snapshotPath);
+    assert.equal(mutation, 3);
+    assert.equal(stored.coverage.observedTokens, 100);
+    assert.equal(stored.metadata.durableLedger.revision, 1);
+    assert.equal(await readDurableLedgerRevision(ledgerPath), 1);
+    assert.deepEqual(
+      (await readdir(root)).filter((name) => name.endsWith(".tmp")),
+      [],
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -1524,6 +1524,14 @@ test("legacy migration requires matching collection and Codex-home provenance", 
     assert.equal(ledger.migration, null);
     assert.equal(ledger.legacySnapshotStatus, "codex-home-unverified");
     assert.equal(
+      snapshot.coverage.legacySnapshotStatus,
+      "codex-home-unverified",
+    );
+    assert.equal(
+      snapshot.metadata.durableLedger.legacySnapshotStatus,
+      "codex-home-unverified",
+    );
+    assert.equal(
       database.prepare(
         "SELECT value FROM ledger_meta WHERE key = 'legacy_snapshot_status'",
       ).get().value,

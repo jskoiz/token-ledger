@@ -36,7 +36,7 @@ import {
 } from "../lib/token-ledger-calendar.mjs";
 import {
   readPrivateSnapshot,
-  writePrivateSnapshot,
+  stagePrivateSnapshot,
 } from "../lib/token-ledger-snapshot.mjs";
 import {
   collectionScope,
@@ -1044,13 +1044,13 @@ async function refreshSnapshot(options) {
         codexHome: options.codexHome,
         includeArchived: options.includeArchived,
         since: options.since,
-        publishSnapshot: async (candidate) => {
-          writeResult = await writePrivateSnapshot(
+        stageSnapshot: async (candidate) => {
+          writeResult = await stagePrivateSnapshot(
             options.input,
             candidate,
             options.snapshotWriteOptions,
           );
-          return writeResult.snapshot;
+          return writeResult;
         },
       },
       ({ current, total }) => {
