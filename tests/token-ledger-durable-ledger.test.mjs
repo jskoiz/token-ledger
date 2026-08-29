@@ -187,6 +187,33 @@ test("usage and quota survive rollout source disappearance", async () => {
   }
 });
 
+test("durable ledgers reject a different Codex data directory", async () => {
+  const firstFixture = await createFixture([100]);
+  const secondFixture = await createFixture([200]);
+  try {
+    await collectUsage(options(firstFixture));
+    await assert.rejects(
+      collectUsage(options(secondFixture, {
+        output: firstFixture.output,
+        stateDirectory: firstFixture.stateDirectory,
+      })),
+      (error) => error?.code === "ERR_DURABLE_LEDGER_CODEX_HOME",
+    );
+    const ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: firstFixture.stateDirectory }),
+    );
+
+    assert.equal(
+      ledger.usageRows.reduce((sum, row) => sum + row.totalTokens, 0),
+      100,
+    );
+    assert.equal(ledger.revision, 1);
+  } finally {
+    await rm(firstFixture.root, { recursive: true, force: true });
+    await rm(secondFixture.root, { recursive: true, force: true });
+  }
+});
+
 test("exact observations retain tool-call ownership after source disappearance", async () => {
   const fixture = await createFixture([100]);
   try {
@@ -641,6 +668,112 @@ test("partial legacy overlap does not retain credits for rescanned usage", async
 
     assert.equal(snapshot.coverage.observedTokens, 200);
     assert.ok(credits < 7);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("legacy overlap subtracts rescanned observations after compaction", async () => {
+  const baseTimestamp = "2015-08-20T10:00:00.000Z";
+  const eventTimestamp = "2015-08-20T10:00:01.000Z";
+  const fixture = await createFixture([100], { baseTimestamp });
+  const legacy = {
+    schemaVersion: 3,
+    generatedAt: "2026-08-20T12:00:00.000Z",
+    events: [{
+      timestamp: eventTimestamp,
+      startAt: eventTimestamp,
+      endAt: eventTimestamp,
+      project: "Unknown project",
+      model: "gpt-5.4",
+      rateCardModel: "gpt-5.4",
+      effort: "medium",
+      source: "unknown",
+      useType: "unknown",
+      inputTokens: 90,
+      cachedInputTokens: 10,
+      outputTokens: 10,
+      reasoningTokens: 4,
+      totalTokens: 100,
+      toolCalls: 0,
+      callCount: 1,
+      detailedCallCount: 1,
+      inputCallCount: 1,
+      breakdownAvailable: true,
+      threadIds: [THREAD_ID],
+    }],
+  };
+  try {
+    await writePrivateSnapshot(fixture.output, legacy);
+    const snapshot = await collectUsage(options(fixture));
+    const ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+
+    assert.equal(snapshot.coverage.observedTokens, 100);
+    assert.equal(ledger.compactedUsageRows, 1);
+    assert.equal(ledger.migratedUsageRows, 0);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("active-only legacy migrations survive --no-archived refreshes", async () => {
+  const fixture = await createFixture([]);
+  const generatedAt = "2026-08-20T12:00:00.000Z";
+  const legacy = {
+    schemaVersion: 3,
+    generatedAt,
+    provenance: {
+      collection: { since: null, includeArchived: false },
+    },
+    quotaObservations: [{
+      timestamp: generatedAt,
+      lastSeenAt: generatedAt,
+      usedPercent: 22,
+      windowMinutes: 10_080,
+      resetsAt: WEEKLY_RESET,
+      planType: "plus",
+      limitKey: "weekly",
+      scope: "account",
+    }],
+    events: [{
+      timestamp: generatedAt,
+      project: "active-history",
+      model: "gpt-5.4",
+      rateCardModel: "gpt-5.4",
+      effort: "medium",
+      source: "local",
+      useType: "interactive",
+      inputTokens: 90,
+      cachedInputTokens: 10,
+      outputTokens: 10,
+      reasoningTokens: 4,
+      totalTokens: 100,
+      toolCalls: 0,
+      callCount: 1,
+      detailedCallCount: 1,
+      inputCallCount: 1,
+      breakdownAvailable: true,
+      threadIds: ["active-history-thread"],
+    }],
+  };
+  try {
+    await writePrivateSnapshot(fixture.output, legacy);
+    const snapshot = await collectUsage(options(fixture, {
+      includeArchived: false,
+    }));
+    const ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      { includeArchived: false },
+    );
+
+    assert.equal(snapshot.coverage.observedTokens, 100);
+    assert.equal(snapshot.coverage.migratedCompactedTokens, 100);
+    assert.equal(snapshot.quotaObservations.length, 1);
+    assert.equal(ledger.migration.includeArchived, false);
+    assert.equal(ledger.migratedUsageRows, 1);
+    assert.equal(ledger.migratedQuotaRows, 1);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
