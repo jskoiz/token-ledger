@@ -2072,7 +2072,7 @@ test("pruning a queued rollout mid-scan retries the collection and removes the t
       await writeFile(path, index === 0 ? `${ignored}\n` : largeContent);
     }
 
-    const spoolPrefix = "token-ledger-import-";
+    const spoolPrefix = `token-ledger-import-${process.pid}-`;
     const before = (await readdir(tmpdir()))
       .filter((entry) => entry.startsWith(spoolPrefix))
       .sort();

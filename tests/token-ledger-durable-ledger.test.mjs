@@ -1276,6 +1276,55 @@ test("compaction keeps active and archived source scopes filterable", async () =
   }
 });
 
+test("a reappearing compacted member does not expose its archived siblings", async () => {
+  const baseTimestamp = "2015-08-20T10:00:00.000Z";
+  const fixture = await createFixture([], { baseTimestamp });
+  const archivedDirectory = resolve(
+    fixture.root,
+    "archived_sessions",
+    "2015",
+    "08",
+    "20",
+  );
+  const archivedFile = resolve(archivedDirectory, ARCHIVED_ROLLOUT_NAME);
+  try {
+    await mkdir(archivedDirectory, { recursive: true });
+    await writeFile(
+      archivedFile,
+      serialize(rolloutRows([100, 200], { baseTimestamp })),
+    );
+    const archivedOnly = await collectUsage(options(fixture));
+    let ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+    assert.equal(totalTokens(archivedOnly), 300);
+    assert.equal(ledger.compactedUsageRows, 1);
+
+    await writeFile(
+      fixture.file,
+      serialize(rolloutRows([100], { baseTimestamp })),
+    );
+    const withReappearedMember = await collectUsage(options(fixture));
+    const activeOnly = await collectUsage(options(fixture, {
+      includeArchived: false,
+    }));
+    await rm(fixture.file);
+    const retainedActiveHistory = await collectUsage(options(fixture, {
+      includeArchived: false,
+    }));
+    ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+
+    assert.equal(totalTokens(withReappearedMember), 300);
+    assert.equal(totalTokens(activeOnly), 100);
+    assert.equal(totalTokens(retainedActiveHistory), 100);
+    assert.equal(ledger.compactedUsageRows, 2);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("user-selected output directories keep their existing permissions", async () => {
   const fixture = await createFixture([100]);
   const selectedDirectory = resolve(fixture.root, "shared-output");
