@@ -496,6 +496,37 @@ test("shorter atomic replacement removes unmatched source observations", async (
   }
 });
 
+test("larger same-inode overwrite removes unmatched source observations", async () => {
+  const fixture = await createFixture([100, 200]);
+  try {
+    await collectUsage(options(fixture));
+    const before = await stat(fixture.file);
+    await writeFile(fixture.file, serialize([
+      ...rolloutRows([300]),
+      {
+        timestamp: "2026-08-20T10:02:00.000Z",
+        type: "event_msg",
+        payload: {
+          type: "user_message",
+          message: "padding".repeat(1_024),
+        },
+      },
+    ]));
+    const after = await stat(fixture.file);
+    assert.equal(after.ino, before.ino);
+    assert.ok(after.size > before.size);
+
+    const replaced = await collectUsage(options(fixture));
+    await rm(fixture.file);
+    const afterRemoval = await collectUsage(options(fixture));
+
+    assert.equal(totalTokens(replaced), 300);
+    assert.equal(totalTokens(afterRemoval), 300);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("replacing one source does not rewrite a shared observation", async () => {
   const fixture = await createFixture([100]);
   const sharedFile = resolve(fixture.file, "..", SHARED_ROLLOUT_NAME);
@@ -1381,6 +1412,38 @@ test("replacement reconciles shared quota and tool source ownership", async () =
       ),
       1,
     );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("replacement resets retained quota source bounds", async () => {
+  const fixture = await createFixture([100], {
+    baseTimestamp: "2026-08-21T10:00:00.000Z",
+    usedPercent: 37,
+  });
+  const replacement = resolve(fixture.root, "replacement.jsonl");
+  try {
+    await collectUsage(options(fixture));
+    await writeFile(replacement, serialize(rolloutRows([200], {
+      baseTimestamp: "2026-08-20T10:00:00.000Z",
+      usedPercent: 37,
+    })));
+    await rename(replacement, fixture.file);
+
+    const activeOnly = await collectUsage(options(fixture, {
+      includeArchived: false,
+    }));
+    const afterOldSample = await collectUsage(options(fixture, {
+      includeArchived: false,
+      since: "2026-08-21T00:00:00.000Z",
+    }));
+
+    assert.equal(
+      activeOnly.quotaObservations[0].lastSeenAt,
+      "2026-08-20T10:00:01.000Z",
+    );
+    assert.equal(afterOldSample.quotaObservations.length, 0);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
