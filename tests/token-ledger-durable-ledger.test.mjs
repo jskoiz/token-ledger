@@ -482,7 +482,7 @@ test("active move reconciles an archive replaced during active-only tracking", a
   }
 });
 
-test("uncertain replacement preserves memberships until a clean rescan", async () => {
+test("uncertain replacement is evidence-only until a clean rescan", async () => {
   const fixture = await createFixture([100, 150], { usedPercent: 37 });
   const replacement = resolve(fixture.root, "uncertain-replacement.jsonl");
   const recovered = resolve(fixture.root, "recovered-replacement.jsonl");
@@ -520,21 +520,22 @@ test("uncertain replacement preserves memberships until a clean rescan", async (
     assert.equal(initial.quotaObservations.length, 1);
     assert.equal(totalToolCalls(initial), 2);
     assert.equal(uncertain.coverage.parseErrors, 1);
-    assert.equal(totalTokens(uncertain), 350);
+    assert.equal(totalTokens(uncertain), 250);
     assert.deepEqual(
       uncertain.quotaObservations.map((quota) => quota.usedPercent).sort(),
-      [37, 58],
+      [37],
     );
-    assert.equal(totalToolCalls(uncertain), 3);
+    assert.equal(totalToolCalls(uncertain), 2);
     assert.equal(
       retained.usageRows.reduce((sum, row) => sum + row.totalTokens, 0),
-      350,
+      250,
     );
-    assert.equal(retained.quotaRows.length, 2);
-    assert.equal(retained.toolRows.length, 3);
-    assert.equal(totalTokens(afterRemoval), 350);
-    assert.equal(afterRemoval.quotaObservations.length, 2);
-    assert.equal(totalToolCalls(afterRemoval), 3);
+    assert.equal(retained.quotaRows.length, 1);
+    assert.equal(retained.toolRows.length, 2);
+    assert.equal(retained.sourceSummary.states[0].reconciliationPending, true);
+    assert.equal(totalTokens(afterRemoval), 250);
+    assert.equal(afterRemoval.quotaObservations.length, 1);
+    assert.equal(totalToolCalls(afterRemoval), 2);
     assert.equal(clean.coverage.parseErrors, 0);
     assert.equal(totalTokens(clean), 200);
     assert.deepEqual(
@@ -545,6 +546,10 @@ test("uncertain replacement preserves memberships until a clean rescan", async (
     assert.equal(reconciled.usageRows.length, 1);
     assert.equal(reconciled.quotaRows.length, 1);
     assert.equal(reconciled.toolRows.length, 1);
+    assert.equal(
+      reconciled.sourceSummary.states[0].reconciliationPending,
+      false,
+    );
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -601,14 +606,14 @@ test("invalid-token uncertainty is scoped to its replaced source", async () => {
     assert.equal(totalTokens(initial), 900);
     assert.equal(totalToolCalls(initial), 4);
     assert.equal(sourceScoped.coverage.invalidTokenRecords, 1);
-    assert.equal(totalTokens(sourceScoped), 750);
+    assert.equal(totalTokens(sourceScoped), 650);
     assert.deepEqual(
       sourceScoped.quotaObservations
         .map((quota) => quota.usedPercent)
         .sort((left, right) => left - right),
-      [37, 58, 67],
+      [37, 67],
     );
-    assert.equal(totalToolCalls(sourceScoped), 4);
+    assert.equal(totalToolCalls(sourceScoped), 3);
     assert.equal(recovered.coverage.invalidTokenRecords, 0);
     assert.equal(totalTokens(recovered), 650);
     assert.deepEqual(
@@ -618,6 +623,211 @@ test("invalid-token uncertainty is scoped to its replaced source", async () => {
       [59, 67],
     );
     assert.equal(totalToolCalls(recovered), 2);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("same-inode uncertain scans cannot overwrite positional usage", async () => {
+  const fixture = await createFixture([100, 150]);
+  const invalidToken = tokenCount("2026-08-20T10:02:01.000Z", 500);
+  invalidToken.payload.info.last_token_usage.total_tokens = "invalid";
+  try {
+    const initial = await collectUsage(options(fixture));
+    const before = await stat(fixture.file);
+    await writeFile(fixture.file, serialize([
+      ...rolloutRows([50]),
+      ...turnStart("2026-08-20T10:02:00.000Z", "invalid-turn"),
+      invalidToken,
+      {
+        timestamp: "2026-08-20T10:03:00.000Z",
+        type: "event_msg",
+        payload: {
+          type: "user_message",
+          message: "padding".repeat(1_024),
+        },
+      },
+    ]));
+    const after = await stat(fixture.file);
+    assert.equal(after.ino, before.ino);
+    assert.ok(after.size > before.size);
+
+    const uncertain = await collectUsage(options(fixture));
+    await rm(fixture.file);
+    const afterRemoval = await collectUsage(options(fixture));
+    const ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+
+    assert.equal(totalTokens(initial), 250);
+    assert.equal(uncertain.coverage.invalidTokenRecords, 1);
+    assert.equal(totalTokens(uncertain), 250);
+    assert.equal(totalTokens(afterRemoval), 250);
+    assert.deepEqual(
+      ledger.usageRows.map((row) => row.totalTokens).sort((a, b) => a - b),
+      [100, 150],
+    );
+    assert.equal(ledger.sourceSummary.states[0].reconciliationPending, true);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("uncertain scans cannot clear prior tool ownership", async () => {
+  const fixture = await createFixture([100]);
+  try {
+    await appendFile(fixture.file, serialize([
+      shellCall("2026-08-20T10:01:00.000Z", "call-before-uncertainty"),
+    ]));
+    const initial = await collectUsage(options(fixture));
+    const before = await stat(fixture.file);
+    await writeFile(
+      fixture.file,
+      `${serialize(rolloutRows([50]))}{"type":"response_item","payload":{"type":"function_call"\n`,
+    );
+    const after = await stat(fixture.file);
+    assert.equal(after.ino, before.ino);
+
+    const uncertain = await collectUsage(options(fixture));
+    await rm(fixture.file);
+    const afterRemoval = await collectUsage(options(fixture));
+    const ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+
+    assert.equal(totalTokens(initial), 100);
+    assert.equal(totalToolCalls(initial), 1);
+    assert.equal(uncertain.coverage.parseErrors, 1);
+    assert.equal(totalTokens(uncertain), 100);
+    assert.equal(totalToolCalls(uncertain), 1);
+    assert.equal(totalTokens(afterRemoval), 100);
+    assert.equal(totalToolCalls(afterRemoval), 1);
+    assert.equal(ledger.toolRows.length, 1);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("deferred replacement reconciles after a clean append", async () => {
+  const fixture = await createFixture([100, 150], { usedPercent: 37 });
+  const replacement = resolve(fixture.root, "deferred-replacement.jsonl");
+  const validRows = [
+    ...rolloutRows([200], { usedPercent: 58 }),
+    shellCall("2026-08-20T10:01:00.000Z", "call-after-recovery"),
+  ];
+  try {
+    await appendFile(fixture.file, serialize([
+      shellCall("2026-08-20T10:02:00.000Z", "call-old-one"),
+      shellCall("2026-08-20T10:03:00.000Z", "call-old-two"),
+    ]));
+    await collectUsage(options(fixture));
+
+    await writeFile(
+      replacement,
+      `${serialize(validRows)}{"type":"event_msg","payload":{"type":"user_message","message":"`,
+    );
+    await rename(replacement, fixture.file);
+    const uncertain = await collectUsage(options(fixture));
+    let ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+    assert.equal(totalTokens(uncertain), 250);
+    assert.equal(ledger.sourceSummary.states[0].changeCount, 1);
+    assert.equal(ledger.sourceSummary.states[0].reconciliationPending, true);
+
+    await appendFile(fixture.file, `completed"}}\n`);
+    const recovered = await collectUsage(options(fixture));
+    ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+
+    assert.equal(recovered.coverage.parseErrors, 0);
+    assert.equal(totalTokens(recovered), 200);
+    assert.deepEqual(
+      recovered.quotaObservations.map((quota) => quota.usedPercent),
+      [58],
+    );
+    assert.equal(totalToolCalls(recovered), 1);
+    assert.equal(ledger.usageRows.length, 1);
+    assert.equal(ledger.quotaRows.length, 1);
+    assert.equal(ledger.toolRows.length, 1);
+    assert.equal(ledger.sourceSummary.states[0].changeCount, 1);
+    assert.equal(ledger.sourceSummary.states[0].reconciliationPending, false);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("pending reconciliation survives truncation lifecycle tracking and tombstone", async () => {
+  const fixture = await createFixture([100]);
+  const replacement = resolve(fixture.root, "uncertain-replacement.jsonl");
+  const archived = resolve(
+    fixture.root,
+    "archived_sessions",
+    "2026",
+    "08",
+    ROLLOUT_NAME,
+  );
+  const ledgerPath = resolveDurableLedgerPath({
+    stateDirectory: fixture.stateDirectory,
+  });
+  try {
+    await collectUsage(options(fixture));
+    await writeFile(
+      replacement,
+      `${serialize(rolloutRows([200]))}{"type":"event_msg","payload":\n`,
+    );
+    await rename(replacement, fixture.file);
+    await collectUsage(options(fixture));
+    let ledger = await readDurableLedger(ledgerPath);
+    assert.equal(ledger.sourceSummary.states[0].reconciliationPending, true);
+
+    await writeFile(fixture.file, serialize(rolloutRows([200])));
+    await collectUsage(options(fixture));
+    ledger = await readDurableLedger(ledgerPath);
+    assert.equal(ledger.sourceSummary.states[0].changeState, "truncated");
+    assert.equal(ledger.sourceSummary.states[0].reconciliationPending, true);
+
+    await mkdir(resolve(archived, ".."), { recursive: true });
+    await rename(fixture.file, archived);
+    await collectUsage(options(fixture, { includeArchived: false }));
+    ledger = await readDurableLedger(ledgerPath);
+    assert.equal(ledger.sourceSummary.states[0].location, "archived");
+    assert.equal(ledger.sourceSummary.states[0].reconciliationPending, true);
+
+    await rm(archived);
+    await collectUsage(options(fixture));
+    ledger = await readDurableLedger(ledgerPath);
+    assert.equal(ledger.sourceSummary.states[0].status, "tombstoned");
+    assert.equal(ledger.sourceSummary.states[0].reconciliationPending, true);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("pending reconciliation survives a missing zero-observation source", async () => {
+  const fixture = await createFixture([]);
+  const replacement = resolve(fixture.root, "uncertain-empty-replacement.jsonl");
+  const ledgerPath = resolveDurableLedgerPath({
+    stateDirectory: fixture.stateDirectory,
+  });
+  try {
+    await collectUsage(options(fixture));
+    await writeFile(
+      replacement,
+      `{"type":"event_msg","payload":{"type":"token_count"\n`,
+    );
+    await rename(replacement, fixture.file);
+    await collectUsage(options(fixture));
+    let ledger = await readDurableLedger(ledgerPath);
+    assert.equal(ledger.sourceSummary.states[0].observedEventCount, 0);
+    assert.equal(ledger.sourceSummary.states[0].reconciliationPending, true);
+
+    await rm(fixture.file);
+    await collectUsage(options(fixture));
+    ledger = await readDurableLedger(ledgerPath);
+    assert.equal(ledger.sourceSummary.states[0].status, "missing");
+    assert.equal(ledger.sourceSummary.states[0].reconciliationPending, true);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -961,6 +1171,118 @@ test("shorter atomic replacement removes unmatched source observations", async (
     assert.equal(ledger.usageRows.length, 1);
     assert.equal(ledger.usageRows[0].totalTokens, 300);
   } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("true append after atomic replacement does not count another replacement", async () => {
+  const fixture = await createFixture([100]);
+  const replacement = resolve(fixture.root, "replacement.jsonl");
+  try {
+    await collectUsage(options(fixture));
+    await writeFile(replacement, serialize(rolloutRows([200])));
+    await rename(replacement, fixture.file);
+    const replaced = await collectUsage(options(fixture));
+
+    await appendFile(
+      fixture.file,
+      serialize(rolloutRows([300], { offset: 1 })),
+    );
+    const appended = await collectUsage(options(fixture));
+    const ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+
+    assert.equal(totalTokens(replaced), 200);
+    assert.equal(totalTokens(appended), 500);
+    assert.equal(ledger.usageRows.length, 2);
+    assert.equal(ledger.sourceSummary.states.length, 1);
+    assert.equal(ledger.sourceSummary.states[0].changeCount, 1);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("move plus same-inode rewrite reconciles as a replacement", async () => {
+  const fixture = await createFixture([100, 200]);
+  const archived = resolve(
+    fixture.root,
+    "archived_sessions",
+    "2026",
+    "08",
+    ROLLOUT_NAME,
+  );
+  try {
+    await collectUsage(options(fixture));
+    const before = await stat(fixture.file);
+    await mkdir(resolve(archived, ".."), { recursive: true });
+    await rename(fixture.file, archived);
+    await writeFile(archived, serialize(rolloutRows([300])));
+    const after = await stat(archived);
+    assert.equal(after.ino, before.ino);
+    assert.ok(after.size < before.size);
+
+    const rewritten = await collectUsage(options(fixture));
+    const ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+    assert.equal(totalTokens(rewritten), 300);
+    assert.equal(ledger.usageRows.length, 1);
+    assert.equal(ledger.sourceSummary.states[0].location, "archived");
+    assert.equal(ledger.sourceSummary.states[0].changeCount, 1);
+    assert.equal(ledger.sourceSummary.states[0].changeState, "replaced");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("forced reconciliation removes stale positions for shared observations", async () => {
+  const fixture = await createFixture([100, 200]);
+  const sharedFile = resolve(fixture.file, "..", SHARED_ROLLOUT_NAME);
+  const replacement = resolve(fixture.root, "replacement.jsonl");
+  const ledgerPath = resolveDurableLedgerPath({
+    stateDirectory: fixture.stateDirectory,
+  });
+  let database;
+  try {
+    await writeFile(sharedFile, await readFile(fixture.file));
+    await collectUsage(options(fixture));
+    const originalInode = (await stat(fixture.file)).ino;
+    database = new DatabaseSync(ledgerPath, { readOnly: true });
+    const activeSourceId = String(database.prepare(`
+      SELECT source_id AS sourceId
+        FROM source_state
+       WHERE inode = ?
+    `).get(originalInode).sourceId);
+    database.close();
+    database = null;
+
+    await writeFile(replacement, serialize(rolloutRows([300])));
+    await rename(replacement, fixture.file);
+    const replaced = await collectUsage(options(fixture));
+
+    database = new DatabaseSync(ledgerPath, { readOnly: true });
+    const replacedPositions = database.prepare(`
+      SELECT event_ordinal AS eventOrdinal
+        FROM source_event_positions
+       WHERE source_id = ?
+       ORDER BY event_ordinal
+    `).all(activeSourceId);
+    const retainedSharedUsage = database.prepare(`
+      SELECT COUNT(*) AS count
+        FROM usage_observations
+       WHERE total_tokens IN (100, 200)
+    `).get().count;
+
+    assert.equal(totalTokens(replaced), 600);
+    assert.equal(replacedPositions.length, 1);
+    assert.equal(retainedSharedUsage, 2);
+  } finally {
+    try {
+      database?.close();
+    } catch {
+      // Fixture cleanup remains authoritative.
+    }
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
@@ -1615,6 +1937,37 @@ test("write-open rejects newer durable ledger schemas without rewriting them", a
       database.prepare("SELECT COUNT(*) AS count FROM future_only").get().count,
       0,
     );
+  } finally {
+    try {
+      database?.close();
+    } catch {
+      // Fixture cleanup remains authoritative.
+    }
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("v2 ledgers add reconciliation state without breaking read-only access", async () => {
+  const fixture = await createFixture([100]);
+  const ledgerPath = resolveDurableLedgerPath({
+    stateDirectory: fixture.stateDirectory,
+  });
+  let database;
+  try {
+    await collectUsage(options(fixture));
+    database = new DatabaseSync(ledgerPath);
+    database.exec("ALTER TABLE source_state DROP COLUMN reconciliation_pending");
+    database.close();
+    database = null;
+
+    const legacyV2 = await readDurableLedger(ledgerPath);
+    assert.equal(legacyV2.sourceSummary.states[0].reconciliationPending, false);
+    await collectUsage(options(fixture));
+
+    database = new DatabaseSync(ledgerPath, { readOnly: true });
+    const columns = database.prepare("PRAGMA table_info(source_state)").all()
+      .map((column) => String(column.name));
+    assert(columns.includes("reconciliation_pending"));
   } finally {
     try {
       database?.close();

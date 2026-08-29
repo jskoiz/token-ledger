@@ -1556,7 +1556,7 @@ test("since filters events and quotas while recording archive scope", async () =
   }
 });
 
-test("malformed usage and rate-limit payloads are ignored safely", async () => {
+test("invalid usage makes its source evidence-only", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
   const threadId = "88888888-8888-4888-8888-888888888888";
   const timestamp = "2026-08-18T10:00:00.000Z";
@@ -1602,14 +1602,9 @@ test("malformed usage and rate-limit payloads are ignored safely", async () => {
       includeArchived: true,
       since: null,
     });
-    assert.equal(snapshot.events.length, 1);
-    assert.equal(snapshot.events[0].totalTokens, 100);
-    assert.equal(snapshot.quotaObservations.length, 1);
-    const quota = snapshot.quotaObservations[0];
-    assert.equal(quota.usedPercent, 12.5);
-    assert.equal(quota.windowMinutes, 10080);
-    assert.equal(quota.planType, "plus");
-    assert.equal(quota.limitName, "weekly");
+    assert.equal(snapshot.coverage.invalidTokenRecords, 1);
+    assert.equal(snapshot.events.length, 0);
+    assert.equal(snapshot.quotaObservations.length, 0);
     assert.equal(snapshot.coverage.parseErrors, 0);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -1619,6 +1614,7 @@ test("malformed usage and rate-limit payloads are ignored safely", async () => {
 test("validates token totals and preserves malformed breakdowns as unknown", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-token-validation-"));
   const threadId = "91919191-9191-4919-8919-919191919191";
+  const validThreadId = "92929292-9292-4929-8929-929292929292";
   const validUsage = {
     input_tokens: 90,
     cached_input_tokens: 500,
@@ -1648,20 +1644,23 @@ test("validates token totals and preserves malformed breakdowns as unknown", asy
     [100],
     { value: 100 },
   ];
-  const rows = [];
+  const invalidRows = [];
   for (const [index, total] of invalidTotals.entries()) {
     const timestamp = new Date(
       Date.parse("2026-08-18T10:00:00.000Z") + index * 60_000,
     ).toISOString();
-    rows.push(...turnStart(timestamp, `invalid-${index}`));
-    rows.push(tokenRecord(timestamp, { ...validUsage, total_tokens: total }));
+    invalidRows.push(...turnStart(timestamp, `invalid-${index}`));
+    invalidRows.push(
+      tokenRecord(timestamp, { ...validUsage, total_tokens: total }),
+    );
   }
+  const validRows = [];
   const validTimestamp = "2026-08-18T20:00:00.000Z";
-  rows.push(...turnStart(validTimestamp, "valid-turn"));
-  rows.push(tokenRecord(validTimestamp, validUsage));
+  validRows.push(...turnStart(validTimestamp, "valid-turn"));
+  validRows.push(tokenRecord(validTimestamp, validUsage));
   const malformedBreakdownTimestamp = "2026-08-18T20:01:00.000Z";
-  rows.push(...turnStart(malformedBreakdownTimestamp, "unknown-turn"));
-  rows.push(tokenRecord(malformedBreakdownTimestamp, {
+  validRows.push(...turnStart(malformedBreakdownTimestamp, "unknown-turn"));
+  validRows.push(tokenRecord(malformedBreakdownTimestamp, {
     ...validUsage,
     input_tokens: "90",
   }));
@@ -1671,7 +1670,11 @@ test("validates token totals and preserves malformed breakdowns as unknown", asy
     await mkdir(rolloutDirectory, { recursive: true });
     await writeFile(
       resolve(rolloutDirectory, `rollout-${threadId}.jsonl`),
-      serialize(rows),
+      serialize(invalidRows),
+    );
+    await writeFile(
+      resolve(rolloutDirectory, `rollout-${validThreadId}.jsonl`),
+      serialize(validRows),
     );
 
     const snapshot = await collectUsage({
@@ -1963,8 +1966,8 @@ test("cold scans conservatively skip irrelevant JSONL lines", async () => {
     assert.equal(parseCount, 4);
     assert.equal(snapshot.coverage.parseErrors, 1);
     assert.equal(snapshot.coverage.filesScanned, 1);
-    assert.equal(snapshot.events.length, 1);
-    assert.equal(snapshot.coverage.observedModelCalls, 1);
+    assert.equal(snapshot.events.length, 0);
+    assert.equal(snapshot.coverage.observedModelCalls, 0);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -2091,15 +2094,15 @@ test("bounded scans match the sequential reference across collector fixtures", a
 
     const all = await collectPair(true, null, "all");
     assert.deepEqual(all.progress, [1, 2]);
-    assert.equal(all.parallel.coverage.duplicateEventsSkipped, 1);
+    assert.equal(all.parallel.coverage.duplicateEventsSkipped, 0);
     assert.equal(all.parallel.coverage.correctionIntervals, 1);
     assert.equal(all.parallel.coverage.parseErrors, 1);
-    assert.equal(all.parallel.quotaObservations.length, 1);
-    assert.equal(all.parallel.threads[0].parentThreadId, parentId);
-    assert.equal(all.parallel.coverage.observedModelCalls, 3);
+    assert.equal(all.parallel.quotaObservations.length, 0);
+    assert.equal(all.parallel.threads[0].parentThreadId, null);
+    assert.equal(all.parallel.coverage.observedModelCalls, 1);
 
     const withoutArchived = await collectPair(false, null, "active");
-    assert.equal(withoutArchived.parallel.coverage.observedModelCalls, 2);
+    assert.equal(withoutArchived.parallel.coverage.observedModelCalls, 0);
 
     const since = await collectPair(
       true,

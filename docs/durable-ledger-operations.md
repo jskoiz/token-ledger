@@ -38,6 +38,15 @@ truncated, or replaced. It is a provenance warning, not proof that SQLite is
 corrupt. A true append keeps stable provenance; a larger same-inode rewrite is
 classified as a replacement rather than an append.
 
+A source scan with malformed JSON or an invalid token record is evidence-only:
+its coverage counters and source watermark are retained, but none of its token,
+quota, tool, position, ownership, origin, or thread operations can change the
+last complete durable interpretation. If that scan also detected a replacement,
+the source state records a pending reconciliation. The bit survives lifecycle
+moves, missing or tombstoned state, and truncation, then clears atomically only
+after a clean complete scan reconciles every source-owned membership and
+position.
+
 ## Schema and privacy upgrades
 
 Schema-v1 preview ledgers with reconstructable migration scope upgrade to v2
