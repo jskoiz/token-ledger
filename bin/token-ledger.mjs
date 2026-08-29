@@ -1225,8 +1225,8 @@ export async function loadSnapshot(options) {
     cached.metadata?.durableLedger?.revision,
   );
   if (
-    ledgerRevision !== null &&
-    (!Number.isSafeInteger(snapshotRevision) || snapshotRevision < ledgerRevision)
+    !Number.isSafeInteger(snapshotRevision) ||
+    ledgerRevision !== snapshotRevision
   ) {
     try {
       return {

@@ -44,6 +44,10 @@ import {
   sourceWatermarksEqual,
 } from "../lib/token-ledger-importer.mjs";
 import {
+  readDurableLedgerRevision,
+  resolveDurableLedgerPath,
+} from "../lib/token-ledger-ledger.mjs";
+import {
   quotaCycleSummary,
   renderFullscreen,
   renderTerminal,
@@ -2065,6 +2069,60 @@ test("automatic cache validation rejects a different Codex home", async () => {
         error?.code === "ERR_DURABLE_LEDGER_CODEX_HOME" &&
         /different Codex data directory/i.test(error.message),
     );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("automatic cache validation rebuilds a missing or behind ledger", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-revision-cache-"));
+  const codexHome = resolve(root, "codex-home");
+  const snapshotPath = resolve(root, "snapshot.json.gz");
+  const ledgerPath = resolveDurableLedgerPath({ output: snapshotPath });
+  try {
+    await mkdir(codexHome, { recursive: true });
+    await collectUsage({
+      output: snapshotPath,
+      codexHome,
+      includeArchived: true,
+      since: null,
+    });
+    const cached = await collectUsage({
+      output: snapshotPath,
+      codexHome,
+      includeArchived: true,
+      since: null,
+    });
+    await writePrivateSnapshot(snapshotPath, cached);
+    const database = new DatabaseSync(ledgerPath);
+    database.prepare(
+      "UPDATE ledger_meta SET value = '0' WHERE key = 'revision'",
+    ).run();
+    database.close();
+
+    const options = parseArgs([
+      "day",
+      "2026-08-23",
+      "--static",
+      "--plain",
+      "--ascii",
+      "--tz",
+      "UTC",
+    ]);
+    options.codexHome = codexHome;
+    options.input = snapshotPath;
+    options.inputExplicit = false;
+
+    const behind = await loadSnapshot(options);
+    assert.equal(behind.sourceStatus, "verified-current");
+    assert.equal(behind.snapshot.metadata.durableLedger.revision, 1);
+    assert.equal(await readDurableLedgerRevision(ledgerPath), 1);
+
+    await rm(ledgerPath);
+    const missing = await loadSnapshot(options);
+    assert.equal(missing.sourceStatus, "verified-current");
+    assert.equal(missing.snapshot.metadata.durableLedger.revision, 1);
+    assert.equal(await readDurableLedgerRevision(ledgerPath), 1);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

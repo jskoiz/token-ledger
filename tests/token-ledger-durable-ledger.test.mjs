@@ -8,6 +8,7 @@ import {
   rm,
   rename,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -21,6 +22,7 @@ import {
 } from "../lib/token-ledger-importer.mjs";
 import {
   DURABLE_LEDGER_FILENAME,
+  codexHomeFingerprint,
   readDurableLedger,
   readDurableLedgerRevision,
   resolveDurableLedgerPath,
@@ -211,6 +213,30 @@ test("durable ledgers reject a different Codex data directory", async () => {
   } finally {
     await rm(firstFixture.root, { recursive: true, force: true });
     await rm(secondFixture.root, { recursive: true, force: true });
+  }
+});
+
+test("durable ledger binding canonicalizes Codex home aliases", async () => {
+  const fixture = await createFixture([100]);
+  const alias = resolve(fixture.root, "codex-home-alias");
+  try {
+    await collectUsage(options(fixture));
+    await symlink(fixture.root, alias, "dir");
+    const throughAlias = await collectUsage(options(fixture, {
+      codexHome: alias,
+    }));
+    const ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+
+    assert.equal(totalTokens(throughAlias), 100);
+    assert.equal(ledger.revision, 2);
+    assert.equal(
+      codexHomeFingerprint(alias),
+      codexHomeFingerprint(fixture.root),
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
   }
 });
 
