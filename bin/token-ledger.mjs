@@ -20,7 +20,6 @@ import {
   priorPeriodBounds,
 } from "./token-ledger-trend.mjs";
 import {
-  buildTrendReportViewModel,
   resolveEffectiveEnd,
 } from "./token-ledger-report-data.mjs";
 import { renderTrendCombo } from "./token-ledger-trend-terminal.mjs";
@@ -1242,15 +1241,10 @@ async function render(
         trend,
         days: options.trendDays,
         options,
-        viewModel: buildTrendReportViewModel({
-          snapshot,
-          bounds,
-          days: options.trendDays,
-          reportTimeMs: report.reportTimeMs ?? null,
-          sourceStatus: report.sourceStatus ?? "unchecked-cache",
-          projectRows: allRows,
-          events,
-        }),
+        projectRows: allRows,
+        reportTimeMs: report.reportTimeMs ?? null,
+        sourceStatus: report.sourceStatus ?? "unchecked-cache",
+        analysis,
       });
     }
     return renderTrendCombo({
