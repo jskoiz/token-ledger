@@ -660,6 +660,18 @@ export function buildTrendReportViewModel({
       ? (totalTokens / priorEquivalentTokens - 1) * 100
       : null;
   const estimated = daily.some((row) => row.estimated);
+  const maximumEstimatedResolutionSeconds = boundedEvents.reduce(
+    (maximum, { tokens, event }) => {
+      if (!(tokens > 0) || event.rangeAllocationEstimated !== true) {
+        return maximum;
+      }
+      const resolutionSeconds = Number(event.resolutionSeconds);
+      return Number.isFinite(resolutionSeconds) && resolutionSeconds > 0
+        ? Math.max(maximum, resolutionSeconds)
+        : maximum;
+    },
+    0,
+  );
 
   const snapshotGeneratedAtMs = finiteTimestamp(snapshot.generatedAt);
   const viewModel = {
@@ -718,13 +730,7 @@ export function buildTrendReportViewModel({
       parseErrors: Math.max(0, Number(snapshot.coverage?.parseErrors) || 0),
       estimated,
       estimatedBucketCount: daily.filter((row) => row.estimated).length,
-      maximumResolutionSeconds:
-        Math.max(
-          0,
-          Number(snapshot.coverage?.maximumUsageResolutionSeconds) ||
-            Number(snapshot.coverage?.maximumResolutionSeconds) ||
-            0,
-        ) || null,
+      maximumResolutionSeconds: maximumEstimatedResolutionSeconds || null,
     },
     provenance: {
       localOnly: (snapshot.provenance?.kind ?? "codex-local-metadata") ===

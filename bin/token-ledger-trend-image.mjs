@@ -115,6 +115,26 @@ function durationLabel(ms) {
   return `${Math.max(1, Math.round(hours))} ${Math.max(1, Math.round(hours)) === 1 ? "hour" : "hours"}`;
 }
 
+// Source-bin resolution is evidence about aggregation precision, so preserve
+// it exactly instead of applying the intentionally coarse meter-duration
+// labels above. Stored resolutions are whole seconds, with adaptive bins
+// normally landing on whole minutes, hours, or days.
+function sourceResolutionLabel(value) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds <= 0) return "—";
+  const units = [
+    [86_400, "day"],
+    [3_600, "hour"],
+    [60, "minute"],
+  ];
+  for (const [unitSeconds, unit] of units) {
+    if (seconds % unitSeconds !== 0) continue;
+    const count = seconds / unitSeconds;
+    return `${count} ${unit}${count === 1 ? "" : "s"}`;
+  }
+  return `${seconds} second${seconds === 1 ? "" : "s"}`;
+}
+
 function fastRateSummary(snapshot, bounds, effectiveEndMs, events = null) {
   let standardCardCredits = 0;
   let fastCardCredits = 0;
@@ -505,7 +525,7 @@ export function renderTrendImage({
     }
     if (vm.coverage.estimated) {
       const resolution = vm.coverage.maximumResolutionSeconds
-        ? ` · ${durationLabel(vm.coverage.maximumResolutionSeconds * 1_000)} SOURCE BINS`
+        ? ` · ${sourceResolutionLabel(vm.coverage.maximumResolutionSeconds)} SOURCE BINS`
         : "";
       warnings.push({
         kind: "estimated-history",
