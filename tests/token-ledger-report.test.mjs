@@ -15,6 +15,7 @@ import {
   reportCeiling,
   writeTrendPng,
 } from "../bin/token-ledger-trend-image.mjs";
+import { CODEX_CREDIT_RATE_CARD_AS_OF } from "../lib/token-ledger-rates.mjs";
 
 const TZ = "Pacific/Honolulu"; // UTC-10, no DST
 const WEEK_SECONDS = 10_080 * 60;
@@ -48,6 +49,9 @@ function event(day, hour, overrides = {}) {
     outputTokens,
     cachedInputTokens: overrides.cachedInputTokens ?? 0,
     reasoningTokens: overrides.reasoningTokens ?? 0,
+    breakdownAvailable: overrides.breakdownAvailable,
+    rangeAllocationEstimated:
+      overrides.rangeAllocationEstimated === true,
   };
 }
 
@@ -65,7 +69,10 @@ function snapshotOf(events, quotaObservations = [], overrides = {}) {
   return {
     schemaVersion: 9,
     generatedAt: iso(23, 23),
-    provenance: { kind: "codex-local-metadata", rateCardAsOf: "2026-08-17" },
+    provenance: {
+      kind: "codex-local-metadata",
+      rateCardAsOf: CODEX_CREDIT_RATE_CARD_AS_OF,
+    },
     coverage: { parseErrors: 0 },
     events,
     threads: [],
@@ -221,6 +228,41 @@ test("no delta is reported without a measured prior period", () => {
   const vm = build(snapshotOf([event(20, 8, { totalTokens: 1_000 })]));
   assert.equal(vm.summary.priorEquivalentTokens, null);
   assert.equal(vm.summary.totalDeltaPercent, null);
+});
+
+test("estimated state propagates through report aggregates and comparisons", () => {
+  const currentEstimated = event(20, 8, {
+    model: "gpt-5.6-luna",
+    project: "estimated-project",
+    totalTokens: 1_000,
+    serviceTier: "priority",
+    rangeAllocationEstimated: true,
+  });
+  const priorEstimated = event(13, 8, {
+    model: "gpt-5.6-sol",
+    project: "prior-project",
+    totalTokens: 500,
+    rangeAllocationEstimated: true,
+  });
+  const vm = build(snapshotOf([currentEstimated, priorEstimated], [], {
+    coverage: {
+      parseErrors: 0,
+      maximumUsageResolutionSeconds: 86_400,
+    },
+  }));
+
+  assert.equal(vm.summary.estimated, true);
+  assert.equal(vm.summary.fastEstimated, true);
+  assert.equal(vm.summary.priorEquivalentTokens, 500);
+  assert.equal(vm.summary.priorEquivalentEstimated, true);
+  assert.equal(vm.summary.totalDeltaEstimated, true);
+  assert.equal(vm.daily.find((row) => row.dateString === "2026-08-20").estimated, true);
+  assert.equal(vm.daily.find((row) => row.dateString === "2026-08-20").models[0].estimated, true);
+  assert.equal(vm.models.find((row) => row.model === "Luna").estimated, true);
+  assert.equal(vm.projects.find((row) => row.project === "estimated-project").estimated, true);
+  assert.equal(vm.coverage.estimated, true);
+  assert.equal(vm.coverage.estimatedBucketCount, 1);
+  assert.equal(vm.coverage.maximumResolutionSeconds, 86_400);
 });
 
 test("mismatched project rows fail reconciliation loudly", () => {
@@ -462,6 +504,47 @@ function renderRich(extra = {}) {
   });
 }
 
+function degradedSnapshot() {
+  return snapshotOf([
+    event(20, 8, {
+      totalTokens: 500,
+      inputTokens: 450,
+      outputTokens: 50,
+      cachedInputTokens: 225,
+      breakdownAvailable: true,
+      rangeAllocationEstimated: true,
+    }),
+    event(21, 8, {
+      totalTokens: 500,
+      inputTokens: 450,
+      outputTokens: 50,
+      breakdownAvailable: false,
+      rangeAllocationEstimated: true,
+    }),
+  ], [], {
+    provenance: {
+      kind: "external-snapshot",
+      rateCardAsOf: "2026-08-17",
+    },
+    coverage: {
+      parseErrors: 2,
+      maximumUsageResolutionSeconds: 86_400,
+    },
+  });
+}
+
+function renderDegraded(imageWidth) {
+  const snapshot = degradedSnapshot();
+  return renderTrendImage({
+    snapshot,
+    bounds: bounds7(),
+    days: 7,
+    options: { imageWidth },
+    reportTimeMs: ms(23, 12, 9),
+    sourceStatus: "stale-fallback",
+  });
+}
+
 test("the report SVG contains every required section", () => {
   const svg = renderRich();
   for (const heading of [
@@ -505,11 +588,34 @@ test("the report SVG contains every required section", () => {
   assert.equal((svg.match(/stroke="#273246"/g) ?? []).length, 1);
   assert.doesNotMatch(svg, /stroke="rgba\(34,197,143,\.35\)"/);
   assert.doesNotMatch(svg, /stroke="rgba\(126,162,240,\.35\)"/);
-  assert.doesNotMatch(svg, /DATA SOURCES|COVERAGE|BREAKDOWN|HISTORY|RATE CARD/);
+  assert.doesNotMatch(svg, /data-role="integrity-warning"/);
   assert.doesNotMatch(svg, /OpenAI reading|% REMAINING/);
   assert.equal((svg.match(/data-role="lower-column-divider"/g) ?? []).length, 2);
   assert.equal((svg.match(/data-role="kpi-column-divider"/g) ?? []).length, 3);
   assert.match(svg, /stroke="rgba\(119,131,154,\.22\)" stroke-width="1"/);
+});
+
+test("material integrity warnings are conditional and preserve estimated labels", () => {
+  const healthy = renderRich();
+  const degraded = renderDegraded(1_280);
+  assert.doesNotMatch(healthy, /data-role="integrity-warning"/);
+  for (const [kind, label] of [
+    ["parse-errors", "2 UNPARSED SOURCE RECORDS"],
+    ["component-coverage", "50% COMPONENT COVERAGE"],
+    ["external-source", "EXTERNAL SNAPSHOT INPUT"],
+    ["source-status", "STALE SNAPSHOT"],
+    ["estimated-history", "≈ ESTIMATED HISTORY · 1 day SOURCE BINS"],
+    [
+      "rate-card-mismatch",
+      `RATE CARD 2026-08-17 → ${CODEX_CREDIT_RATE_CARD_AS_OF}`,
+    ],
+  ]) {
+    assert.match(degraded, new RegExp(`data-kind="${kind}"`));
+    assert.ok(degraded.includes(label), `missing warning text: ${label}`);
+  }
+  assert.match(degraded, />≈1\.00K<\/text>/);
+  assert.match(degraded, />≈50\.0%<\/text>/);
+  assert.doesNotMatch(degraded, /NaN|Infinity|undefined/);
 });
 
 test("partial and stale markers appear only in their states", () => {
@@ -563,6 +669,36 @@ test("the layout fits its view box from 900 to 2400 pixels", () => {
     assert.equal(match[2], match[4]);
     assert.ok(Number(match[2]) > 600);
     assert.doesNotMatch(svg, /NaN|Infinity|undefined/);
+  }
+});
+
+test("degraded warning chips fit and encode at 900, 1280, and 2400 pixels", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-report-degraded-"));
+  try {
+    for (const imageWidth of [900, 1_280, 2_400]) {
+      const svg = renderDegraded(imageWidth);
+      const warningGroups = [...svg.matchAll(
+        /<g data-role="integrity-warning"[^>]*>([\s\S]*?)<\/g>/g,
+      )];
+      assert.equal(warningGroups.length, 6);
+      for (const [, markup] of warningGroups) {
+        const rect = markup.match(/<rect x="([\d.]+)"[^>]*width="([\d.]+)"/);
+        assert.ok(rect, "warning chip has a measurable backing rect");
+        const left = Number(rect[1]);
+        const right = left + Number(rect[2]);
+        assert.ok(left >= 28, `warning starts inside ${imageWidth}px canvas`);
+        assert.ok(right <= imageWidth - 28 + 0.01, `warning ends inside ${imageWidth}px canvas`);
+      }
+      const output = resolve(root, `degraded-${imageWidth}.png`);
+      await writeTrendPng(svg, output);
+      const bytes = await readFile(output);
+      assert.deepEqual(
+        [...bytes.subarray(0, 8)],
+        [137, 80, 78, 71, 13, 10, 26, 10],
+      );
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 
