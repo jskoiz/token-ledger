@@ -26,6 +26,10 @@ import { renderTrendCombo } from "./token-ledger-trend-terminal.mjs";
 import { renderCostTerminal } from "./token-ledger-cost-terminal.mjs";
 import { startInteractive } from "./token-ledger-tui.mjs";
 import {
+  snapshotFreshnessDetail,
+  sourceStatusLine,
+} from "./token-ledger-source-status.mjs";
+import {
   createTimeZoneFormatter,
   formatCalendarDate,
   localDateBoundary,
@@ -1317,7 +1321,13 @@ async function render(
   analysis,
 ) {
   if (options.view === "cost") {
-    return renderCostTerminal({ events, bounds, basis: options.basis });
+    return renderCostTerminal({
+      events,
+      bounds,
+      basis: options.basis,
+      snapshotFreshness: freshness,
+      sourceStatus: report.sourceStatus ?? "unchecked-cache",
+    });
   }
   if (options.view === "trend") {
     if (options.image && options.cacheRate) {
@@ -1330,6 +1340,7 @@ async function render(
         days: options.trendDays,
         options,
         analysis,
+        sourceStatus: report.sourceStatus ?? "unchecked-cache",
       });
     }
     const trend = buildUsageTrend(snapshot, bounds, { analysis });
@@ -1356,6 +1367,8 @@ async function render(
       days: options.trendDays,
       options,
       analysis,
+      snapshotFreshness: freshness,
+      sourceStatus: report.sourceStatus ?? "unchecked-cache",
     });
   }
   if (!options.legacyPlot) {
@@ -1363,6 +1376,7 @@ async function render(
       options,
       snapshot,
       snapshotFreshness: freshness,
+      sourceStatus: report.sourceStatus ?? "unchecked-cache",
       bounds,
       events,
       rows,
@@ -1395,6 +1409,8 @@ async function render(
     `Token Ledger · ${dateLabel} · ${bounds.timeZone}`,
     `${compact(totalTokens)} tokens · ${summary.threadIds.size.toLocaleString()} threads · ${summary.calls.toLocaleString()} calls · ${compact(summary.outputTokens)} output`,
     ...(historyScope ? [`History: ${historyScope}`] : []),
+    `Snapshot: ${snapshotFreshnessDetail(freshness)}`,
+    sourceStatusLine(report.sourceStatus ?? "unchecked-cache"),
     `Source: ${sourceLabel(options.input, snapshot)}`,
     "",
     chart,
@@ -1439,7 +1455,15 @@ function rangeDescription(options, bounds) {
   return bounds.dateString;
 }
 
-function emptyRangeMessage(options, snapshot, bounds) {
+function emptyRangeMessage(
+  options,
+  snapshot,
+  bounds,
+  {
+    sourceStatus = "unchecked-cache",
+    reportTimeMs = Date.now(),
+  } = {},
+) {
   const range = rangeDescription(options, bounds);
   const cutoffMs = snapshotCollectionCutoffMs(snapshot);
   const hasUncollectedHistory =
@@ -1451,6 +1475,10 @@ function emptyRangeMessage(options, snapshot, bounds) {
   ];
   const scope = historyScopeLabel(snapshot);
   if (scope) lines.push(`History: ${scope}`);
+  lines.push(
+    `Snapshot: ${snapshotFreshnessDetail(snapshotFreshness(snapshot, reportTimeMs))}`,
+  );
+  lines.push(sourceStatusLine(sourceStatus));
   lines.push(`Source: ${sourceLabel(options.input, snapshot)}`);
   return lines.join("\n");
 }
@@ -1460,6 +1488,7 @@ export async function run(options, { nowMs } = {}) {
   const now = new Date(hasInjectedNow ? nowMs : Date.now());
   const bounds = boundsForOptions(options, now);
   const { snapshot, sourceStatus } = await loadSnapshot(options);
+  const reportTimeMs = hasInjectedNow ? now.getTime() : Date.now();
   const analysis = buildRangeAnalysis(
     snapshot,
     bounds,
@@ -1473,7 +1502,6 @@ export async function run(options, { nowMs } = {}) {
   let events = filterDayEvents(snapshot, bounds, analysis);
   const writingImage = options.view === "trend" && options.image;
   const writingEmptyCacheReport = writingImage && options.cacheRate;
-  const reportTimeMs = hasInjectedNow ? now.getTime() : Date.now();
   if (writingImage && !options.cacheRate) {
     const effectiveEndMs = resolveEffectiveEnd({
       snapshot,
@@ -1489,7 +1517,10 @@ export async function run(options, { nowMs } = {}) {
     );
   }
   if (events.length === 0 && !writingEmptyCacheReport) {
-    return emptyRangeMessage(options, snapshot, bounds);
+    return emptyRangeMessage(options, snapshot, bounds, {
+      sourceStatus,
+      reportTimeMs,
+    });
   }
   const allRows = options.cacheRate || options.view === "cost"
     ? []
@@ -1575,18 +1606,23 @@ function shouldUseInteractive(options) {
 
 async function runInteractive(options) {
   const bounds = boundsForOptions(options);
-  const { snapshot } = await loadSnapshot(options);
+  const { snapshot, sourceStatus } = await loadSnapshot(options);
+  const reportTimeMs = Date.now();
   const analysis = buildRangeAnalysis(snapshot, bounds, { includeTrend: false });
   const events = filterDayEvents(snapshot, bounds, analysis);
   if (events.length === 0) {
-    process.stdout.write(`${emptyRangeMessage(options, snapshot, bounds)}\n`);
+    process.stdout.write(`${emptyRangeMessage(options, snapshot, bounds, {
+      sourceStatus,
+      reportTimeMs,
+    })}\n`);
     return;
   }
   const allRows = aggregateProjects(snapshot, events, options, analysis);
   await startInteractive({
     options,
     snapshot,
-    snapshotFreshness: snapshotFreshness(snapshot),
+    snapshotFreshness: snapshotFreshness(snapshot, reportTimeMs),
+    sourceStatus,
     bounds,
     events,
     rows: allRows.slice(0, options.top),

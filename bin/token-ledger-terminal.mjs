@@ -19,6 +19,10 @@ import {
 } from "../lib/token-ledger-usage.mjs";
 import { calendarDateParts } from "../lib/token-ledger-calendar.mjs";
 import { sanitizeTerminalText } from "../lib/token-ledger-terminal-text.mjs";
+import {
+  snapshotFreshnessDetail,
+  sourceStatusLine,
+} from "./token-ledger-source-status.mjs";
 import { historyScopeLabel } from "../lib/token-ledger-collection.mjs";
 
 const RESET = "\u001b[0m";
@@ -642,13 +646,24 @@ function panel(leftLines, rightLines, leftWidth, rightWidth, enabled, ascii) {
 }
 
 function snapshotLine(freshness, enabled) {
-  const detail = freshness?.status === "fresh" || freshness?.status === "stale"
-    ? `${freshness.status} · ${freshness.ageLabel}`
-    : "age unknown";
+  const detail = snapshotFreshnessDetail(freshness);
   return `${colorize("SNAPSHOT", ACCENT_STYLE, enabled)} ${colorize("·", SECONDARY_STYLE, enabled)} ${colorize(detail, SECONDARY_STYLE, enabled)}`;
 }
 
-function headerLines(stats, bounds, frameWidth, options, enabled, freshness, snapshot) {
+function provenanceLine(sourceStatus, enabled) {
+  return colorize(sourceStatusLine(sourceStatus), SECONDARY_STYLE, enabled);
+}
+
+function headerLines(
+  stats,
+  bounds,
+  frameWidth,
+  options,
+  enabled,
+  freshness,
+  sourceStatus,
+  snapshot,
+) {
   const left = colorize("TOKEN LEDGER", TITLE_STYLE, enabled);
   const date = colorize(
     dateLabel(bounds, options.range, options.rollingLabel),
@@ -672,6 +687,13 @@ function headerLines(stats, bounds, frameWidth, options, enabled, freshness, sna
   const appendHistory = (lines) => history
     ? [...lines, alignHeader(colorize(history, SECONDARY_STYLE, enabled))]
     : lines;
+  const appendSnapshotMetadata = (lines) => appendHistory([
+    ...lines,
+    ...(isRollingRange(options.range)
+      ? [alignHeader(snapshotLine(freshness, enabled))]
+      : []),
+    alignHeader(provenanceLine(sourceStatus, enabled)),
+  ]);
   const fullLine = [
     left,
     date,
@@ -682,9 +704,7 @@ function headerLines(stats, bounds, frameWidth, options, enabled, freshness, sna
     metric(stats.projectCount.toLocaleString("en-US"), "PROJECTS"),
   ].join(join);
   if (visibleLength(fullLine) < frameWidth) {
-    const lines = [alignHeader(fullLine)];
-    if (isRollingRange(options.range)) lines.push(alignHeader(snapshotLine(freshness, enabled)));
-    return appendHistory(lines);
+    return appendSnapshotMetadata([alignHeader(fullLine)]);
   }
 
   const compactDate = dateLabel(bounds, options.range, options.rollingLabel)
@@ -707,9 +727,7 @@ function headerLines(stats, bounds, frameWidth, options, enabled, freshness, sna
     metric(stats.projectCount.toLocaleString("en-US"), "P"),
   ].join(join);
   if (visibleLength(compactLine) < frameWidth) {
-    const lines = [alignHeader(compactLine)];
-    if (isRollingRange(options.range)) lines.push(alignHeader(snapshotLine(freshness, enabled)));
-    return appendHistory(lines);
+    return appendSnapshotMetadata([alignHeader(compactLine)]);
   }
 
   const minimalTitle = colorize(frameWidth >= 45 ? "LEDGER" : "L", TITLE_STYLE, enabled);
@@ -722,15 +740,14 @@ function headerLines(stats, bounds, frameWidth, options, enabled, freshness, sna
     compact(stats.threads),
     compact(stats.projectCount),
   ].join(" ");
-  const lines = [alignHeader(minimalLine)];
-  if (isRollingRange(options.range)) lines.push(alignHeader(snapshotLine(freshness, enabled)));
-  return appendHistory(lines);
+  return appendSnapshotMetadata([alignHeader(minimalLine)]);
 }
 
 export function renderTerminal({
   options,
   snapshot,
   snapshotFreshness,
+  sourceStatus = "unchecked-cache",
   bounds,
   events,
   rows,
@@ -748,7 +765,16 @@ export function renderTerminal({
   const left = panelLines(rows, allRows, stats.totalTokens, leftWidth, options, enabled);
   const right = sideBySide ? sidebarLines(stats, sideWidth, enabled, options, quota) : null;
   const lines = [
-    ...headerLines(stats, bounds, frameWidth, options, enabled, snapshotFreshness, snapshot),
+    ...headerLines(
+      stats,
+      bounds,
+      frameWidth,
+      options,
+      enabled,
+      snapshotFreshness,
+      sourceStatus,
+      snapshot,
+    ),
     ...panel(left, right, leftWidth, sideWidth, enabled, options.ascii),
   ];
   if (!sideBySide) {
@@ -788,6 +814,7 @@ export function renderFullscreen({
   options,
   snapshot,
   snapshotFreshness,
+  sourceStatus = "unchecked-cache",
   bounds,
   events,
   rows,
@@ -810,6 +837,7 @@ export function renderFullscreen({
     },
     snapshot,
     snapshotFreshness,
+    sourceStatus,
     bounds,
     events,
     rows,

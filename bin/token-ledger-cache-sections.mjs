@@ -18,6 +18,7 @@ import {
   TREND_IMAGE_MODEL_COLORS,
 } from "./token-ledger-image-primitives.mjs";
 import { historyScopeLabel } from "../lib/token-ledger-collection.mjs";
+import { sourceStatusLine } from "./token-ledger-source-status.mjs";
 
 function percent(value) {
   if (!Number.isFinite(value)) return "—";
@@ -151,7 +152,14 @@ function pushLegendItem(elements, { x, y, color, label, line = false }) {
   }));
 }
 
-function createCacheReportContext({ snapshot, bounds, days, options, analysis }) {
+function createCacheReportContext({
+  snapshot,
+  bounds,
+  days,
+  options,
+  analysis,
+  sourceStatus,
+}) {
   const width = Math.max(900, Math.min(2_400, Number(options.imageWidth) || 1_280));
   const outer = 32;
   const contentRight = width - outer;
@@ -253,6 +261,7 @@ function createCacheReportContext({ snapshot, bounds, days, options, analysis })
     headerTitle,
     headerMetadata: renderedHeaderMetadata,
     headerMetadataFits,
+    sourceStatus,
     ratePlotTop,
     ratePlotHeight,
     ratePlotBottom,
@@ -281,6 +290,7 @@ export function buildCacheHeaderSection(context) {
     headerTitle,
     headerMetadata,
     headerMetadataFits,
+    sourceStatus,
   } = context;
   const elements = [
     `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="cache-title cache-description">`,
@@ -310,6 +320,16 @@ export function buildCacheHeaderSection(context) {
       fill: COLORS.muted,
       size: 12,
       spacing: "1.32",
+    }),
+    svgText({
+      x: contentRight,
+      y: 97,
+      value: sourceStatusLine(sourceStatus),
+      fill: sourceStatus === "verified-current" ? COLORS.secondary : COLORS.weighted,
+      size: 12,
+      weight: 700,
+      anchor: "end",
+      spacing: ".72",
     }),
   ];
   const summaryValue = Number.isFinite(data.rate)
@@ -789,6 +809,7 @@ export function renderCacheReportSections({
   days = bounds.rangeDays ?? 7,
   options = {},
   analysis = null,
+  sourceStatus = "unchecked-cache",
 }) {
   const context = createCacheReportContext({
     snapshot,
@@ -796,6 +817,7 @@ export function renderCacheReportSections({
     days,
     options,
     analysis,
+    sourceStatus,
   });
   return [
     ...buildCacheHeaderSection(context),

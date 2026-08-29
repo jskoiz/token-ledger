@@ -652,7 +652,7 @@ test("material integrity warnings are conditional and preserve estimated labels"
     ["source-incomplete", "INCOMPLETE SOURCE PROVENANCE"],
     ["component-coverage", "50% COMPONENT COVERAGE"],
     ["external-source", "EXTERNAL SNAPSHOT INPUT"],
-    ["source-status", "STALE SNAPSHOT"],
+    ["source-status", "STALE FALLBACK"],
     ["estimated-history", "≈ ESTIMATED HISTORY · 1 day SOURCE BINS"],
     ["legacy-history", "LEGACY HISTORY SKIPPED · HOME UNVERIFIED"],
     [
@@ -706,6 +706,8 @@ test("estimated warning preserves supported sub-hour source-bin resolutions", ()
 test("partial and stale markers appear only in their states", () => {
   const complete = renderRich({ sourceStatus: "verified-current" });
   const stale = renderRich({ sourceStatus: "stale-fallback" });
+  assert.match(complete, /PROVENANCE · VERIFIED CURRENT/);
+  assert.match(stale, /PROVENANCE · STALE FALLBACK/);
   assert.doesNotMatch(complete, /STALE/);
   assert.match(complete, /Report through/);
   assert.match(stale, /STALE/);

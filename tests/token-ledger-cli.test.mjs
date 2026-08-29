@@ -3,6 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import {
   appendFile,
+  chmod,
   mkdir,
   mkdtemp,
   readdir,
@@ -106,6 +107,12 @@ import {
   buildActualTokenBins,
   renderTrendPlain,
 } from "../bin/token-ledger-trend-terminal.mjs";
+import {
+  snapshotFreshnessDetail,
+  SOURCE_STATUSES,
+  sourceStatusLabel,
+  sourceStatusLine,
+} from "../bin/token-ledger-source-status.mjs";
 
 const ROLLING_24H_FIXTURE = fileURLToPath(
   new URL("./fixtures/rolling-24h-projects.json", import.meta.url),
@@ -1127,8 +1134,59 @@ test("explicit snapshots sanitize labels in static output", async () => {
 
     assert.match(output, /explicit 🐈/);
     assert.match(output, /SDK\s+100\.0%/);
+    assert.match(output, /PROVENANCE · EXPLICIT SNAPSHOT/);
     assert.deepEqual(nonLineControlCodes(output), []);
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("legacy project output keeps snapshot age separate from provenance", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-legacy-provenance-"));
+  const snapshotPath = resolve(root, "snapshot.json");
+  const fakeYouPlot = resolve(root, "uplot");
+  const previousPath = process.env.PATH;
+  try {
+    await writeFile(fakeYouPlot, "#!/bin/sh\nprintf 'chart output\\n'\n", {
+      mode: 0o755,
+    });
+    await chmod(fakeYouPlot, 0o755);
+    await writeFile(snapshotPath, JSON.stringify({
+      schemaVersion: 3,
+      generatedAt: "2026-08-20T12:00:00.000Z",
+      events: [{
+        timestamp: "2026-08-20T12:00:00.000Z",
+        project: "legacy",
+        threadId: "legacy-thread",
+        model: "gpt-5.5",
+        totalTokens: 1,
+        outputTokens: 0,
+      }],
+      threads: [{ id: "legacy-thread", project: "legacy" }],
+      quotaObservations: [],
+    }));
+    process.env.PATH = root;
+
+    const output = await run(parseArgs([
+      "day",
+      "2026-08-20",
+      "--input",
+      snapshotPath,
+      "--no-refresh",
+      "--static",
+      "--plain",
+      "--youplot",
+      "--tz",
+      "UTC",
+    ]), { nowMs: Date.parse("2026-08-20T12:12:00.000Z") });
+
+    assert.match(output, /Snapshot: fresh · 12m old/);
+    assert.match(output, /PROVENANCE · EXPLICIT SNAPSHOT/);
+    assert.match(output, /chart output/);
+    assert.ok(!output.includes(root));
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -1330,6 +1388,8 @@ test("rolling view describes an empty range as the last 24 hours", async () => {
       "--plain",
     ]));
     assert.match(output, /No model-call events found for the last 24 hours \(/);
+    assert.match(output, /Snapshot: age unknown/);
+    assert.match(output, /PROVENANCE · EXPLICIT SNAPSHOT/);
     assert.match(output, /Source: snapshot\.json/);
     assert.ok(!output.includes(root));
   } finally {
@@ -2535,6 +2595,24 @@ test("snapshot freshness labels the one-hour cache age without exposing paths", 
   }
 });
 
+test("source provenance labels cover every cache trust state", () => {
+  assert.deepEqual(SOURCE_STATUSES, [
+    "verified-current",
+    "explicit-snapshot",
+    "unchecked-cache",
+    "stale-fallback",
+  ]);
+  assert.equal(sourceStatusLabel("verified-current"), "VERIFIED CURRENT");
+  assert.equal(sourceStatusLine("stale-fallback"), "PROVENANCE · STALE FALLBACK");
+  assert.equal(sourceStatusLine("unchecked-cache"), "PROVENANCE · UNCHECKED CACHE");
+  assert.equal(sourceStatusLine("explicit-snapshot"), "PROVENANCE · EXPLICIT SNAPSHOT");
+  assert.equal(
+    snapshotFreshnessDetail({ status: "fresh", ageLabel: "12m old" }),
+    "fresh · 12m old",
+  );
+  assert.throws(() => sourceStatusLabel("invented"), /Unknown report source status/);
+});
+
 test("interactive controls stay aligned with rendered and documented help", async () => {
   for (const input of INTERACTIVE_KEY_INPUTS.up) assert.equal(actionFor(input), "up");
   for (const input of INTERACTIVE_KEY_INPUTS.down) assert.equal(actionFor(input), "down");
@@ -2649,7 +2727,8 @@ test("terminal renderer produces the dashboard layout and scaled bars", () => {
   assert.doesNotMatch(output, /2 threads · 2 calls/);
   const compactHeader = output.split("\n")[0];
   assert.match(compactHeader, /TOKEN LEDGER · SAT 01 AUG · DAY · 1\.25K T · 2 C · 2 TH · 1 P/);
-  assert.match(output.split("\n")[1], /^\+/);
+  assert.match(output.split("\n")[1], /PROVENANCE · UNCHECKED CACHE/);
+  assert.match(output.split("\n")[2], /^\+/);
 
   const weekOutput = renderTerminal({
     options: { plain: true, ascii: true, width: 80, range: "week" },
@@ -2675,6 +2754,7 @@ test("terminal renderer produces the dashboard layout and scaled bars", () => {
     options: { plain: true, ascii: true, width: 120, range: "rolling24h" },
     snapshot: rollingSnapshot,
     snapshotFreshness: rollingFreshness,
+    sourceStatus: "stale-fallback",
     bounds: rolling24hBounds(new Date("2026-08-19T22:15:30.000Z"), "Pacific/Honolulu"),
     events,
     rows,
@@ -2685,6 +2765,7 @@ test("terminal renderer produces the dashboard layout and scaled bars", () => {
     /TOKEN LEDGER · LAST 24 HOURS · 24 HOURS · 1\.25K TOKENS · 2 CALLS · 2 THREADS · 1 PROJECTS/,
   );
   assert.match(rollingOutput, /SNAPSHOT · fresh · 15m old/);
+  assert.match(rollingOutput, /PROVENANCE · STALE FALLBACK/);
   assert.doesNotMatch(rollingOutput, /token-ledger-snapshot\.json|\/Users\//);
 
   const fullscreenRollingOutput = renderFullscreen({
@@ -2696,6 +2777,7 @@ test("terminal renderer produces the dashboard layout and scaled bars", () => {
     },
     snapshot: rollingSnapshot,
     snapshotFreshness: rollingFreshness,
+    sourceStatus: "stale-fallback",
     bounds: rolling24hBounds(new Date("2026-08-19T22:15:30.000Z"), "Pacific/Honolulu"),
     events,
     rows,
@@ -2704,6 +2786,7 @@ test("terminal renderer produces the dashboard layout and scaled bars", () => {
     height: 30,
   });
   assert.match(fullscreenRollingOutput, /SNAPSHOT · fresh · 15m old/);
+  assert.match(fullscreenRollingOutput, /PROVENANCE · STALE FALLBACK/);
 
   const narrowOutput = renderTerminal({
     options: { plain: true, ascii: true, width: 64 },
@@ -4122,6 +4205,7 @@ test("cache report weights cached input, clamps event values, and keeps models s
     bounds,
     days: 7,
     options: { imageWidth: 1_280 },
+    sourceStatus: "stale-fallback",
   });
   assert.match(svg, /Token Ledger · 7-day cache report/);
   assert.match(svg, /56\.0% cached/);
@@ -4133,6 +4217,7 @@ test("cache report weights cached input, clamps event values, and keeps models s
   assert.match(svg, /MEASUREMENT COVERAGE/);
   assert.match(svg, /cached input ÷ measured input/);
   assert.match(svg, /3 measured input-bearing calls/);
+  assert.match(svg, /PROVENANCE · STALE FALLBACK/);
   assert.doesNotMatch(svg, /WHERE IT WENT|WEEKLY METER|NaN/);
 });
 
@@ -4455,8 +4540,12 @@ test("trend bars partition capped model segments", () => {
     bounds,
     days: 7,
     options: { ascii: true, width: 120 },
+    snapshotFreshness: { status: "fresh", ageLabel: "12m old" },
+    sourceStatus: "stale-fallback",
   });
-  const chartRows = terminal.split("\n").slice(4, 15);
+  assert.match(terminal, /SNAPSHOT · fresh · 12m old/);
+  assert.match(terminal, /PROVENANCE · STALE FALLBACK/);
+  const chartRows = terminal.split("\n").slice(6, 17);
   assert.equal(chartRows.filter((line) => line.includes("█")).length, 9);
 
   const image = renderTrendImage({
@@ -6230,8 +6319,16 @@ test("cost renderer labels units, coverage, and unrated usage explicitly", () =>
       outputTokens: 0,
     },
   ];
-  const api = renderCostTerminal({ events, bounds, basis: "api-usd" });
+  const api = renderCostTerminal({
+    events,
+    bounds,
+    basis: "api-usd",
+    snapshotFreshness: { status: "fresh", ageLabel: "12m old" },
+    sourceStatus: "stale-fallback",
+  });
   assert.match(api, /^Hypothetical API-equivalent cost \(USD\)/);
+  assert.match(api, /Snapshot: fresh · 12m old/);
+  assert.match(api, /PROVENANCE · STALE FALLBACK/);
   assert.match(api, /Total rated amount: \$0\.42/);
   assert.match(api, /Rated token coverage: 66\.9%/);
   assert.match(api, /Unrated tokens: 50\.0K/);

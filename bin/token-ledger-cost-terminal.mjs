@@ -9,6 +9,10 @@ import {
   normalizeCodexCreditModel,
 } from "../lib/token-ledger-rates.mjs";
 import { sanitizeTerminalText } from "../lib/token-ledger-terminal-text.mjs";
+import {
+  snapshotFreshnessDetail,
+  sourceStatusLine,
+} from "./token-ledger-source-status.mjs";
 
 function nonNegative(value) {
   const number = Number(value);
@@ -164,7 +168,13 @@ function pad(value, width, align = "left") {
   return align === "right" ? `${spaces}${text}` : `${text}${spaces}`;
 }
 
-export function renderCostTerminal({ events, bounds, basis }) {
+export function renderCostTerminal({
+  events,
+  bounds,
+  basis,
+  snapshotFreshness = null,
+  sourceStatus = "unchecked-cache",
+}) {
   const report = aggregate(events, basis);
   const heading = basis === "api-usd"
     ? "Hypothetical API-equivalent cost (USD)"
@@ -198,6 +208,8 @@ export function renderCostTerminal({ events, bounds, basis }) {
   return [
     heading,
     `Range: ${bounds.startDateString ?? bounds.start.toISOString()} through ${bounds.endDateString ?? bounds.end.toISOString()} (${bounds.timeZone})`,
+    `Snapshot: ${snapshotFreshnessDetail(snapshotFreshness)}`,
+    sourceStatusLine(sourceStatus),
     "",
     [
       pad("Model", modelWidth),

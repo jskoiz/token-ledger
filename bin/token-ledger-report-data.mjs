@@ -20,8 +20,9 @@ import {
   localDateString,
   shiftCalendarDate,
 } from "../lib/token-ledger-calendar.mjs";
+import { SOURCE_STATUSES } from "./token-ledger-source-status.mjs";
 
-export { shiftCalendarDate };
+export { shiftCalendarDate, SOURCE_STATUSES };
 
 const DAY_MS = 86_400_000;
 // Two readings this close in percent confirm a flat reported interval.
@@ -30,13 +31,6 @@ const METER_EQUAL_TOLERANCE = 0.05;
 const METER_EXHAUSTED_TOLERANCE = 0.05;
 const RECONCILE_RELATIVE_TOLERANCE = 1e-6;
 const RECONCILE_ABSOLUTE_TOLERANCE = 1.5;
-
-export const SOURCE_STATUSES = [
-  "verified-current",
-  "explicit-snapshot",
-  "unchecked-cache",
-  "stale-fallback",
-];
 
 // Fast mode is an overlapping usage property, not a separate model. Both
 // recognized service-tier labels count.

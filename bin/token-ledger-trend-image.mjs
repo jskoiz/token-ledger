@@ -24,6 +24,10 @@ import {
   buildTrendReportViewModel,
   zonedMidnight,
 } from "./token-ledger-report-data.mjs";
+import {
+  sourceStatusLabel,
+  sourceStatusLine,
+} from "./token-ledger-source-status.mjs";
 
 export {
   compact,
@@ -456,35 +460,31 @@ export function renderTrendImage({
     const throughLine = verified
       ? `Report through ${shortDateTimeLabel(meta.reportThroughMs, timeZone)}`
       : `Snapshot generated ${generatedLabel}`;
-    if (stale) {
-      const badge = chip(contentRight, 32, "STALE", {
-        fill: "rgba(246,183,60,.16)",
-        stroke: COLORS.line,
-        color: COLORS.line,
+    const provenanceBadge = chip(
+      contentRight,
+      32,
+      sourceStatusLine(meta.sourceStatus),
+      {
+        fill: verified
+          ? "rgba(255,255,255,.06)"
+          : "rgba(246,183,60,.16)",
+        stroke: verified ? COLORS.separator : COLORS.line,
+        color: verified ? COLORS.secondary : COLORS.line,
         anchor: "end",
-      });
-      elements.push(badge.markup);
-      elements.push(svgText({
-        x: contentRight - badge.width - 8,
-        y: 33,
-        value: throughLine,
-        fill: COLORS.secondary,
-        size: 12.5,
-        anchor: "end",
-      }));
-    } else {
-      elements.push(svgText({
-        x: contentRight,
-        y: 33,
-        value: throughLine,
-        fill: COLORS.secondary,
-        size: 12.5,
-        anchor: "end",
-      }));
-    }
+      },
+    );
+    elements.push(provenanceBadge.markup);
     elements.push(svgText({
       x: contentRight,
       y: 51,
+      value: throughLine,
+      fill: COLORS.secondary,
+      size: 12.5,
+      anchor: "end",
+    }));
+    elements.push(svgText({
+      x: contentRight,
+      y: 69,
       value: meter.lastObservedAtMs !== null
         ? `Meter last observed ${shortDateTimeLabel(meter.lastObservedAtMs, timeZone)}`
         : "No weekly meter observation",
@@ -492,7 +492,7 @@ export function renderTrendImage({
       size: 12.5,
       anchor: "end",
     }));
-    return subtitleInline ? 68 : 80;
+    return 82;
   }
 
   // Material trust conditions stay compact and disappear entirely for a
@@ -534,11 +534,7 @@ export function renderTrendImage({
       warnings.push({ kind: "external-source", label: "EXTERNAL SNAPSHOT INPUT" });
     }
     if (!verified) {
-      const label = meta.sourceStatus === "stale-fallback"
-        ? "STALE SNAPSHOT"
-        : meta.sourceStatus === "explicit-snapshot"
-          ? "EXPLICIT SNAPSHOT"
-          : "UNCHECKED CACHE";
+      const label = sourceStatusLabel(meta.sourceStatus);
       warnings.push({ kind: "source-status", label });
     }
     if (vm.coverage.estimated) {

@@ -146,7 +146,10 @@ The `1d` project dashboard shows a compact snapshot-age line such as
 `SNAPSHOT · fresh · 12m old`. `fresh` means the snapshot is within the
 one-hour cache window, `stale` means it is older, and `age unknown` means the
 snapshot has no usable capture-time metadata. The indicator does not print a
-local path or trigger another source scan.
+local path or trigger another source scan. Every terminal and image report
+also shows a separate provenance status: `VERIFIED CURRENT`, `STALE FALLBACK`,
+`UNCHECKED CACHE`, or `EXPLICIT SNAPSHOT`. Snapshot age describes capture time;
+it never implies that the local source was checked successfully.
 
 Useful overrides:
 
