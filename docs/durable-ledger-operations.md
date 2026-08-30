@@ -12,11 +12,12 @@ revision matches the current ledger.
 
 ## Health signals
 
-Generated snapshots expose the durable schema version, revision, hashed Codex
-home identity, retention horizons, and `legacySnapshotStatus` under
+Generated snapshots expose the durable schema version, revision, quota-identity
+contract, hashed Codex home identity, retention horizons,
+`legacySnapshotStatus`, and separate legacy-quota diagnostics under
 `metadata.durableLedger`. Coverage also includes source-state counts,
 `sourceIncomplete`, compacted and migrated bucket counts, and the same legacy
-status.
+statuses.
 
 The main legacy statuses are:
 
@@ -33,8 +34,22 @@ The last three statuses mean legacy history was deliberately excluded. Exact
 rollout collection still proceeds, and PNG reports show `LEGACY HISTORY
 SKIPPED` so the omission is not silent.
 
+Legacy quota rows have a narrower gate than usage history. They migrate only
+when the source snapshot explicitly declares the current quota-identity
+contract. `legacyQuotaStatus` reports `migrated`, `not-present`,
+`skipped-contract-unverified`, `skipped-contract-mismatch`, or
+`skipped-invalid`. A whole-snapshot provenance-gate failure instead reports
+`skipped-<legacySnapshotStatus>`, such as
+`skipped-collection-scope-unverified`, `skipped-codex-home-unverified`, or
+`skipped-codex-home-mismatch`. `legacyQuotaRowsSkipped` records the excluded
+array length; zero with `skipped-invalid` means the malformed non-array shape
+had no reliable row count. Markerless, older, or semantically invalid quota
+rows are never guessed or re-keyed; safe usage and thread history still
+migrate.
+
 A missing legacy snapshot is a completed absence check. By contrast, an
-existing malformed, unreadable, oversized, non-regular, or non-v3 snapshot
+existing malformed usage/thread history, unreadable, oversized, non-regular,
+or non-v3 snapshot
 stops with `ERR_DURABLE_LEDGER_LEGACY_SNAPSHOT`. That failure does not advance
 the ledger revision, mark the one-shot migration as checked, or publish a new
 cache. Preserve the unreadable artifact in a private backup, then repair or
@@ -56,12 +71,25 @@ moves, missing or tombstoned state, and truncation, then clears atomically only
 after a clean complete scan reconciles every source-owned membership and
 position.
 
+Quota labels are stored separately as explicit, timestamped source evidence.
+Malformed quota scans cannot update that evidence. Missing or tombstoned
+sources are ineligible at read time, and archived-source labels are ineligible
+under `--no-archived`; observation rows are never destructively relabeled.
+
 ## Schema and privacy upgrades
 
 Schema-v1 preview ledgers with reconstructable migration scope upgrade to v2
 inside one SQLite transaction. The upgrade removes stored working directories,
 Git remotes, and raw source values, then compacts the database so those bytes do
 not remain in free pages. New v2 writes store no raw versions of those values.
+
+The quota-identity contract upgrades separately. Opening a markerless ledger or
+the prior `codex-limit-id-v1` contract for a write transaction discards all
+pre-contract exact and migrated quota rows with their memberships, then records
+the current contract atomically. Only a subsequent clean source scan can
+repopulate canonical quota history. Rollback restores both the prior rows and
+prior marker. An unknown or future contract stops before mutation with
+`ERR_DURABLE_LEDGER_QUOTA_CONTRACT`; do not downgrade or rewrite that ledger.
 
 Quota identity has one irreducible local boundary. Codex rollout
 `RateLimitSnapshot` records carry a provider limit id, but no ChatGPT user or

@@ -63,6 +63,10 @@ import {
 } from "../lib/token-ledger-usage.mjs";
 import { calculateCodexPurchasedCredits } from "../lib/token-ledger-rates.mjs";
 import { sanitizeTerminalText } from "../lib/token-ledger-terminal-text.mjs";
+import {
+  QUOTA_IDENTITY_CONTRACT_VERSION,
+  snapshotHasCurrentQuotaIdentityContract,
+} from "../lib/token-ledger-quota-contract.mjs";
 
 export { sanitizeTerminalText };
 
@@ -1038,6 +1042,31 @@ async function snapshotAllowsStaleFallback(snapshot, options) {
   ) === codexHomeFingerprint(options.codexHome);
 }
 
+function snapshotWithUnavailableUntrustedQuota(snapshot, force = false) {
+  if (!force && snapshotHasCurrentQuotaIdentityContract(snapshot)) return snapshot;
+  return {
+    ...snapshot,
+    coverage: {
+      ...snapshot.coverage,
+      quotaMeterUnavailableReason: "quota-contract-unverified",
+    },
+    quotaObservations: [],
+  };
+}
+
+async function snapshotAndLedgerHaveCurrentQuotaContract(snapshot, options) {
+  if (!snapshotHasCurrentQuotaIdentityContract(snapshot)) return false;
+  const {
+    readDurableLedgerCacheState,
+    resolveDurableLedgerPath,
+  } = await import("../lib/token-ledger-ledger.mjs");
+  const ledgerState = await readDurableLedgerCacheState(
+    resolveDurableLedgerPath({ output: options.input }),
+  );
+  return ledgerState?.quotaIdentityContract ===
+    QUOTA_IDENTITY_CONTRACT_VERSION;
+}
+
 async function refreshSnapshot(options) {
   if (!existsSync(options.codexHome)) {
     throw new Error(
@@ -1089,10 +1118,21 @@ async function refreshSnapshot(options) {
       try {
         const previous = await readSnapshot(options.input);
         if (await snapshotAllowsStaleFallback(previous, options)) {
+          const quotaContractTrusted =
+            await snapshotAndLedgerHaveCurrentQuotaContract(
+              previous,
+              options,
+            );
           process.stderr.write(
             "Token Ledger: refresh exceeded the safety limit; continuing with the previous cache, which may be stale.\n",
           );
-          return { snapshot: previous, sourceStatus: "stale-fallback" };
+          return {
+            snapshot: snapshotWithUnavailableUntrustedQuota(
+              previous,
+              !quotaContractTrusted,
+            ),
+            sourceStatus: "stale-fallback",
+          };
         }
       } catch {
         // Preserve the original refresh error when the previous cache cannot
@@ -1161,9 +1201,26 @@ export function refreshFailureAllowsStaleFallback(error) {
   return recoverable;
 }
 
-async function refreshSnapshotOrUseStaleFallback(options, cached) {
+async function refreshSnapshotOrUseStaleFallback(
+  options,
+  cached,
+  { quotaContractTrusted = true } = {},
+) {
   try {
-    return await refreshSnapshot(options);
+    const refreshed = await refreshSnapshot(options);
+    if (
+      refreshed.sourceStatus === "stale-fallback" &&
+      !quotaContractTrusted
+    ) {
+      return {
+        ...refreshed,
+        snapshot: snapshotWithUnavailableUntrustedQuota(
+          refreshed.snapshot,
+          true,
+        ),
+      };
+    }
+    return refreshed;
   } catch (error) {
     // Default to surfacing refresh failures. Only bounded cache growth, source
     // races, and SQLite lock contention are safe reasons to reuse known-good
@@ -1172,7 +1229,13 @@ async function refreshSnapshotOrUseStaleFallback(options, cached) {
       !refreshFailureAllowsStaleFallback(error) ||
       !(await snapshotAllowsStaleFallback(cached, options))
     ) throw error;
-    return { snapshot: cached, sourceStatus: "stale-fallback" };
+    return {
+      snapshot: snapshotWithUnavailableUntrustedQuota(
+        cached,
+        !quotaContractTrusted,
+      ),
+      sourceStatus: "stale-fallback",
+    };
   }
 }
 
@@ -1280,7 +1343,7 @@ export async function loadSnapshot(options) {
   }
   const {
     codexHomeFingerprint,
-    readDurableLedgerRevision,
+    readDurableLedgerCacheState,
     resolveDurableLedgerPath,
   } = await import("../lib/token-ledger-ledger.mjs");
   const cachedCodexHomeFingerprint = primitiveString(
@@ -1291,20 +1354,32 @@ export async function loadSnapshot(options) {
   ) {
     return refreshSnapshot(options);
   }
-  if (!sourceWatermarksEqual(cached.sourceWatermark, inventory.watermark)) {
-    return refreshSnapshotOrUseStaleFallback(options, cached);
-  }
-  const ledgerRevision = await readDurableLedgerRevision(
+  const ledgerState = await readDurableLedgerCacheState(
     resolveDurableLedgerPath({ output: options.input }),
   );
+  const quotaContractTrusted =
+    ledgerState?.quotaIdentityContract === QUOTA_IDENTITY_CONTRACT_VERSION &&
+    snapshotHasCurrentQuotaIdentityContract(cached);
+  if (!sourceWatermarksEqual(cached.sourceWatermark, inventory.watermark)) {
+    return refreshSnapshotOrUseStaleFallback(options, cached, {
+      quotaContractTrusted,
+    });
+  }
   const snapshotRevision = Number(
     cached.metadata?.durableLedger?.revision,
   );
   if (
     !Number.isSafeInteger(snapshotRevision) ||
-    ledgerRevision !== snapshotRevision
+    ledgerState?.revision !== snapshotRevision
   ) {
-    return refreshSnapshotOrUseStaleFallback(options, cached);
+    return refreshSnapshotOrUseStaleFallback(options, cached, {
+      quotaContractTrusted,
+    });
+  }
+  if (!quotaContractTrusted) {
+    return refreshSnapshotOrUseStaleFallback(options, cached, {
+      quotaContractTrusted: false,
+    });
   }
   return { snapshot: cached, sourceStatus: "verified-current" };
 }

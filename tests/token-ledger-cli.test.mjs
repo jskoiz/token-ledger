@@ -113,6 +113,17 @@ import {
   sourceStatusLabel,
   sourceStatusLine,
 } from "../bin/token-ledger-source-status.mjs";
+import {
+  ACCOUNT_QUOTA_LIMIT_KEY,
+  QUOTA_IDENTITY_CONTRACT_VERSION,
+} from "../lib/token-ledger-quota-contract.mjs";
+
+const CURRENT_QUOTA_METADATA = Object.freeze({
+  durableLedger: Object.freeze({
+    quotaIdentityContract: QUOTA_IDENTITY_CONTRACT_VERSION,
+  }),
+});
+const NAMED_QUOTA_LIMIT_KEY = "0000000000000000";
 
 const ROLLING_24H_FIXTURE = fileURLToPath(
   new URL("./fixtures/rolling-24h-projects.json", import.meta.url),
@@ -656,6 +667,21 @@ function sourceRolloutRows(total, turnId, timestamp) {
       },
     },
   ];
+}
+
+function sourceRolloutRowsWithQuota(total, turnId, timestamp, usedPercent) {
+  const rows = sourceRolloutRows(total, turnId, timestamp);
+  rows.at(-1).payload.rate_limits = {
+    limit_id: "codex",
+    limit_name: "Default display",
+    plan_type: "plus",
+    primary: {
+      window_minutes: 10_080,
+      used_percent: usedPercent,
+      resets_at: Date.parse("2026-08-30T10:00:00.000Z") / 1_000,
+    },
+  };
+  return rows;
 }
 
 function serializeRows(rows) {
@@ -1571,6 +1597,73 @@ test("CLI reads an explicit gzip-compressed snapshot", async () => {
   }
 });
 
+test("explicit and unchecked old-contract snapshots keep tokens but no meter", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-old-contract-"));
+  const snapshotPath = resolve(root, "snapshot.json.gz");
+  try {
+    await writePrivateSnapshot(snapshotPath, {
+      schemaVersion: 3,
+      generatedAt: "2026-08-20T12:00:00.000Z",
+      provenance: {
+        collection: { since: null, includeArchived: true },
+      },
+      metadata: {
+        durableLedger: {
+          quotaIdentityContract: "codex-limit-id-v1",
+        },
+      },
+      coverage: { observedTokens: 100 },
+      events: [{
+        timestamp: "2026-08-20T12:00:00.000Z",
+        model: "gpt-5.5",
+        totalTokens: 100,
+        inputTokens: 100,
+        outputTokens: 0,
+      }],
+      quotaObservations: [{
+        timestamp: "2026-08-20T12:00:00.000Z",
+        usedPercent: 37,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
+        windowMinutes: 10_080,
+        resetsAt: Date.parse("2026-08-27T12:00:00.000Z") / 1_000,
+      }],
+    });
+
+    const modes = [
+      {
+        sourceStatus: "explicit-snapshot",
+        options: {
+          ...parseArgs(["week", "--no-refresh"]),
+          input: snapshotPath,
+          inputExplicit: true,
+        },
+      },
+      {
+        sourceStatus: "unchecked-cache",
+        options: {
+          ...parseArgs(["week", "--no-refresh"]),
+          input: snapshotPath,
+          inputExplicit: false,
+        },
+      },
+    ];
+    for (const mode of modes) {
+      const loaded = await loadSnapshot(mode.options);
+      assert.equal(loaded.sourceStatus, mode.sourceStatus);
+      assert.equal(loaded.snapshot.events[0].totalTokens, 100);
+      assert.equal(loaded.snapshot.quotaObservations.length, 1);
+      assert.deepEqual(weeklyQuotaObservations(loaded.snapshot), []);
+      assert.equal(
+        quotaCycleSummary(loaded.snapshot, loaded.snapshot.events).available,
+        false,
+      );
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("rejects legacy snapshots before repricing aliases", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-legacy-rate-card-"));
   const snapshotPath = resolve(root, "snapshot.json");
@@ -2195,6 +2288,95 @@ test("automatic cache validation rebuilds a missing or behind ledger", async () 
   }
 });
 
+test("matching cache refreshes when either quota contract is missing", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-contract-cache-"));
+  const codexHome = resolve(root, "codex-home");
+  const sourceDirectory = resolve(codexHome, "sessions", "2026", "08");
+  const sourceFile = resolve(
+    sourceDirectory,
+    "rollout-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl",
+  );
+  const snapshotPath = resolve(root, "snapshot.json.gz");
+  const ledgerPath = resolveDurableLedgerPath({ output: snapshotPath });
+  let database;
+  try {
+    await mkdir(sourceDirectory, { recursive: true });
+    await writeFile(
+      sourceFile,
+      serializeRows(sourceRolloutRowsWithQuota(
+        100,
+        "turn-1",
+        "2026-08-23T10:00:00.000Z",
+        37,
+      )),
+    );
+    const initial = await collectUsage({
+      output: snapshotPath,
+      codexHome,
+      includeArchived: true,
+      since: null,
+    });
+    await writePrivateSnapshot(snapshotPath, initial);
+    assert.equal(initial.metadata.durableLedger.revision, 1);
+    assert.equal(initial.quotaObservations.length, 1);
+
+    database = new DatabaseSync(ledgerPath);
+    database.prepare(
+      "DELETE FROM ledger_meta WHERE key = 'quota_identity_contract'",
+    ).run();
+    database.close();
+    database = null;
+
+    const options = parseArgs([
+      "day",
+      "2026-08-23",
+      "--static",
+      "--plain",
+      "--ascii",
+      "--tz",
+      "UTC",
+    ]);
+    options.codexHome = codexHome;
+    options.input = snapshotPath;
+    options.inputExplicit = false;
+
+    const ledgerRefreshed = await loadSnapshot(options);
+    assert.equal(ledgerRefreshed.sourceStatus, "verified-current");
+    assert.equal(ledgerRefreshed.snapshot.metadata.durableLedger.revision, 2);
+    assert.equal(ledgerRefreshed.snapshot.quotaObservations.length, 1);
+
+    const markerlessCache = {
+      ...ledgerRefreshed.snapshot,
+      metadata: {
+        ...ledgerRefreshed.snapshot.metadata,
+        durableLedger: {
+          ...ledgerRefreshed.snapshot.metadata.durableLedger,
+        },
+      },
+    };
+    delete markerlessCache.metadata.durableLedger.quotaIdentityContract;
+    await writePrivateSnapshot(snapshotPath, markerlessCache);
+    const cacheRefreshed = await loadSnapshot(options);
+    assert.equal(cacheRefreshed.sourceStatus, "verified-current");
+    assert.equal(cacheRefreshed.snapshot.metadata.durableLedger.revision, 3);
+    assert.equal(
+      cacheRefreshed.snapshot.metadata.durableLedger.quotaIdentityContract,
+      QUOTA_IDENTITY_CONTRACT_VERSION,
+    );
+    assert.equal(cacheRefreshed.snapshot.quotaObservations.length, 1);
+
+    database = new DatabaseSync(ledgerPath, { readOnly: true });
+    assert.equal(database.prepare(`
+      SELECT value
+        FROM ledger_meta
+       WHERE key = 'quota_identity_contract'
+    `).get().value, QUOTA_IDENTITY_CONTRACT_VERSION);
+  } finally {
+    database?.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("automatic cache validation propagates unscoped ledger migration failures", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-migration-cache-"));
   const codexHome = resolve(root, "codex-home");
@@ -2418,6 +2600,130 @@ test("snapshot size fallback stays stale and does not advance ledger revisions",
     assert.equal(stored.metadata.durableLedger.revision, 1);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("old quota contracts make every stale-fallback path meterless", async () => {
+  const cases = [
+    {
+      name: "old-ledger-auto",
+      ledgerContract: "codex-limit-id-v1",
+      snapshotContract: QUOTA_IDENTITY_CONTRACT_VERSION,
+      refresh: false,
+    },
+    {
+      name: "old-cache-auto",
+      ledgerContract: QUOTA_IDENTITY_CONTRACT_VERSION,
+      snapshotContract: null,
+      refresh: false,
+    },
+    {
+      name: "old-ledger-explicit-refresh",
+      ledgerContract: "codex-limit-id-v1",
+      snapshotContract: QUOTA_IDENTITY_CONTRACT_VERSION,
+      refresh: true,
+    },
+  ];
+  for (const entry of cases) {
+    const root = await mkdtemp(resolve(
+      tmpdir(),
+      `token-ledger-contract-fallback-${entry.name}-`,
+    ));
+    const codexHome = resolve(root, "codex-home");
+    const sourceDirectory = resolve(codexHome, "sessions", "2026", "08");
+    const sourceFile = resolve(
+      sourceDirectory,
+      "rollout-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl",
+    );
+    const snapshotPath = resolve(root, "snapshot.json.gz");
+    const ledgerPath = resolveDurableLedgerPath({ output: snapshotPath });
+    let database;
+    try {
+      await mkdir(sourceDirectory, { recursive: true });
+      await writeFile(
+        sourceFile,
+        serializeRows(sourceRolloutRowsWithQuota(
+          100,
+          "turn-1",
+          "2026-08-23T10:00:00.000Z",
+          37,
+        )),
+      );
+      const initial = await collectUsage({
+        output: snapshotPath,
+        codexHome,
+        includeArchived: true,
+        since: null,
+      });
+      const cached = {
+        ...initial,
+        metadata: {
+          ...initial.metadata,
+          durableLedger: { ...initial.metadata.durableLedger },
+        },
+      };
+      if (entry.snapshotContract === null) {
+        delete cached.metadata.durableLedger.quotaIdentityContract;
+      } else {
+        cached.metadata.durableLedger.quotaIdentityContract =
+          entry.snapshotContract;
+      }
+      await writePrivateSnapshot(snapshotPath, cached);
+
+      database = new DatabaseSync(ledgerPath);
+      database.prepare(`
+        UPDATE ledger_meta
+           SET value = ?
+         WHERE key = 'quota_identity_contract'
+      `).run(entry.ledgerContract);
+      database.close();
+      database = null;
+
+      const loadOptions = parseArgs([
+        "day",
+        "2026-08-23",
+        "--static",
+        "--plain",
+        "--ascii",
+        "--tz",
+        "UTC",
+      ]);
+      loadOptions.codexHome = codexHome;
+      loadOptions.input = snapshotPath;
+      loadOptions.inputExplicit = false;
+      loadOptions.refresh = entry.refresh;
+      loadOptions.snapshotWriteOptions = { maxBytes: 1, targetBytes: 1 };
+
+      const fallback = await loadSnapshot(loadOptions);
+      assert.equal(fallback.sourceStatus, "stale-fallback", entry.name);
+      assert.equal(fallback.snapshot.coverage.observedTokens, 100, entry.name);
+      assert.equal(fallback.snapshot.quotaObservations.length, 0, entry.name);
+      assert.equal(
+        fallback.snapshot.coverage.quotaMeterUnavailableReason,
+        "quota-contract-unverified",
+        entry.name,
+      );
+      assert.deepEqual(
+        weeklyQuotaObservations(fallback.snapshot),
+        [],
+        entry.name,
+      );
+
+      database = new DatabaseSync(ledgerPath, { readOnly: true });
+      assert.equal(database.prepare(`
+        SELECT value
+          FROM ledger_meta
+         WHERE key = 'quota_identity_contract'
+      `).get().value, entry.ledgerContract, entry.name);
+      assert.equal(database.prepare(`
+        SELECT value
+          FROM ledger_meta
+         WHERE key = 'revision'
+      `).get().value, "1", entry.name);
+    } finally {
+      database?.close();
+      await rm(root, { recursive: true, force: true });
+    }
   }
 });
 
@@ -2993,6 +3299,8 @@ test("quota context maps the selected range to reset-cycle burn", () => {
   const observation = {
     timestamp: "2026-08-02T00:00:00.000Z",
     usedPercent: 25,
+    scope: "account",
+    limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
     windowMinutes: 10_080,
     resetsAt: Date.parse("2026-08-07T00:00:00.000Z") / 1_000,
   };
@@ -3001,7 +3309,11 @@ test("quota context maps the selected range to reset-cycle burn", () => {
     { timestamp: "2026-08-01T12:00:00.000Z", totalTokens: 200 },
     { timestamp: "2026-08-03T00:00:00.000Z", totalTokens: 1_000 },
   ];
-  const snapshot = { events, quotaObservations: [observation] };
+  const snapshot = {
+    events,
+    metadata: CURRENT_QUOTA_METADATA,
+    quotaObservations: [observation],
+  };
   const quota = quotaCycleSummary(snapshot, [events[0]]);
 
   assert.equal(quota.usedPercent, 25);
@@ -3043,6 +3355,8 @@ test("quota burn recomputes current card credits when every cycle event is rated
   const observation = {
     timestamp: "2026-08-02T00:00:00.000Z",
     usedPercent: 20,
+    scope: "account",
+    limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
     windowMinutes: 10_080,
     resetsAt: Date.parse("2026-08-07T00:00:00.000Z") / 1_000,
   };
@@ -3063,7 +3377,11 @@ test("quota burn recomputes current card credits when every cycle event is rated
     rateCardCredits: 99,
   };
   const quota = quotaCycleSummary(
-    { events: [displayed, other], quotaObservations: [observation] },
+    {
+      events: [displayed, other],
+      metadata: CURRENT_QUOTA_METADATA,
+      quotaObservations: [observation],
+    },
     [displayed],
   );
   assert.equal(quota.shareBasis, "credits");
@@ -3087,6 +3405,7 @@ test("quota burn recomputes current card credits when every cycle event is rated
   const fallback = quotaCycleSummary(
     {
       events: [fallbackDisplayed, fallbackOther],
+      metadata: CURRENT_QUOTA_METADATA,
       quotaObservations: [observation],
     },
     [fallbackDisplayed],
@@ -3100,6 +3419,8 @@ test("quota burn keeps unrated usage out of credit-share mode after saturation",
   const observation = {
     timestamp: "2026-08-02T00:00:00.000Z",
     usedPercent: 20,
+    scope: "account",
+    limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
     windowMinutes: 10_080,
     resetsAt: Date.parse("2026-08-07T00:00:00.000Z") / 1_000,
   };
@@ -3122,6 +3443,7 @@ test("quota burn keeps unrated usage out of credit-share mode after saturation",
   const quota = quotaCycleSummary(
     {
       events: [displayed, otherRated, unrated],
+      metadata: CURRENT_QUOTA_METADATA,
       quotaObservations: [observation],
     },
     [displayed],
@@ -3136,6 +3458,7 @@ test("trend burn keeps rated token and credit scales aligned", () => {
   const huge = Number.MAX_SAFE_INTEGER;
   const bounds = multiDayBounds("2026-08-02", "UTC", 2);
   const snapshot = {
+    metadata: CURRENT_QUOTA_METADATA,
     events: [
       {
         timestamp: "2026-08-01T01:00:00.000Z",
@@ -3166,6 +3489,8 @@ test("trend burn keeps rated token and credit scales aligned", () => {
       {
         timestamp: "2026-08-02T00:00:00.000Z",
         usedPercent: 30,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt: Date.parse("2026-08-08T00:00:00.000Z") / 1_000,
       },
@@ -3182,6 +3507,7 @@ test("trend model attribution preserves shared token proportions", () => {
   const huge = Number.MAX_SAFE_INTEGER;
   const bounds = multiDayBounds("2026-08-02", "UTC", 2);
   const snapshot = {
+    metadata: CURRENT_QUOTA_METADATA,
     events: [
       {
         timestamp: "2026-08-01T01:00:00.000Z",
@@ -3205,6 +3531,8 @@ test("trend model attribution preserves shared token proportions", () => {
     quotaObservations: [{
       timestamp: "2026-08-02T00:00:00.000Z",
       usedPercent: 30,
+      scope: "account",
+      limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
       windowMinutes: 10_080,
       resetsAt: Date.parse("2026-08-08T00:00:00.000Z") / 1_000,
     }],
@@ -3347,6 +3675,7 @@ test("combo trend bins actual tokens and overlays an explicit reset marker", () 
   const bounds = multiDayBounds("2026-08-15", "Pacific/Honolulu", 7);
   const resetOne = Date.parse("2026-08-11T10:00:00.000Z") / 1_000;
   const snapshot = {
+    metadata: CURRENT_QUOTA_METADATA,
     events: [
       {
         timestamp: "2026-08-09T12:00:00.000Z",
@@ -3367,18 +3696,24 @@ test("combo trend bins actual tokens and overlays an explicit reset marker", () 
       {
         timestamp: "2026-08-09T12:00:00.000Z",
         usedPercent: 20,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt: resetOne,
       },
       {
         timestamp: "2026-08-10T12:00:00.000Z",
         usedPercent: 30,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt: resetOne,
       },
       {
         timestamp: "2026-08-12T12:00:00.000Z",
         usedPercent: 5,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt: resetOne + 10_080 * 60,
       },
@@ -3566,17 +3901,22 @@ test("all report renderers consume one immutable range analysis", () => {
   });
   const snapshot = {
     generatedAt: "2026-08-15T12:00:00.000Z",
+    metadata: CURRENT_QUOTA_METADATA,
     events,
     quotaObservations: [
       {
         timestamp: "2026-08-10T12:00:00.000Z",
         usedPercent: 20,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt: resetAt,
       },
       {
         timestamp: "2026-08-14T12:00:00.000Z",
         usedPercent: 35,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt: resetAt,
       },
@@ -3668,9 +4008,12 @@ test("future quota observations do not alter historical range splits", () => {
   const withFutureQuota = buildRangeAnalysis(
     {
       events: [event],
+      metadata: CURRENT_QUOTA_METADATA,
       quotaObservations: [{
         timestamp: "2026-08-23T00:00:00.000Z",
         usedPercent: 20,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt: Date.parse("2026-08-24T00:00:00.000Z") / 1_000,
       }],
@@ -3689,6 +4032,7 @@ test("trend reports display Terra usage and meter attribution", () => {
   const resetsAt = Date.parse("2026-08-16T00:00:00.000Z") / 1_000;
   const snapshot = {
     generatedAt: "2026-08-15T18:00:00.000Z",
+    metadata: CURRENT_QUOTA_METADATA,
     events: [
       {
         timestamp: "2026-08-15T12:00:00.000Z",
@@ -3703,12 +4047,16 @@ test("trend reports display Terra usage and meter attribution", () => {
       {
         timestamp: "2026-08-15T06:00:00.000Z",
         usedPercent: 0,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt,
       },
       {
         timestamp: "2026-08-15T18:00:00.000Z",
         usedPercent: 10,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt,
       },
@@ -3773,6 +4121,7 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
   const bounds = multiDayBounds("2026-08-15", "Pacific/Honolulu", 7);
   const resetOne = Date.parse("2026-08-11T10:00:00.000Z") / 1_000;
   const snapshot = {
+    metadata: CURRENT_QUOTA_METADATA,
     events: [
       {
         timestamp: "2026-08-09T12:00:00.000Z",
@@ -3795,18 +4144,24 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
       {
         timestamp: "2026-08-09T12:00:00.000Z",
         usedPercent: 20,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt: resetOne,
       },
       {
         timestamp: "2026-08-10T12:00:00.000Z",
         usedPercent: 30,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt: resetOne,
       },
       {
         timestamp: "2026-08-12T12:00:00.000Z",
         usedPercent: 5,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt: resetOne + 10_080 * 60,
       },
@@ -3969,6 +4324,7 @@ test("trend meter stops at its last sample and marks report time", () => {
   const resetsAt = Date.parse("2026-08-26T10:00:00.000Z") / 1_000;
   const snapshot = {
     generatedAt,
+    metadata: CURRENT_QUOTA_METADATA,
     events: [{
       timestamp: "2026-08-23T08:08:30.000Z",
       model: "gpt-5.6-luna",
@@ -3982,6 +4338,8 @@ test("trend meter stops at its last sample and marks report time", () => {
         timestamp: "2026-08-22T12:00:00.000Z",
         lastSeenAt: "2026-08-22T12:00:00.000Z",
         usedPercent: 70,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt,
       },
@@ -3989,6 +4347,8 @@ test("trend meter stops at its last sample and marks report time", () => {
         timestamp: "2026-08-23T07:59:20.000Z",
         lastSeenAt: observedThrough,
         usedPercent: 80,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt,
       },
@@ -4077,10 +4437,13 @@ test("trend report limits reset labels in dense windows", () => {
   ];
   const snapshot = {
     generatedAt: "2026-08-15T12:00:00.000Z",
+    metadata: CURRENT_QUOTA_METADATA,
     events: [],
     quotaObservations: cycleStarts.map((timestamp, index) => ({
       timestamp,
       usedPercent: 10 + index,
+      scope: "account",
+      limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
       windowMinutes: 10_080,
       resetsAt: Date.parse(timestamp) / 1_000 + 10_080 * 60,
     })),
@@ -5772,28 +6135,32 @@ test("named limit buckets are not stitched into the account meter", () => {
   const accountEpoch = Date.parse("2026-08-16T00:00:00.000Z") / 1_000;
   const namedEpoch = Date.parse("2026-08-18T00:00:00.000Z") / 1_000;
   const snapshot = {
+    metadata: CURRENT_QUOTA_METADATA,
     quotaObservations: [
       {
         timestamp: "2026-08-12T00:00:00.000Z",
         usedPercent: 10,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt: accountEpoch,
-        limitKey: "aaa",
       },
       {
         timestamp: "2026-08-12T01:00:00.000Z",
         usedPercent: 50,
+        scope: "named",
         windowMinutes: 10_080,
         resetsAt: namedEpoch,
-        limitKey: "bbb",
+        limitKey: NAMED_QUOTA_LIMIT_KEY,
         limitName: "GPT-5.3-Codex-Spark",
       },
       {
         timestamp: "2026-08-12T02:00:00.000Z",
         usedPercent: 20,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt: accountEpoch,
-        limitKey: "aaa",
       },
     ],
   };
@@ -5812,16 +6179,16 @@ test("account-scoped weekly observations remain the selected account meter", () 
       usedPercent: 10,
       windowMinutes: 10_080,
       resetsAt: resetAt,
-      limitKey: "account",
       scope: "account",
+      limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
     },
     {
       timestamp: "2026-08-19T00:00:00.000Z",
       usedPercent: 20,
       windowMinutes: 10_080,
       resetsAt: resetAt,
-      limitKey: "account",
       scope: "account",
+      limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
     },
   ];
   const named = {
@@ -5829,17 +6196,23 @@ test("account-scoped weekly observations remain the selected account meter", () 
     usedPercent: 90,
     windowMinutes: 10_080,
     resetsAt: resetAt,
-    limitKey: "named",
+    limitKey: NAMED_QUOTA_LIMIT_KEY,
     limitName: "Luna",
     scope: "named",
   };
   assert.deepEqual(
-    weeklyQuotaObservations({ quotaObservations: [...account, named] })
+    weeklyQuotaObservations({
+      metadata: CURRENT_QUOTA_METADATA,
+      quotaObservations: [...account, named],
+    })
       .map((observation) => observation.usedPercent),
     [10, 20],
   );
   assert.deepEqual(
-    weeklyQuotaObservations({ quotaObservations: account })
+    weeklyQuotaObservations({
+      metadata: CURRENT_QUOTA_METADATA,
+      quotaObservations: account,
+    })
       .map((observation) => observation.usedPercent),
     [10, 20],
   );
@@ -5855,7 +6228,7 @@ test("named-only weekly pools do not form an account meter", () => {
       usedPercent: 20,
       windowMinutes: 10_080,
       resetsAt: resetA,
-      limitKey: "named-a",
+      limitKey: NAMED_QUOTA_LIMIT_KEY,
       limitName: "Luna",
       scope: "named",
     },
@@ -5864,7 +6237,7 @@ test("named-only weekly pools do not form an account meter", () => {
       usedPercent: 40,
       windowMinutes: 10_080,
       resetsAt: resetA,
-      limitKey: "named-a",
+      limitKey: NAMED_QUOTA_LIMIT_KEY,
       limitName: "Luna",
       scope: "named",
     },
@@ -5873,7 +6246,7 @@ test("named-only weekly pools do not form an account meter", () => {
       usedPercent: 60,
       windowMinutes: 10_080,
       resetsAt: resetA,
-      limitKey: "named-a",
+      limitKey: NAMED_QUOTA_LIMIT_KEY,
       limitName: "Luna",
       scope: "named",
     },
@@ -5882,13 +6255,14 @@ test("named-only weekly pools do not form an account meter", () => {
       usedPercent: 50,
       windowMinutes: 10_080,
       resetsAt: resetB,
-      limitKey: "named-b",
+      limitKey: NAMED_QUOTA_LIMIT_KEY,
       limitName: "Sol",
       scope: "named",
     },
   ];
   const snapshot = {
     generatedAt: "2026-08-20T12:00:00.000Z",
+    metadata: CURRENT_QUOTA_METADATA,
     events: [{
       timestamp: "2026-08-19T12:00:00.000Z",
       model: "gpt-5.6-luna",
@@ -5898,8 +6272,8 @@ test("named-only weekly pools do not form an account meter", () => {
     quotaObservations,
   };
   assert.deepEqual(weeklyQuotaObservations(snapshot), []);
-  // The same named-only shape without the explicit field is a legacy snapshot;
-  // it must not revive the old largest-pool fallback.
+  // A current-contract row without explicit scope is malformed and must not
+  // revive the old largest-pool fallback.
   assert.deepEqual(
     weeklyQuotaObservations({
       ...snapshot,
@@ -5948,6 +6322,7 @@ test("burn day bins place observed drops on days in meter percent units", () => 
   const bounds = multiDayBounds("2026-08-15", "UTC", 7);
   const resetsAt = Date.parse("2026-08-16T00:00:00.000Z") / 1_000;
   const snapshot = {
+    metadata: CURRENT_QUOTA_METADATA,
     events: [
       {
         // Bogus stored credits must lose to recomputation under the current
@@ -5974,18 +6349,24 @@ test("burn day bins place observed drops on days in meter percent units", () => 
       {
         timestamp: "2026-08-12T06:00:00.000Z",
         usedPercent: 0,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt,
       },
       {
         timestamp: "2026-08-12T18:00:00.000Z",
         usedPercent: 20,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt,
       },
       {
         timestamp: "2026-08-15T00:00:00.000Z",
         usedPercent: 40,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt,
       },
@@ -6441,6 +6822,7 @@ test("fast-mode turns use model-specific credit weights in burn allocation", () 
   const bounds = multiDayBounds("2026-08-15", "UTC", 7);
   const resetsAt = Date.parse("2026-08-16T00:00:00.000Z") / 1_000;
   const snapshot = {
+    metadata: CURRENT_QUOTA_METADATA,
     events: [
       {
         // Sol and GPT-5.5 share identical rate-card prices and identical
@@ -6466,12 +6848,16 @@ test("fast-mode turns use model-specific credit weights in burn allocation", () 
       {
         timestamp: "2026-08-12T06:00:00.000Z",
         usedPercent: 0,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt,
       },
       {
         timestamp: "2026-08-12T18:00:00.000Z",
         usedPercent: 25,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt,
       },
@@ -6498,6 +6884,7 @@ test("canonical Daybreak fast tiers retain rate-card burn weights", () => {
     outputTokens: 0,
   });
   const snapshot = {
+    metadata: CURRENT_QUOTA_METADATA,
     events: [
       event("daybreak-red", "priority"),
       event("daybreak-blue", "fast"),
@@ -6507,12 +6894,16 @@ test("canonical Daybreak fast tiers retain rate-card burn weights", () => {
       {
         timestamp: "2026-08-12T06:00:00.000Z",
         usedPercent: 0,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt,
       },
       {
         timestamp: "2026-08-12T18:00:00.000Z",
         usedPercent: 25,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt,
       },

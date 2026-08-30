@@ -192,9 +192,9 @@ function buildMeter({ snapshot, bounds, effectiveEndMs, sourceStatus, events }) 
   // A named per-model pool is a different meter; if only named observations
   // exist, the account-wide weekly limit is unobserved, not substituted.
   const selected = weeklyQuotaObservations(snapshot);
-  const accountWide = selected.filter((observation) =>
-    observation.scope === "account" ||
-    (observation.scope == null && !observation.limitName));
+  const accountWide = selected.filter(
+    (observation) => observation.scope === "account",
+  );
   const observationsAll = normalizeQuotaTimeline(accountWide).filter(
     (observation) => observation.timestampMs < effectiveEndMs,
   );

@@ -39,6 +39,9 @@ import {
   updateDurableLedger,
 } from "../lib/token-ledger-ledger.mjs";
 import {
+  QUOTA_IDENTITY_CONTRACT_VERSION,
+} from "../lib/token-ledger-quota-contract.mjs";
+import {
   readPrivateSnapshot,
   stagePrivateSnapshot,
   writePrivateSnapshot,
@@ -241,6 +244,7 @@ function stableHash(value, length = 64) {
 function installPreviewQuotaIdentities(
   ledgerPath,
   timestamp = "2026-08-20T10:00:01.000Z",
+  quotaIdentityContract = null,
 ) {
   const database = new DatabaseSync(ledgerPath);
   try {
@@ -255,7 +259,7 @@ function installPreviewQuotaIdentities(
         observation_id, observation_key, identity_kind, limit_key,
         limit_name, scope, window_minutes, resets_at, used_percent,
         plan_type, first_seen_at, last_seen_at, migrated, exact_seen
-      ) VALUES (?, ?, 'exact', ?, ?, ?, 10080, ?, 37, 'plus', ?, ?, 0, 1)
+      ) VALUES (?, ?, ?, ?, ?, ?, 10080, ?, 37, 'plus', ?, ?, ?, ?)
     `);
     const insertSource = database.prepare(`
       INSERT INTO quota_sources (
@@ -263,8 +267,30 @@ function installPreviewQuotaIdentities(
       ) VALUES (?, ?, ?, ?)
     `);
     for (const legacy of [
-      { rawKey: "anonymous", limitName: null, scope: "account" },
-      { rawKey: "Legacy label", limitName: "Legacy label", scope: "named" },
+      {
+        rawKey: "anonymous",
+        identityKind: "exact",
+        limitName: null,
+        migrated: 0,
+        scope: "account",
+        sourceOwned: true,
+      },
+      {
+        rawKey: "Legacy label",
+        identityKind: "exact",
+        limitName: "Legacy label",
+        migrated: 0,
+        scope: "named",
+        sourceOwned: true,
+      },
+      {
+        rawKey: "migrated-anonymous",
+        identityKind: "migrated_compacted",
+        limitName: "Migrated label",
+        migrated: 1,
+        scope: "account",
+        sourceOwned: false,
+      },
     ]) {
       const limitKey = stableHash(legacy.rawKey, 16);
       const observationKey = JSON.stringify([
@@ -277,18 +303,31 @@ function installPreviewQuotaIdentities(
       insertQuota.run(
         observationId,
         observationKey,
+        legacy.identityKind,
         limitKey,
         legacy.limitName,
         legacy.scope,
         WEEKLY_RESET,
         timestamp,
         timestamp,
+        legacy.migrated,
+        legacy.migrated ? 0 : 1,
       );
-      insertSource.run(observationId, sourceId, timestamp, timestamp);
+      if (legacy.sourceOwned) {
+        insertSource.run(observationId, sourceId, timestamp, timestamp);
+      }
     }
-    database.prepare(
-      "DELETE FROM ledger_meta WHERE key = 'quota_identity_contract'",
-    ).run();
+    if (quotaIdentityContract === null) {
+      database.prepare(
+        "DELETE FROM ledger_meta WHERE key = 'quota_identity_contract'",
+      ).run();
+    } else {
+      database.prepare(`
+        INSERT INTO ledger_meta(key, value)
+        VALUES ('quota_identity_contract', ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+      `).run(quotaIdentityContract);
+    }
     database.prepare(`
       UPDATE source_state
          SET quota_reconciliation_pending = 0
@@ -337,6 +376,7 @@ function legacySnapshotForFixture(fixture, snapshot) {
       durableLedger: {
         ...snapshot.metadata?.durableLedger,
         codexHomeFingerprint: codexHomeFingerprint(fixture.root),
+        quotaIdentityContract: QUOTA_IDENTITY_CONTRACT_VERSION,
       },
     },
   };
@@ -444,6 +484,148 @@ test("quota normalization accepts only exact provider percentage fields", () => 
       durableQuotaObservationKey({ limitKey: "weekly", ...row }),
       null,
     );
+  }
+});
+
+test("durable writes reject quota key and scope mismatches", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-quota-scope-"));
+  const stateDirectory = resolve(root, "state");
+  const ledgerPath = resolveDurableLedgerPath({ stateDirectory });
+  const base = {
+    options: { stateDirectory },
+    codexHome: root,
+    inventory: { files: [], lifecycleFiles: [] },
+  };
+  try {
+    await updateDurableLedger(base);
+    const validFields = {
+      timestamp: BASE_TIMESTAMP,
+      lastSeenAt: BASE_TIMESTAMP,
+      usedPercent: 37,
+      windowMinutes: 10_080,
+      resetsAt: WEEKLY_RESET,
+      planType: "plus",
+      limitKey: stableHash("codex", 16),
+      scope: "account",
+    };
+    for (const invalid of [
+      { ...validFields, limitKey: undefined },
+      { ...validFields, limitKey: null },
+      { ...validFields, limitKey: "" },
+      { ...validFields, limitKey: "not-a-provider-hash" },
+      { ...validFields, scope: "named" },
+      {
+        ...validFields,
+        limitKey: stableHash("codex-secondary", 16),
+        scope: "account",
+      },
+      { ...validFields, scope: null },
+    ]) {
+      await assert.rejects(
+        () => updateDurableLedger({ ...base, quotas: [invalid] }),
+        (error) => error?.code === "ERR_DURABLE_LEDGER_QUOTA",
+      );
+      assert.equal(await readDurableLedgerRevision(ledgerPath), 1);
+    }
+    assert.equal((await readDurableLedger(ledgerPath)).quotaRows.length, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("persisted quota key and scope mismatches fail closed without mutation", async () => {
+  const fixture = await createFixture([100], { usedPercent: 37 });
+  const ledgerPath = resolveDurableLedgerPath({
+    stateDirectory: fixture.stateDirectory,
+  });
+  let database;
+  try {
+    await collectUsage(options(fixture));
+    database = new DatabaseSync(ledgerPath);
+    database.prepare(
+      "UPDATE quota_observations SET scope = 'named'",
+    ).run();
+    database.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get();
+    database.close();
+    database = null;
+    const before = await readFile(ledgerPath);
+
+    await assert.rejects(
+      () => readDurableLedger(ledgerPath),
+      (error) => error?.code === "ERR_DURABLE_LEDGER_QUOTA",
+    );
+    assert.deepEqual(await readFile(ledgerPath), before);
+    await assert.rejects(
+      () => readDurableLedgerRevision(ledgerPath),
+      (error) => error?.code === "ERR_DURABLE_LEDGER_QUOTA",
+    );
+    assert.deepEqual(await readFile(ledgerPath), before);
+    await assert.rejects(
+      () => collectUsage(options(fixture)),
+      (error) => error?.code === "ERR_DURABLE_LEDGER_QUOTA",
+    );
+    assert.deepEqual(await readFile(ledgerPath), before);
+
+    database = new DatabaseSync(ledgerPath);
+    database.prepare(
+      "UPDATE quota_observations SET scope = 'account'",
+    ).run();
+    database.close();
+    database = null;
+    const recovered = await collectUsage(options(fixture));
+    assert.deepEqual(
+      recovered.quotaObservations.map((quota) => quota.usedPercent),
+      [37],
+    );
+  } finally {
+    database?.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("non-v2 durable reads preserve usage but suppress opaque quota", async () => {
+  const fixture = await createFixture([100], { usedPercent: 37 });
+  const ledgerPath = resolveDurableLedgerPath({
+    stateDirectory: fixture.stateDirectory,
+  });
+  let database;
+  try {
+    await collectUsage(options(fixture));
+    for (const [name, contract] of [
+      ["markerless", null],
+      ["v1", "codex-limit-id-v1"],
+      ["future", "codex-limit-id-v3"],
+    ]) {
+      database = new DatabaseSync(ledgerPath);
+      if (contract === null) {
+        database.prepare(
+          "DELETE FROM ledger_meta WHERE key = 'quota_identity_contract'",
+        ).run();
+      } else {
+        database.prepare(`
+          INSERT INTO ledger_meta(key, value)
+          VALUES ('quota_identity_contract', ?)
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        `).run(contract);
+      }
+      database.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get();
+      database.close();
+      database = null;
+      const before = await readFile(ledgerPath);
+
+      const ledger = await readDurableLedger(ledgerPath);
+      assert.equal(
+        ledger.usageRows.reduce((sum, row) => sum + row.totalTokens, 0),
+        100,
+        name,
+      );
+      assert.equal(ledger.quotaIdentityContract, contract, name);
+      assert.deepEqual(ledger.quotaRows, [], name);
+      assert.deepEqual(await readFile(ledgerPath), before, name);
+    }
+  } finally {
+    database?.close();
+    await rm(fixture.root, { recursive: true, force: true });
   }
 });
 
@@ -610,6 +792,46 @@ test("invalid quota replacements retain last-known quota until a clean rescan", 
   }
 });
 
+test("missing primary is a clean optional-bucket replacement", async () => {
+  const fixture = await createFixture([100], { usedPercent: 37 });
+  const replacement = resolve(fixture.root, "replacement.jsonl");
+  try {
+    const first = await collectUsage(options(fixture));
+    assert.deepEqual(
+      first.quotaObservations.map((quota) => quota.usedPercent),
+      [37],
+    );
+
+    const secondaryOnly = rolloutRows([200], { usedPercent: 58 });
+    const rateLimits = secondaryOnly.at(-1).payload.rate_limits;
+    rateLimits.secondary = rateLimits.primary;
+    delete rateLimits.primary;
+    await writeFile(replacement, serialize(secondaryOnly));
+    await rename(replacement, fixture.file);
+
+    const replaced = await collectUsage(options(fixture));
+    const reloaded = await collectUsage(options(fixture));
+    const ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+    for (const snapshot of [replaced, reloaded]) {
+      assert.equal(snapshot.coverage.invalidQuotaRecords, 0);
+      assert.deepEqual(
+        snapshot.quotaObservations.map((quota) => quota.usedPercent),
+        [58],
+      );
+    }
+    assert.equal(ledger.quotaRows.length, 1);
+    assert.equal(ledger.quotaRows[0].usedPercent, 58);
+    assert.equal(
+      ledger.sourceSummary.states[0].quotaReconciliationPending,
+      false,
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("sparse quota labels survive changed readings and reloads", async () => {
   const fixture = await createFixture([100], { usedPercent: 37 });
   const replacement = resolve(fixture.root, "replacement.jsonl");
@@ -658,6 +880,140 @@ test("sparse quota labels survive changed readings and reloads", async () => {
     assert.equal(ledger.quotaRows.length, 1);
     assert.equal(ledger.quotaRows[0].limitName, "Luna");
     assert.equal(ledger.quotaRows[0].scope, "named");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("quota labels materialize only from scope-eligible source evidence", async () => {
+  const fixture = await createFixture([]);
+  const archivedDirectory = resolve(
+    fixture.root,
+    "archived_sessions",
+    "2026",
+    "08",
+    "20",
+  );
+  const archivedFile = resolve(archivedDirectory, ARCHIVED_ROLLOUT_NAME);
+  const labeledRows = (total, usedPercent, label, baseTimestamp) => {
+    const rows = rolloutRows([total], { usedPercent, baseTimestamp });
+    Object.assign(rows.at(-1).payload.rate_limits, {
+      limit_id: "codex-secondary",
+      limit_name: label,
+      plan_type: "plus",
+    });
+    return rows;
+  };
+  const readings = (snapshot) => snapshot.quotaObservations
+    .map((quota) => [quota.usedPercent, quota.limitName])
+    .sort((left, right) => left[0] - right[0]);
+  try {
+    await writeFile(
+      fixture.file,
+      serialize(labeledRows(100, 37, "Active", BASE_TIMESTAMP)),
+    );
+    await mkdir(archivedDirectory, { recursive: true });
+    const archivedBytes = serialize(labeledRows(
+      200,
+      58,
+      "Archived",
+      "2026-08-20T11:00:00.000Z",
+    ));
+    await writeFile(archivedFile, archivedBytes);
+
+    const full = await collectUsage(options(fixture));
+    const activeOnly = await collectUsage(options(fixture, {
+      includeArchived: false,
+    }));
+    const fullReload = await collectUsage(options(fixture));
+    assert.deepEqual(readings(full), [[37, "Archived"], [58, "Archived"]]);
+    assert.deepEqual(readings(activeOnly), [[37, "Active"]]);
+    assert.deepEqual(
+      readings(fullReload),
+      [[37, "Archived"], [58, "Archived"]],
+    );
+
+    await rm(archivedFile);
+    const tombstoned = await collectUsage(options(fixture));
+    assert.deepEqual(readings(tombstoned), [[37, "Active"], [58, "Active"]]);
+
+    await writeFile(archivedFile, archivedBytes);
+    const restored = await collectUsage(options(fixture));
+    const restoredReload = await collectUsage(options(fixture));
+    assert.deepEqual(
+      readings(restored),
+      [[37, "Archived"], [58, "Archived"]],
+    );
+    assert.deepEqual(
+      readings(restoredReload),
+      [[37, "Archived"], [58, "Archived"]],
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("quota label recency uses explicit observations and binary ties", async () => {
+  const fixture = await createFixture([]);
+  const sourceB = resolve(dirname(fixture.file), SHARED_ROLLOUT_NAME);
+  const withIdentity = (rows, labels) => {
+    const quotaRows = rows.filter((row) => row.payload?.type === "token_count");
+    for (const [index, row] of quotaRows.entries()) {
+      Object.assign(row.payload.rate_limits, {
+        limit_id: "codex-secondary",
+        limit_name: labels[index] ?? null,
+        plan_type: "plus",
+      });
+    }
+    return rows;
+  };
+  try {
+    const oldThenNull = withIdentity(
+      rolloutRows([100, 200], { usedPercent: 20 }),
+      ["Old", null],
+    );
+    const newer = withIdentity(
+      rolloutRows([300], {
+        usedPercent: 40,
+        baseTimestamp: "2026-08-20T10:00:30.000Z",
+      }),
+      ["New"],
+    );
+    await writeFile(fixture.file, serialize(oldThenNull));
+    await writeFile(sourceB, serialize(newer));
+    const observed = await collectUsage(options(fixture));
+    const reloaded = await collectUsage(options(fixture));
+    for (const snapshot of [observed, reloaded]) {
+      assert.deepEqual(
+        [...new Set(snapshot.quotaObservations.map(
+          (quota) => quota.limitName,
+        ))],
+        ["New"],
+      );
+    }
+
+    await rm(fixture.stateDirectory, { recursive: true, force: true });
+    await rm(fixture.output, { force: true });
+    const equalTimestampA = withIdentity(
+      rolloutRows([100], { usedPercent: 20 }),
+      ["z"],
+    );
+    const equalTimestampB = withIdentity(
+      rolloutRows([300], { usedPercent: 40 }),
+      ["ä"],
+    );
+    await writeFile(fixture.file, serialize(equalTimestampA));
+    await writeFile(sourceB, serialize(equalTimestampB));
+    const tied = await collectUsage(options(fixture));
+    const tiedReload = await collectUsage(options(fixture));
+    for (const snapshot of [tied, tiedReload]) {
+      assert.deepEqual(
+        [...new Set(snapshot.quotaObservations.map(
+          (quota) => quota.limitName,
+        ))],
+        ["ä"],
+      );
+    }
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -725,6 +1081,111 @@ test("malformed quota identity retains durable quota until a clean rescan", asyn
   }
 });
 
+test("malformed quota siblings cannot relabel trusted history", async () => {
+  const fixture = await createFixture([100], { usedPercent: 37 });
+  const replacement = resolve(fixture.root, "replacement.jsonl");
+  const ledgerPath = resolveDurableLedgerPath({
+    stateDirectory: fixture.stateDirectory,
+  });
+  const rowsWithIdentity = (total, usedPercent, limitName) => {
+    const rows = rolloutRows([total], { usedPercent });
+    Object.assign(rows.at(-1).payload.rate_limits, {
+      limit_id: "codex-secondary",
+      limit_name: limitName,
+      plan_type: "plus",
+    });
+    return rows;
+  };
+  try {
+    await writeFile(
+      fixture.file,
+      serialize(rowsWithIdentity(100, 37, "Trusted")),
+    );
+    const first = await collectUsage(options(fixture));
+    assert.deepEqual(
+      first.quotaObservations.map((quota) => [
+        quota.usedPercent,
+        quota.limitName,
+      ]),
+      [[37, "Trusted"]],
+    );
+
+    const partial = rowsWithIdentity(200, 58, "Injected");
+    partial.at(-1).payload.rate_limits.secondary = {
+      window_minutes: 300,
+      used_percent: -1,
+      resets_at: WEEKLY_RESET,
+    };
+    await writeFile(replacement, serialize(partial));
+    await rename(replacement, fixture.file);
+    const uncertain = await collectUsage(options(fixture));
+    const uncertainReload = await collectUsage(options(fixture));
+
+    for (const snapshot of [uncertain, uncertainReload]) {
+      assert.equal(snapshot.coverage.invalidQuotaRecords, 1);
+      assert.deepEqual(
+        snapshot.quotaObservations.map((quota) => [
+          quota.usedPercent,
+          quota.limitName,
+        ]).sort((left, right) => left[0] - right[0]),
+        [[37, "Trusted"], [58, "Trusted"]],
+      );
+    }
+    let ledger = await readDurableLedger(ledgerPath);
+    assert.equal(
+      ledger.sourceSummary.states[0].quotaReconciliationPending,
+      true,
+    );
+
+    await writeFile(
+      replacement,
+      serialize(rowsWithIdentity(300, 70, "Recovered")),
+    );
+    await rename(replacement, fixture.file);
+    await assert.rejects(
+      () => collectUsage(options(fixture, {
+        faultInjector: ({ point }) => {
+          if (point === "before-commit") throw new Error("label rollback");
+        },
+      })),
+      /label rollback/,
+    );
+    ledger = await readDurableLedger(ledgerPath);
+    assert.deepEqual(
+      ledger.quotaRows
+        .map((quota) => [quota.usedPercent, quota.limitName])
+        .sort((left, right) => left[0] - right[0]),
+      [[37, "Trusted"], [58, "Trusted"]],
+    );
+    assert.equal(
+      ledger.sourceSummary.states[0].quotaReconciliationPending,
+      true,
+    );
+
+    const recovered = await collectUsage(options(fixture));
+    const recoveredReload = await collectUsage(options(fixture));
+    for (const snapshot of [recovered, recoveredReload]) {
+      assert.equal(snapshot.coverage.invalidQuotaRecords, 0);
+      assert.deepEqual(
+        snapshot.quotaObservations.map((quota) => [
+          quota.usedPercent,
+          quota.limitName,
+        ]),
+        [[70, "Recovered"]],
+      );
+    }
+    ledger = await readDurableLedger(ledgerPath);
+    assert.equal(ledger.quotaRows.length, 1);
+    assert.equal(ledger.quotaRows[0].limitName, "Recovered");
+    assert.equal(
+      ledger.sourceSummary.states[0].quotaReconciliationPending,
+      false,
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("preview quota identities converge without rekeying opaque hashes", async () => {
   const fixture = await createFixture([100], { usedPercent: 37 });
   const ledgerPath = resolveDurableLedgerPath({
@@ -761,9 +1222,68 @@ test("preview quota identities converge without rekeying opaque hashes", async (
       ledger.sourceSummary.states[0].quotaReconciliationPending,
       false,
     );
-    assert.equal(marker, "codex-limit-id-v1");
+    assert.equal(marker, QUOTA_IDENTITY_CONTRACT_VERSION);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("malformed pre-contract quota cannot block a safe v2 upgrade", async () => {
+  for (const [name, contract, corruptMigrationFlag] of [
+    ["markerless", null, false],
+    ["v1", "codex-limit-id-v1", true],
+  ]) {
+    const fixture = await createFixture([100], { usedPercent: 37 });
+    const ledgerPath = resolveDurableLedgerPath({
+      stateDirectory: fixture.stateDirectory,
+    });
+    let database;
+    try {
+      await collectUsage(options(fixture));
+      installPreviewQuotaIdentities(
+        ledgerPath,
+        "2026-08-20T10:00:01.000Z",
+        contract,
+      );
+      database = new DatabaseSync(ledgerPath);
+      database.prepare(
+        "UPDATE quota_observations SET used_percent = 150",
+      ).run();
+      if (corruptMigrationFlag) {
+        database.prepare(
+          "UPDATE quota_observations SET migrated = 2 WHERE migrated = 1",
+        ).run();
+      }
+      database.close();
+      database = null;
+
+      const upgraded = await collectUsage(options(fixture));
+      const ledger = await readDurableLedger(ledgerPath);
+      assert.equal(totalTokens(upgraded), 100, name);
+      assert.deepEqual(
+        upgraded.quotaObservations.map((quota) => quota.usedPercent),
+        [37],
+        name,
+      );
+      assert.equal(
+        ledger.quotaIdentityContract,
+        QUOTA_IDENTITY_CONTRACT_VERSION,
+        name,
+      );
+      assert.equal(
+        ledger.quotaContractExactRowsDiscarded,
+        corruptMigrationFlag ? 3 : 2,
+        name,
+      );
+      assert.equal(
+        ledger.quotaContractMigratedRowsDiscarded,
+        corruptMigrationFlag ? 0 : 1,
+        name,
+      );
+    } finally {
+      database?.close();
+      await rm(fixture.root, { recursive: true, force: true });
+    }
   }
 });
 
@@ -798,7 +1318,11 @@ test("quota identity upgrade rolls back and remains pending after malformed scan
     firstRows.at(-1).payload.rate_limits.limit_name = "Legacy label";
     await writeFile(fixture.file, serialize(firstRows));
     await collectUsage(options(fixture));
-    installPreviewQuotaIdentities(ledgerPath);
+    installPreviewQuotaIdentities(
+      ledgerPath,
+      "2026-08-20T10:00:01.000Z",
+      "codex-limit-id-v1",
+    );
 
     const malformedRows = rolloutRows([200], { usedPercent: 58 });
     Object.assign(malformedRows.at(-1).payload.rate_limits, {
@@ -817,9 +1341,9 @@ test("quota identity upgrade rolls back and remains pending after malformed scan
       /marker rollback/,
     );
     assert.deepEqual(contractState(), {
-      marker: null,
+      marker: "codex-limit-id-v1",
       pending: 0,
-      quotaRows: 2,
+      quotaRows: 3,
     });
 
     const malformed = await collectUsage(options(fixture));
@@ -829,13 +1353,16 @@ test("quota identity upgrade rolls back and remains pending after malformed scan
     assert.equal(malformedReload.coverage.invalidQuotaRecords, 1);
     assert.deepEqual(
       malformed.quotaObservations.map((quota) => quota.usedPercent),
-      [37, 37],
+      [],
     );
     assert.deepEqual(contractState(), {
-      marker: "codex-limit-id-v1",
+      marker: QUOTA_IDENTITY_CONTRACT_VERSION,
       pending: 1,
-      quotaRows: 2,
+      quotaRows: 0,
     });
+    const upgradedLedger = await readDurableLedger(ledgerPath);
+    assert.equal(upgradedLedger.quotaContractExactRowsDiscarded, 2);
+    assert.equal(upgradedLedger.quotaContractMigratedRowsDiscarded, 1);
 
     const cleanRows = rolloutRows([300], { usedPercent: 58 });
     Object.assign(cleanRows.at(-1).payload.rate_limits, {
@@ -858,7 +1385,7 @@ test("quota identity upgrade rolls back and remains pending after malformed scan
     }
     assert.equal(ledger.quotaRows.length, 1);
     assert.deepEqual(contractState(), {
-      marker: "codex-limit-id-v1",
+      marker: QUOTA_IDENTITY_CONTRACT_VERSION,
       pending: 0,
       quotaRows: 1,
     });
@@ -3205,6 +3732,67 @@ test("write-open rejects newer durable ledger schemas without rewriting them", a
   }
 });
 
+test("write-open rejects future quota contracts without downgrading them", async () => {
+  const fixture = await createFixture([100], { usedPercent: 37 });
+  const ledgerPath = resolveDurableLedgerPath({
+    stateDirectory: fixture.stateDirectory,
+  });
+  let database;
+  try {
+    await collectUsage(options(fixture));
+    database = new DatabaseSync(ledgerPath);
+    database.prepare(`
+      UPDATE ledger_meta
+         SET value = 'codex-limit-id-v3'
+       WHERE key = 'quota_identity_contract'
+    `).run();
+    database.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get();
+    database.close();
+    database = null;
+    const before = await readFile(ledgerPath);
+
+    await assert.rejects(
+      () => collectUsage(options(fixture)),
+      (error) => error?.code === "ERR_DURABLE_LEDGER_QUOTA_CONTRACT",
+    );
+    assert.deepEqual(await readFile(ledgerPath), before);
+
+    database = new DatabaseSync(ledgerPath, { readOnly: true });
+    assert.equal(database.prepare(`
+      SELECT value
+        FROM ledger_meta
+       WHERE key = 'quota_identity_contract'
+    `).get().value, "codex-limit-id-v3");
+    assert.equal(database.prepare(`
+      SELECT value
+        FROM ledger_meta
+       WHERE key = 'revision'
+    `).get().value, "1");
+    assert.equal(database.prepare(
+      "SELECT COUNT(*) AS count FROM quota_observations",
+    ).get().count, 1);
+    database.close();
+    database = null;
+
+    database = new DatabaseSync(ledgerPath);
+    database.prepare(`
+      UPDATE ledger_meta
+         SET value = ?
+       WHERE key = 'quota_identity_contract'
+    `).run(QUOTA_IDENTITY_CONTRACT_VERSION);
+    database.close();
+    database = null;
+    const recovered = await collectUsage(options(fixture));
+    assert.deepEqual(
+      recovered.quotaObservations.map((quota) => quota.usedPercent),
+      [37],
+    );
+  } finally {
+    database?.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("v2 ledgers add reconciliation state without breaking read-only access", async () => {
   const fixture = await createFixture([100]);
   const ledgerPath = resolveDurableLedgerPath({
@@ -3421,6 +4009,102 @@ test("readable non-v3 legacy snapshots remain retryable hard failures", async ()
   }
 });
 
+test("markerless legacy quota is quarantined while usage migrates", async () => {
+  const fixture = await createFixture([]);
+  const generatedAt = "2026-08-20T12:00:00.000Z";
+  try {
+    const legacy = legacySnapshotForFixture(fixture, {
+      schemaVersion: 3,
+      generatedAt,
+      events: [{
+        timestamp: generatedAt,
+        project: "legacy-project",
+        model: "gpt-5.4",
+        rateCardModel: "gpt-5.4",
+        effort: "medium",
+        source: "local",
+        useType: "interactive",
+        inputTokens: 90,
+        cachedInputTokens: 10,
+        outputTokens: 10,
+        reasoningTokens: 4,
+        totalTokens: 100,
+        toolCalls: 0,
+        callCount: 1,
+        detailedCallCount: 1,
+        inputCallCount: 1,
+        breakdownAvailable: true,
+        threadIds: [],
+      }],
+      quotaObservations: [
+        {
+          timestamp: generatedAt,
+          lastSeenAt: generatedAt,
+          usedPercent: 22,
+          windowMinutes: 10_080,
+          resetsAt: WEEKLY_RESET,
+          planType: "plus",
+          limitKey: stableHash("anonymous", 16),
+          scope: "account",
+        },
+        {
+          timestamp: generatedAt,
+          lastSeenAt: generatedAt,
+          usedPercent: 44,
+          windowMinutes: 10_080,
+          resetsAt: WEEKLY_RESET,
+          planType: "plus",
+          limitKey: stableHash("Legacy label", 16),
+          limitName: "Legacy label",
+          scope: "named",
+        },
+      ],
+      threads: [],
+    });
+    delete legacy.metadata.durableLedger.quotaIdentityContract;
+    await writePrivateSnapshot(fixture.output, legacy);
+
+    const migrated = await collectUsage(options(fixture));
+    let ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+    assert.equal(totalTokens(migrated), 100);
+    assert.equal(migrated.quotaObservations.length, 0);
+    assert.equal(
+      migrated.coverage.legacyQuotaStatus,
+      "skipped-contract-unverified",
+    );
+    assert.equal(migrated.coverage.legacyQuotaRowsSkipped, 2);
+    assert.equal(ledger.migratedUsageRows, 1);
+    assert.equal(ledger.migratedQuotaRows, 0);
+    assert.equal(ledger.migration.quotaRows, 0);
+
+    await writeFile(
+      fixture.file,
+      serialize(rolloutRows([200], { usedPercent: 58 })),
+    );
+    const recovered = await collectUsage(options(fixture));
+    const recoveredReload = await collectUsage(options(fixture));
+    ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+    );
+    for (const snapshot of [recovered, recoveredReload]) {
+      assert.deepEqual(
+        snapshot.quotaObservations.map((quota) => [
+          quota.limitKey,
+          quota.scope,
+          quota.usedPercent,
+        ]),
+        [[stableHash("codex", 16), "account", 58]],
+      );
+    }
+    assert.equal(ledger.quotaRows.length, 1);
+    assert.equal(ledger.migratedQuotaRows, 0);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("malformed v3 legacy rows cannot burn the one-shot migration", async () => {
   const fixture = await createFixture([]);
   const legacySnapshotPath = resolve(fixture.root, "exports", "legacy.json");
@@ -3458,7 +4142,7 @@ test("malformed v3 legacy rows cannot burn the one-shot migration", async () => 
       windowMinutes: 10_080,
       resetsAt: WEEKLY_RESET,
       planType: "plus",
-      limitKey: "weekly",
+      limitKey: stableHash("codex", 16),
       scope: "account",
     }],
     threads: [{
@@ -3477,15 +4161,6 @@ test("malformed v3 legacy rows cannot burn the one-shot migration", async () => 
   const invalidCases = [
     ["usage event", (snapshot) => {
       snapshot.events[0].timestamp = "not-a-timestamp";
-    }],
-    ["quota array", (snapshot) => {
-      snapshot.quotaObservations = {};
-    }],
-    ["quota row", (snapshot) => {
-      snapshot.quotaObservations[0].usedPercent = -1;
-    }],
-    ["quota percent above range", (snapshot) => {
-      snapshot.quotaObservations[0].usedPercent = 101;
     }],
     ["thread row", (snapshot) => {
       snapshot.threads[0] = null;
@@ -3571,6 +4246,83 @@ test("malformed v3 legacy rows cannot burn the one-shot migration", async () => 
   }
 });
 
+test("legacy usage migrates independently of invalid v2 quota claims", async () => {
+  const generatedAt = "2026-08-20T12:00:00.000Z";
+  const cases = [
+    ["invalid-array", 0, (snapshot) => {
+      snapshot.quotaObservations = {};
+    }],
+    ["malformed-sibling", 2, (snapshot) => {
+      snapshot.quotaObservations.push({
+        ...snapshot.quotaObservations[0],
+        usedPercent: -1,
+      });
+    }],
+    ["scope-key-mismatch", 1, (snapshot) => {
+      snapshot.quotaObservations[0].scope = "named";
+    }],
+  ];
+  for (const [name, rowsSkipped, mutate] of cases) {
+    const fixture = await createFixture([]);
+    try {
+      const legacy = legacySnapshotForFixture(fixture, {
+        schemaVersion: 3,
+        generatedAt,
+        events: [{
+          timestamp: generatedAt,
+          project: "legacy-project",
+          model: "gpt-5.4",
+          rateCardModel: "gpt-5.4",
+          effort: "medium",
+          source: "local",
+          useType: "interactive",
+          inputTokens: 90,
+          cachedInputTokens: 10,
+          outputTokens: 10,
+          reasoningTokens: 4,
+          totalTokens: 100,
+          toolCalls: 0,
+          callCount: 1,
+          detailedCallCount: 1,
+          inputCallCount: 1,
+          breakdownAvailable: true,
+          threadIds: [],
+        }],
+        quotaObservations: [{
+          timestamp: generatedAt,
+          lastSeenAt: generatedAt,
+          usedPercent: 22,
+          windowMinutes: 10_080,
+          resetsAt: WEEKLY_RESET,
+          planType: "plus",
+          limitKey: stableHash("codex", 16),
+          scope: "account",
+        }],
+        threads: [],
+      });
+      mutate(legacy);
+      await writePrivateSnapshot(fixture.output, legacy);
+
+      const first = await collectUsage(options(fixture));
+      const second = await collectUsage(options(fixture));
+      const ledger = await readDurableLedger(
+        resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      );
+      assert.equal(totalTokens(first), 100, name);
+      assert.equal(totalTokens(second), 100, name);
+      assert.equal(first.quotaObservations.length, 0, name);
+      assert.equal(first.coverage.legacyQuotaStatus, "skipped-invalid", name);
+      assert.equal(first.coverage.legacyQuotaRowsSkipped, rowsSkipped, name);
+      assert.equal(ledger.migratedUsageRows, 1, name);
+      assert.equal(ledger.migratedQuotaRows, 0, name);
+      assert.equal(ledger.migration.usageRows, 1, name);
+      assert.equal(ledger.migration.quotaRows, 0, name);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("old v3 snapshot migration is idempotent and marks compacted estimates", async () => {
   const fixture = await createFixture([]);
   const generatedAt = "2026-08-20T12:00:00.000Z";
@@ -3587,7 +4339,7 @@ test("old v3 snapshot migration is idempotent and marks compacted estimates", as
       windowMinutes: 10_080,
       resetsAt: WEEKLY_RESET,
       planType: "plus",
-      limitKey: "weekly",
+      limitKey: stableHash("codex", 16),
       scope: "account",
     }],
     threads: [{
@@ -3769,7 +4521,7 @@ test("active-only legacy migrations survive --no-archived refreshes", async () =
       windowMinutes: 10_080,
       resetsAt: WEEKLY_RESET,
       planType: "plus",
-      limitKey: "weekly",
+      limitKey: stableHash("codex", 16),
       scope: "account",
     }],
     events: [{

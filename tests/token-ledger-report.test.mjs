@@ -16,9 +16,14 @@ import {
   writeTrendPng,
 } from "../bin/token-ledger-trend-image.mjs";
 import { CODEX_CREDIT_RATE_CARD_AS_OF } from "../lib/token-ledger-rates.mjs";
+import {
+  ACCOUNT_QUOTA_LIMIT_KEY,
+  QUOTA_IDENTITY_CONTRACT_VERSION,
+} from "../lib/token-ledger-quota-contract.mjs";
 
 const TZ = "Pacific/Honolulu"; // UTC-10, no DST
 const WEEK_SECONDS = 10_080 * 60;
+const NAMED_QUOTA_LIMIT_KEY = "0000000000000000";
 
 function bounds7() {
   return multiDayBounds("2026-08-23", TZ, 7);
@@ -62,6 +67,8 @@ function quota(day, hour, usedPercent, resetsAt, extra = {}) {
     usedPercent,
     windowMinutes: 10_080,
     resetsAt,
+    scope: "account",
+    limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
     ...extra,
   };
 }
@@ -75,6 +82,11 @@ function snapshotOf(events, quotaObservations = [], overrides = {}) {
       rateCardAsOf: CODEX_CREDIT_RATE_CARD_AS_OF,
     },
     coverage: { parseErrors: 0 },
+    metadata: {
+      durableLedger: {
+        quotaIdentityContract: QUOTA_IDENTITY_CONTRACT_VERSION,
+      },
+    },
     events,
     threads: [],
     quotaObservations,
@@ -365,12 +377,14 @@ test("missing and named-only quota pools yield the unavailable state", () => {
     [event(20, 8, {})],
     [
       quota(20, 2, 40, Math.floor(Date.UTC(2026, 7, 26, 6) / 1_000), {
-        limitKey: "pool-1",
+        limitKey: NAMED_QUOTA_LIMIT_KEY,
         limitName: "gpt-5-pool",
+        scope: "named",
       }),
       quota(21, 2, 50, Math.floor(Date.UTC(2026, 7, 26, 6) / 1_000), {
-        limitKey: "pool-1",
+        limitKey: NAMED_QUOTA_LIMIT_KEY,
         limitName: "gpt-5-pool",
+        scope: "named",
       }),
     ],
   ));
@@ -383,12 +397,12 @@ test("quota scope, not optional display labels, selects the account meter", () =
     [event(20, 8, {})],
     [
       quota(20, 2, 40, resetsAt, {
-        limitKey: "default-pool",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         limitName: "Default display",
         scope: "account",
       }),
       quota(21, 2, 50, resetsAt, {
-        limitKey: "default-pool",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         limitName: "Default display",
         scope: "account",
       }),
@@ -401,18 +415,38 @@ test("quota scope, not optional display labels, selects the account meter", () =
     [event(20, 8, {})],
     [
       quota(20, 2, 40, resetsAt, {
-        limitKey: "codex-secondary",
+        limitKey: NAMED_QUOTA_LIMIT_KEY,
         limitName: null,
         scope: "named",
       }),
       quota(21, 2, 50, resetsAt, {
-        limitKey: "codex-secondary",
+        limitKey: NAMED_QUOTA_LIMIT_KEY,
         limitName: null,
         scope: "named",
       }),
     ],
   ));
   assert.equal(named.meter.status, "unavailable");
+
+  const forgedAccount = build(snapshotOf(
+    [event(20, 8, {})],
+    [quota(20, 2, 40, resetsAt, {
+      limitKey: NAMED_QUOTA_LIMIT_KEY,
+      limitName: "Forged account",
+      scope: "account",
+    })],
+  ));
+  assert.equal(forgedAccount.meter.status, "unavailable");
+
+  const missingIdentity = build(snapshotOf(
+    [event(20, 8, {})],
+    [quota(20, 2, 40, resetsAt, {
+      limitKey: undefined,
+      limitName: "Missing identity",
+      scope: "account",
+    })],
+  ));
+  assert.equal(missingIdentity.meter.status, "unavailable");
 });
 
 test("meter geometry samples observations without extrapolating", () => {

@@ -203,11 +203,21 @@ snapshots are migrated once, when readable, into explicitly marked
 invent exact event or turn identities, and remain marked as estimated in
 coverage. A missing legacy snapshot is also recorded as checked so a later
 refresh cannot unexpectedly migrate a different file into the same ledger.
-An existing malformed, unreadable, oversized, non-regular, or non-v3 snapshot
-instead stops with `ERR_DURABLE_LEDGER_LEGACY_SNAPSHOT` before the ledger
+An existing snapshot with malformed usage/thread history, or one that is
+unreadable, oversized, non-regular, or non-v3, instead stops with
+`ERR_DURABLE_LEDGER_LEGACY_SNAPSHOT` before the ledger
 revision advances. Its bytes and the one-shot migration opportunity are
 preserved so the snapshot can be privately backed up, repaired or replaced,
 and retried.
+
+Legacy quota samples are imported only when the snapshot explicitly carries
+the current quota-identity contract. Older or markerless snapshots may have
+keyed unnamed limits by a display label or an anonymous placeholder, so their
+quota samples are skipped while safe usage and thread history still migrate.
+Current-contract quota claims that fail identity or measurement validation are
+also skipped independently instead of blocking otherwise valid usage history.
+The generated snapshot reports this separately as `legacyQuotaStatus` and
+`legacyQuotaRowsSkipped`.
 
 Compacted rows are retained for 7,300 days (20 years) before retirement.
 Source, quota, tool, and state-only thread metadata are pruned only after they
@@ -222,6 +232,18 @@ Codex-home identity are both provable. If either check fails, exact rollout
 collection continues without that legacy history and reports show a compact
 `LEGACY HISTORY SKIPPED` warning. The reason is also recorded as
 `coverage.legacySnapshotStatus` in the generated snapshot.
+
+Codex quota records do not contain a ChatGPT account identifier. Token Ledger
+therefore treats one `CODEX_HOME` and its durable ledger as one account boundary
+and keys pools only by the canonical provider limit id; omitted or blank ids
+mean the default `codex` pool. If different ChatGPT accounts share a
+`CODEX_HOME`, their equal provider ids cannot be separated. Use distinct Codex
+homes and ledger locations when account isolation matters.
+
+Raw provider limit ids are normalized and then hash-derived into stored pool
+keys; the raw ids are not written to the ledger or generated snapshot.
+Sanitized optional display labels are not identity, but may remain in the
+ledger, generated snapshot, terminal report, and image report.
 
 The default snapshot and ledger directories are private (`0700`), and their
 files are private (`0600`). An explicit `--input` reads only that deliberate
