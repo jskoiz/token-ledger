@@ -4162,6 +4162,12 @@ test("malformed v3 legacy rows cannot burn the one-shot migration", async () => 
     ["usage event", (snapshot) => {
       snapshot.events[0].timestamp = "not-a-timestamp";
     }],
+    ["null usage timestamp", (snapshot) => {
+      snapshot.events[0].timestamp = null;
+    }],
+    ["missing usage timestamp", (snapshot) => {
+      delete snapshot.events[0].timestamp;
+    }],
     ["thread row", (snapshot) => {
       snapshot.threads[0] = null;
     }],
