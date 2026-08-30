@@ -1885,6 +1885,45 @@ test("invalid usage makes its source evidence-only", async () => {
   }
 });
 
+test("null live timestamps never enter durable retention", async () => {
+  const { root, directory } = await createRolloutFixture(
+    [100],
+    "rollout-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl",
+  );
+  const invalidFile = resolve(
+    directory,
+    "rollout-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.jsonl",
+  );
+  const output = resolve(root, "snapshot.json");
+  const invalidRows = rolloutRows([200]);
+  invalidRows[1].timestamp = null;
+  try {
+    await writeFile(invalidFile, serialize(invalidRows));
+    const snapshot = await collectUsage({
+      output,
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+    const ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ output }),
+    );
+
+    assert.equal(snapshot.coverage.invalidTokenRecords, 1);
+    assert.equal(snapshot.coverage.observedTokens, 100);
+    assert.deepEqual(
+      ledger.usageRows.map((row) => row.totalTokens),
+      [100],
+    );
+    assert.equal(
+      ledger.usageRows.some((row) => row.timestamp.startsWith("1970-")),
+      false,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("invalid usage in a separate source makes weekly completeness false", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-completeness-"));
   const rolloutDirectory = resolve(root, "sessions", "2026", "08", "18");
