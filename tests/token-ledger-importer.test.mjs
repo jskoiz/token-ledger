@@ -27,7 +27,6 @@ import {
   collectUsage,
   collectUsageSequential,
   rolloutWorkerStateEntry,
-  SOURCE_COLLECTION_MAX_ATTEMPTS,
   sourceInventory,
   sourceWatermarksEqual,
 } from "../lib/token-ledger-importer.mjs";
@@ -359,7 +358,7 @@ test("large refreshes stream spool rows within a bounded JavaScript heap", () =>
   assert.equal(result.parseErrors, 0);
 });
 
-test("source appends are included before a validated cache is published", async () => {
+test("source appends after the cutoff publish safely and converge next time", async () => {
   const { root, file } = await createRolloutFixture([100]);
   const output = resolve(root, "snapshot.json.gz");
   let appended = false;
@@ -380,15 +379,24 @@ test("source appends are included before a validated cache is published", async 
     );
     const writeResult = await writePrivateSnapshot(output, snapshot);
     const persisted = await readPrivateSnapshot(output);
+    const afterAppend = await sourceInventory(root, true);
+    const converged = await collectUsage({
+      output,
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
     const current = await sourceInventory(root, true);
 
-    assert.equal(snapshot.coverage.observedTokens, 300);
-    assert.equal(writeResult.snapshot.coverage.observedTokens, 300);
-    assert.equal(persisted.coverage.observedTokens, 300);
-    assert.ok(sourceWatermarksEqual(
+    assert.equal(snapshot.coverage.observedTokens, 100);
+    assert.equal(writeResult.snapshot.coverage.observedTokens, 100);
+    assert.equal(persisted.coverage.observedTokens, 100);
+    assert.equal(sourceWatermarksEqual(
       persisted.sourceWatermark,
-      current.watermark,
-    ));
+      afterAppend.watermark,
+    ), false);
+    assert.equal(converged.coverage.observedTokens, 300);
+    assert.ok(sourceWatermarksEqual(converged.sourceWatermark, current.watermark));
     assert.equal(
       persisted.metadata.durableLedger.codexHomeFingerprint,
       codexHomeFingerprint(root),
@@ -502,38 +510,63 @@ test("truncation during collection triggers a complete retry", async () => {
   }
 });
 
-test("continuously changing sources stop after bounded retries", async () => {
+test("continuously appended sources publish one stable cutoff", async () => {
   const { root, file } = await createRolloutFixture([100]);
   let progressCalls = 0;
   try {
-    await assert.rejects(
-      () => collectUsage(
-        {
-          output: resolve(root, "snapshot.json"),
-          codexHome: root,
-          includeArchived: true,
-          since: null,
-        },
-        async ({ current }) => {
-          if (current !== 1) return;
-          progressCalls += 1;
-          await appendFile(
-            file,
-            serialize(rolloutRows([100 + progressCalls], progressCalls + 1)),
-          );
-        },
-      ),
-      (error) => {
-        assert.equal(error.code, "ERR_SOURCE_CHANGED_DURING_COLLECTION");
-        assert.match(error.message, /after 3 attempts/);
-        return true;
+    const first = await collectUsage(
+      {
+        output: resolve(root, "snapshot.json"),
+        codexHome: root,
+        includeArchived: true,
+        since: null,
+      },
+      async ({ current }) => {
+        if (current !== 1) return;
+        progressCalls += 1;
+        await appendFile(
+          file,
+          serialize(rolloutRows([101], 2)),
+        );
       },
     );
-    assert.equal(progressCalls, SOURCE_COLLECTION_MAX_ATTEMPTS);
-    await assert.rejects(
-      () => stat(resolve(root, "snapshot.json")),
-      { code: "ENOENT" },
+    const converged = await collectUsage({
+      output: resolve(root, "snapshot.json"),
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+
+    assert.equal(progressCalls, 1);
+    assert.equal(first.coverage.observedTokens, 100);
+    assert.equal(converged.coverage.observedTokens, 201);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("metadata churn does not invalidate a stable rollout cutoff", async () => {
+  const { root } = await createRolloutFixture([100]);
+  const wal = resolve(root, "state_5.sqlite-wal");
+  let progressCalls = 0;
+  try {
+    await writeFile(wal, "before");
+    const snapshot = await collectUsage(
+      {
+        output: resolve(root, "snapshot.json"),
+        codexHome: root,
+        includeArchived: true,
+        since: null,
+      },
+      async ({ current }) => {
+        if (current !== 1) return;
+        progressCalls += 1;
+        await appendFile(wal, "after");
+      },
     );
+
+    assert.equal(progressCalls, 1);
+    assert.equal(snapshot.coverage.observedTokens, 100);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
