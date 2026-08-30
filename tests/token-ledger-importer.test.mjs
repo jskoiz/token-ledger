@@ -26,6 +26,7 @@ import {
   cleanupOrphanedUsageSpools,
   collectUsage,
   collectUsageSequential,
+  rolloutWorkerStateEntry,
   SOURCE_COLLECTION_MAX_ATTEMPTS,
   sourceInventory,
   sourceWatermarksEqual,
@@ -100,6 +101,55 @@ function rolloutRows(totals, offset = 0) {
     ];
   });
 }
+
+test("rollout workers receive only the matched scan metadata", () => {
+  const includedId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const excludedId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const includedFile = resolve(
+    "/sessions",
+    `rollout-${includedId}.jsonl`,
+  );
+  const stateRows = new Map([
+    [includedId, {
+      model: "gpt-5.6-sol",
+      reasoning_effort: "high",
+      cwd: "/private/project",
+      git_origin_url: "https://example.invalid/org/repo.git",
+      source: '{"subagent":{}}',
+      title: "large user-authored text".repeat(10_000),
+      updated_at: 1_777_777_777,
+    }],
+    [excludedId, {
+      model: "gpt-5.6-luna",
+      title: "unrelated state row",
+    }],
+  ]);
+
+  assert.deepEqual(rolloutWorkerStateEntry(includedFile, stateRows), [
+    includedId,
+    {
+      model: "gpt-5.6-sol",
+      reasoning_effort: "high",
+      cwd: "/private/project",
+      git_origin_url: "https://example.invalid/org/repo.git",
+      source: '{"subagent":{}}',
+    },
+  ]);
+  assert.equal(
+    rolloutWorkerStateEntry(
+      resolve("/sessions", `rollout-${excludedId}.jsonl`),
+      new Map([[includedId, stateRows.get(includedId)]]),
+    ),
+    null,
+  );
+  assert.equal(
+    rolloutWorkerStateEntry(
+      resolve("/sessions", "rollout-without-a-thread-id.jsonl"),
+      stateRows,
+    ),
+    null,
+  );
+});
 
 async function createRolloutFixture(totals, fileName = "rollout-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl") {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-collection-"));
