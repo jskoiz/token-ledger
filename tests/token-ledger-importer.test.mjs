@@ -585,10 +585,11 @@ test("rollout replacement after staging does not discard the captured cutoff", a
   }
 });
 
-test("replacement during collection triggers a complete retry", async () => {
+test("replacement after a bounded read is deferred until the next refresh", async () => {
   const { root, directory, file } = await createRolloutFixture([100]);
   const replacement = resolve(directory, "replacement.jsonl");
   let replaced = false;
+  let progressCalls = 0;
   try {
     const snapshot = await collectUsage(
       {
@@ -596,8 +597,11 @@ test("replacement during collection triggers a complete retry", async () => {
         codexHome: root,
         includeArchived: true,
         since: null,
+        stageSnapshot: (candidate) =>
+          stagePrivateSnapshot(resolve(root, "snapshot.json"), candidate),
       },
       async ({ current }) => {
+        if (current === 1) progressCalls += 1;
         if (current === 1 && !replaced) {
           replaced = true;
           await writeFile(replacement, serialize(rolloutRows([300])));
@@ -605,17 +609,25 @@ test("replacement during collection triggers a complete retry", async () => {
         }
       },
     );
-
-    assert.equal(snapshot.coverage.observedTokens, 300);
+    const converged = await collectUsage({
+      output: resolve(root, "snapshot.json"),
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+    assert.equal(progressCalls, 1);
+    assert.equal(snapshot.coverage.observedTokens, 100);
     assert.equal(snapshot.coverage.filesScanned, 1);
+    assert.equal(converged.coverage.observedTokens, 300);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("truncation during collection triggers a complete retry", async () => {
+test("truncation after a bounded read does not erase captured usage", async () => {
   const { root, file } = await createRolloutFixture([100, 200]);
   let truncated = false;
+  let progressCalls = 0;
   try {
     const snapshot = await collectUsage(
       {
@@ -623,17 +635,27 @@ test("truncation during collection triggers a complete retry", async () => {
         codexHome: root,
         includeArchived: true,
         since: null,
+        stageSnapshot: (candidate) =>
+          stagePrivateSnapshot(resolve(root, "snapshot.json"), candidate),
       },
       async ({ current }) => {
+        if (current === 1) progressCalls += 1;
         if (current === 1 && !truncated) {
           truncated = true;
           await writeFile(file, serialize(rolloutRows([100])));
         }
       },
     );
-
-    assert.equal(snapshot.coverage.observedTokens, 100);
+    const converged = await collectUsage({
+      output: resolve(root, "snapshot.json"),
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+    assert.equal(progressCalls, 1);
+    assert.equal(snapshot.coverage.observedTokens, 300);
     assert.equal(snapshot.coverage.filesScanned, 1);
+    assert.equal(converged.coverage.observedTokens, 300);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
