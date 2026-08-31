@@ -3068,6 +3068,153 @@ test("a post-commit truncation race discards the transient append", async () => 
   }
 });
 
+test("a rejected repeat quota reading reverts the extended bound", async () => {
+  const fixture = await createFixture([100], { usedPercent: 37 });
+  let commitCount = 0;
+  try {
+    await collectUsage(options(fixture));
+    const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
+    const validated = await readDurableLedger(ledgerPath);
+    // The same 37% reading repeated at a later timestamp extends only the
+    // observation and source bounds.
+    await appendFile(
+      fixture.file,
+      serialize(rolloutRows([200], { offset: 1, usedPercent: 37 })),
+    );
+
+    const snapshot = await collectUsage(options(fixture, {
+      faultInjector: async ({ point }) => {
+        if (point === "after-sqlite-commit") {
+          commitCount += 1;
+          if (commitCount === 1) {
+            await writeFile(
+              fixture.file,
+              serialize(rolloutRows([100], { usedPercent: 37 })),
+            );
+          }
+        }
+      },
+    }));
+    const ledger = await readDurableLedger(ledgerPath);
+
+    assert.equal(commitCount, 2);
+    assert.equal(totalTokens(snapshot), 100);
+    assert.equal(ledger.quotaRows.length, 1);
+    assert.equal(ledger.quotaRows[0].usedPercent, 37);
+    assert.equal(
+      ledger.quotaRows[0].lastSeenAt,
+      validated.quotaRows[0].lastSeenAt,
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a rejected commit reverts same-run compaction of its own events", async () => {
+  const fixture = await createFixture([100]);
+  let commitCount = 0;
+  try {
+    await collectUsage(options(fixture));
+    // The transient append predates the exact-observation retention cutoff,
+    // so the same transaction compacts it immediately after ingest.
+    await appendFile(
+      fixture.file,
+      serialize(rolloutRows([200], {
+        offset: 1,
+        baseTimestamp: "2015-01-01T10:00:00.000Z",
+      })),
+    );
+
+    const snapshot = await collectUsage(options(fixture, {
+      faultInjector: async ({ point }) => {
+        if (point === "after-sqlite-commit") {
+          commitCount += 1;
+          if (commitCount === 1) {
+            await writeFile(fixture.file, serialize(rolloutRows([100])));
+          }
+        }
+      },
+    }));
+    const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
+    const ledger = await readDurableLedger(ledgerPath);
+
+    assert.equal(commitCount, 2);
+    assert.equal(totalTokens(snapshot), 100);
+    assert.deepEqual(
+      ledger.usageRows.map((row) => [row.identityKind, row.totalTokens]),
+      [["exact", 100]],
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a rejected first commit retries the one-shot legacy migration", async () => {
+  const fixture = await createFixture([100]);
+  const legacySnapshotPath = resolve(fixture.root, "exports", "snapshot.json");
+  const generatedAt = "2026-08-19T12:00:00.000Z";
+  let commitCount = 0;
+  try {
+    await mkdir(dirname(legacySnapshotPath), { recursive: true });
+    await writePrivateSnapshot(
+      legacySnapshotPath,
+      legacySnapshotForFixture(fixture, {
+        schemaVersion: 3,
+        generatedAt,
+        events: [{
+          timestamp: generatedAt,
+          startAt: generatedAt,
+          endAt: generatedAt,
+          project: "legacy-project",
+          model: "gpt-5.4",
+          rateCardModel: "gpt-5.4",
+          effort: "medium",
+          source: "local",
+          useType: "interactive",
+          inputTokens: 490,
+          cachedInputTokens: 10,
+          outputTokens: 10,
+          reasoningTokens: 4,
+          totalTokens: 500,
+          toolCalls: 0,
+          callCount: 1,
+          detailedCallCount: 1,
+          inputCallCount: 1,
+          breakdownAvailable: true,
+          threadIds: ["legacy-rejected-thread"],
+        }],
+      }),
+    );
+
+    const snapshot = await collectUsage(options(fixture, {
+      output: legacySnapshotPath,
+      faultInjector: async ({ point }) => {
+        if (point === "after-sqlite-commit") {
+          commitCount += 1;
+          if (commitCount === 1) {
+            await replaceRollout(fixture, [200]);
+          }
+        }
+      },
+    }));
+    const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
+    const ledger = await readDurableLedger(ledgerPath);
+
+    // The rejected first commit reverted its migration and the one-shot
+    // marker together, so the retry re-reads the legacy snapshot instead of
+    // silently dropping the migrated history.
+    assert.equal(commitCount, 2);
+    assert.equal(totalTokens(snapshot), 700);
+    assert.equal(ledger.migratedUsageRows, 1);
+    assert.equal(
+      ledger.usageRows.reduce((sum, row) => sum + row.totalTokens, 0),
+      700,
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("a crash between commit and validation unwinds on the next refresh", async () => {
   const fixture = await createFixture([100]);
   try {
