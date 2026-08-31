@@ -635,6 +635,7 @@ test("metadata churn does not invalidate a stable rollout cutoff", async () => {
   const wal = resolve(root, "state_5.sqlite-wal");
   const output = resolve(root, "snapshot.json");
   let progressCalls = 0;
+  let postStageMutation = false;
   try {
     await writeFile(wal, "before");
     const snapshot = await collectUsage(
@@ -644,6 +645,11 @@ test("metadata churn does not invalidate a stable rollout cutoff", async () => {
         includeArchived: true,
         since: null,
         stageSnapshot: (candidate) => stagePrivateSnapshot(output, candidate),
+        faultInjector: async ({ point }) => {
+          if (point !== "after-sqlite-commit" || postStageMutation) return;
+          postStageMutation = true;
+          await appendFile(wal, "-after-stage");
+        },
       },
       async ({ current }) => {
         if (current !== 1) return;
@@ -655,9 +661,16 @@ test("metadata churn does not invalidate a stable rollout cutoff", async () => {
     const current = await sourceInventory(root, true);
 
     assert.equal(progressCalls, 1);
+    assert.equal(postStageMutation, true);
     assert.equal(snapshot.coverage.observedTokens, 100);
-    assert.ok(sourceWatermarksEqual(snapshot.sourceWatermark, current.watermark));
-    assert.ok(sourceWatermarksEqual(persisted.sourceWatermark, current.watermark));
+    assert.equal(
+      sourceWatermarksEqual(snapshot.sourceWatermark, current.watermark),
+      false,
+    );
+    assert.equal(
+      sourceWatermarksEqual(persisted.sourceWatermark, current.watermark),
+      false,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
