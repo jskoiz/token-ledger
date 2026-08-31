@@ -2837,7 +2837,7 @@ test("snapshot size fallback requires exact scope and Codex-home provenance", as
   }
 });
 
-test("exhausted source retries never publish an uncommitted snapshot", async () => {
+test("post-staging source changes publish the validated candidate once", async () => {
   const root = await createPrivateFixtureRoot("token-ledger-staged-retry-");
   const codexHome = resolve(root, "codex-home");
   const sourceDirectory = resolve(codexHome, "sessions", "2026", "08");
@@ -2874,38 +2874,36 @@ test("exhausted source retries never publish an uncommitted snapshot", async () 
       )),
     );
 
-    await assert.rejects(
-      () => collectUsage({
-        output: snapshotPath,
-        codexHome,
-        includeArchived: true,
-        since: null,
-        stageSnapshot: (candidate) =>
-          stagePrivateSnapshot(snapshotPath, candidate),
-        faultInjector: async ({ point }) => {
-          if (point !== "after-validation") return;
-          mutation += 1;
-          const rows = Array.from({ length: mutation + 1 }, (_, index) =>
-            sourceRolloutRows(
-              300 + mutation * 100 + index,
-              `turn-mutation-${mutation}-${index}`,
-              new Date(
-                Date.parse("2026-08-23T11:00:00.000Z") +
-                  (mutation * 10 + index) * 60_000,
-              ).toISOString(),
-            )
-          ).flat();
-          await writeFile(sourceFile, serializeRows(rows));
-        },
-      }),
-      (error) => error?.code === "ERR_SOURCE_CHANGED_DURING_COLLECTION",
-    );
+    const snapshot = await collectUsage({
+      output: snapshotPath,
+      codexHome,
+      includeArchived: true,
+      since: null,
+      stageSnapshot: (candidate) =>
+        stagePrivateSnapshot(snapshotPath, candidate),
+      faultInjector: async ({ point }) => {
+        if (point !== "after-validation") return;
+        mutation += 1;
+        const rows = Array.from({ length: mutation + 1 }, (_, index) =>
+          sourceRolloutRows(
+            300 + mutation * 100 + index,
+            `turn-mutation-${mutation}-${index}`,
+            new Date(
+              Date.parse("2026-08-23T11:00:00.000Z") +
+                (mutation * 10 + index) * 60_000,
+            ).toISOString(),
+          )
+        ).flat();
+        await writeFile(sourceFile, serializeRows(rows));
+      },
+    });
 
     const stored = await readPrivateSnapshot(snapshotPath);
-    assert.equal(mutation, 3);
-    assert.equal(stored.coverage.observedTokens, 100);
-    assert.equal(stored.metadata.durableLedger.revision, 1);
-    assert.equal(await readDurableLedgerRevision(ledgerPath), 1);
+    assert.equal(mutation, 1);
+    assert.equal(snapshot.coverage.observedTokens, 300);
+    assert.equal(stored.coverage.observedTokens, 300);
+    assert.equal(stored.metadata.durableLedger.revision, 2);
+    assert.equal(await readDurableLedgerRevision(ledgerPath), 2);
     assert.deepEqual(
       (await readdir(root)).filter((name) => name.endsWith(".tmp")),
       [],

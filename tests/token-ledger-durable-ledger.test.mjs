@@ -2982,10 +2982,9 @@ test("source changes after validation roll back the candidate before retry", asy
   }
 });
 
-test("a post-commit source race keeps the complete revision and converges", async () => {
+test("a post-commit source race publishes once and converges next refresh", async () => {
   const fixture = await createFixture([100]);
   let commitCount = 0;
-  let observedForwardBaseline = false;
   try {
     const initial = await collectUsage(options(fixture));
     await writePrivateSnapshot(fixture.output, initial);
@@ -2997,36 +2996,7 @@ test("a post-commit source race keeps the complete revision and converges", asyn
     const snapshot = await collectUsage(options(fixture, {
       stageSnapshot: (candidate) =>
         stagePrivateSnapshot(fixture.output, candidate),
-      faultInjector: async ({ point, path }) => {
-        if (
-          point === "before-commit" &&
-          commitCount === 1 &&
-          !observedForwardBaseline
-        ) {
-          const database = new DatabaseSync(path, { readOnly: true });
-          try {
-            assert.equal(
-              Number(database.prepare(
-                "SELECT value FROM ledger_meta WHERE key = 'revision'",
-              ).get().value),
-              2,
-            );
-            // The rejected commit's transient append was unwound, so only
-            // the previously validated observation remains durable.
-            assert.equal(
-              database.prepare(
-                "SELECT SUM(total_tokens) AS total FROM usage_observations",
-              ).get().total,
-              100,
-            );
-          } finally {
-            database.close();
-          }
-          const storedDuringRetry = await readPrivateSnapshot(fixture.output);
-          assert.equal(totalTokens(storedDuringRetry), 100);
-          assert.equal(storedDuringRetry.metadata.durableLedger.revision, 1);
-          observedForwardBaseline = true;
-        }
+      faultInjector: async ({ point }) => {
         if (point === "after-sqlite-commit") {
           commitCount += 1;
           if (commitCount === 1) {
@@ -3036,15 +3006,19 @@ test("a post-commit source race keeps the complete revision and converges", asyn
       },
     }));
     const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
-    const ledger = await readDurableLedger(ledgerPath);
     const stored = await readPrivateSnapshot(fixture.output);
 
-    assert.equal(commitCount, 2);
-    assert.equal(observedForwardBaseline, true);
-    assert.equal(totalTokens(snapshot), 900);
-    assert.equal(totalTokens(stored), 900);
-    assert.equal(snapshot.metadata.durableLedger.revision, 3);
-    assert.equal(stored.metadata.durableLedger.revision, 3);
+    assert.equal(commitCount, 1);
+    assert.equal(totalTokens(snapshot), 300);
+    assert.equal(totalTokens(stored), 300);
+    assert.equal(snapshot.metadata.durableLedger.revision, 2);
+    assert.equal(stored.metadata.durableLedger.revision, 2);
+    assert.equal(await readDurableLedgerRevision(ledgerPath), 2);
+
+    const converged = await collectUsage(options(fixture));
+    const ledger = await readDurableLedger(ledgerPath);
+    assert.equal(totalTokens(converged), 900);
+    assert.equal(converged.metadata.durableLedger.revision, 3);
     assert.equal(await readDurableLedgerRevision(ledgerPath), 3);
     assert.deepEqual(ledger.usageRows.map((row) => row.totalTokens), [400, 500]);
     assert.deepEqual(
@@ -3295,7 +3269,7 @@ test("a crash between commit and validation unwinds on the next refresh", async 
   }
 });
 
-test("exhausted post-commit races keep a readable ledger and old cache", async () => {
+test("post-commit source changes keep the staged ledger and cache aligned", async () => {
   const fixture = await createFixture([100]);
   let commitCount = 0;
   try {
@@ -3303,39 +3277,26 @@ test("exhausted post-commit races keep a readable ledger and old cache", async (
     await writePrivateSnapshot(fixture.output, initial);
     const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
     await replaceRollout(fixture, [100, 200]);
-    const replacements = [
-      [300, 400],
-      [500, 600],
-      [700, 800],
-    ];
-
-    await assert.rejects(
-      () => collectUsage(options(fixture, {
-        stageSnapshot: (candidate) =>
-          stagePrivateSnapshot(fixture.output, candidate),
-        faultInjector: async ({ point }) => {
-          if (point === "after-sqlite-commit") {
-            await replaceRollout(fixture, replacements[commitCount]);
-            commitCount += 1;
-          }
-        },
-      })),
-      (error) =>
-        error?.code === "ERR_SOURCE_CHANGED_DURING_COLLECTION" &&
-        /no snapshot was published/.test(error.message),
-    );
+    const snapshot = await collectUsage(options(fixture, {
+      stageSnapshot: (candidate) =>
+        stagePrivateSnapshot(fixture.output, candidate),
+      faultInjector: async ({ point }) => {
+        if (point === "after-sqlite-commit") {
+          await replaceRollout(fixture, [300, 400]);
+          commitCount += 1;
+        }
+      },
+    }));
     const ledger = await readDurableLedger(ledgerPath);
     const stored = await readPrivateSnapshot(fixture.output);
 
-    assert.equal(commitCount, 3);
-    assert.equal(ledger.revision, 4);
-    // Every rejected commit was reverted from its undo log, including
-    // reconciliation deletions and in-place positional overwrites, so the
-    // exhausted ledger still holds exactly the last validated observation.
-    assert.deepEqual(ledger.usageRows.map((row) => row.totalTokens), [100]);
-    assert.equal(stored.metadata.durableLedger.revision, 1);
-    assert.equal(totalTokens(stored), 100);
-    assert.notEqual(
+    assert.equal(commitCount, 1);
+    assert.equal(ledger.revision, 2);
+    assert.deepEqual(ledger.usageRows.map((row) => row.totalTokens), [100, 200]);
+    assert.equal(totalTokens(snapshot), 300);
+    assert.equal(stored.metadata.durableLedger.revision, 2);
+    assert.equal(totalTokens(stored), 300);
+    assert.equal(
       stored.metadata.durableLedger.revision,
       await readDurableLedgerRevision(ledgerPath),
     );

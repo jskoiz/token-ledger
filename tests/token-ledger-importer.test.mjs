@@ -541,6 +541,50 @@ test("new rollout files after staging do not reject the captured cutoff", async 
   }
 });
 
+test("rollout replacement after staging does not discard the captured cutoff", async () => {
+  const { root, directory, file } = await createRolloutFixture([100]);
+  const output = resolve(root, "snapshot.json.gz");
+  const replacement = resolve(directory, "replacement.jsonl");
+  let replaced = false;
+  try {
+    const snapshot = await collectUsage({
+      output,
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+      stageSnapshot: (candidate) => stagePrivateSnapshot(output, candidate),
+      faultInjector: async ({ point }) => {
+        if (point !== "after-sqlite-commit" || replaced) return;
+        replaced = true;
+        await writeFile(replacement, serialize(rolloutRows([300])));
+        await rename(replacement, file);
+      },
+    });
+    const persisted = await readPrivateSnapshot(output);
+    const afterReplacement = await sourceInventory(root, true);
+    const converged = await collectUsage({
+      output,
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+
+    assert.equal(replaced, true);
+    assert.equal(snapshot.coverage.observedTokens, 100);
+    assert.equal(persisted.coverage.observedTokens, 100);
+    assert.equal(
+      sourceWatermarksEqual(
+        snapshot.sourceWatermark,
+        afterReplacement.watermark,
+      ),
+      false,
+    );
+    assert.equal(converged.coverage.observedTokens, 300);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("replacement during collection triggers a complete retry", async () => {
   const { root, directory, file } = await createRolloutFixture([100]);
   const replacement = resolve(directory, "replacement.jsonl");
