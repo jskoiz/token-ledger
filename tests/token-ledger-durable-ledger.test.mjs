@@ -2066,6 +2066,34 @@ test("durable ledgers reject a different Codex data directory", async () => {
   }
 });
 
+test("rejected first commits do not bind the Codex data directory", async () => {
+  const fixture = await createFixture([100]);
+  const secondCodexHome = resolve(fixture.root, "other-codex-home");
+  const inventory = { files: [], lifecycleFiles: [] };
+  try {
+    await mkdir(secondCodexHome);
+    await assert.rejects(
+      updateDurableLedger({
+        options: options(fixture),
+        codexHome: fixture.root,
+        inventory,
+        validateAfterCommit: async () => {
+          throw new Error("reject first binding");
+        },
+      }),
+      /reject first binding/,
+    );
+
+    await updateDurableLedger({
+      options: options(fixture),
+      codexHome: secondCodexHome,
+      inventory,
+    });
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("durable ledger binding canonicalizes Codex home aliases", async () => {
   const fixture = await createFixture([100]);
   const alias = resolve(fixture.root, "codex-home-alias");
