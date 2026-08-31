@@ -2321,6 +2321,36 @@ test("turnless usage events reconcile by stable source position", async () => {
   }
 });
 
+test("a replaced event key can resurface in another source", async () => {
+  const fixture = await createFixture([100]);
+  const replacement = resolve(fixture.root, "replacement.jsonl");
+  const resurfaced = resolve(fixture.file, "..", SHARED_ROLLOUT_NAME);
+  try {
+    await collectUsage(options(fixture));
+    await writeFile(replacement, serialize(rolloutRows([200])));
+    await rename(replacement, fixture.file);
+    await collectUsage(options(fixture));
+    await writeFile(resurfaced, serialize(rolloutRows([100])));
+
+    const combined = await collectUsage(options(fixture));
+    await rm(fixture.file);
+    await rm(resurfaced);
+    const afterRemoval = await collectUsage(options(fixture));
+    const ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
+    );
+
+    assert.equal(totalTokens(combined), 300);
+    assert.equal(totalTokens(afterRemoval), 300);
+    assert.deepEqual(
+      ledger.usageRows.map((row) => row.totalTokens).sort((a, b) => a - b),
+      [100, 200],
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("exact event identity lookup uses the partial event-key index", async () => {
   const fixture = await createFixture([100, 200]);
   let database;
