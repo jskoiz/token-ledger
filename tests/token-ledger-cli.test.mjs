@@ -987,6 +987,25 @@ test("fractional compacted call counts survive terminal aggregation", () => {
   assert.match(output, /0\.5 CALLS/);
 });
 
+test("zero-token boundary fragments do not mark project totals estimated", () => {
+  const rows = aggregateProjects(
+    { events: [], threads: [] },
+    [{
+      project: "boundary-only",
+      model: "gpt-5.6-luna",
+      totalTokens: 0,
+      outputTokens: 0,
+      toolCalls: 0,
+      callCount: 0,
+      rangeAllocationEstimated: true,
+    }],
+    { rawProjects: true },
+  );
+
+  assert.equal(rows[0].estimated, false);
+  assert.equal(rows[0].models[0].estimated, false);
+});
+
 test("project labels remove terminal control sequences before rendering", () => {
   const project = "\u001b]8;;https://example.test\u0007\u001b[31msecret\u001b[0m\u0000";
   const rows = aggregateProjects(
