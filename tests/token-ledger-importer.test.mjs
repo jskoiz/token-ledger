@@ -1124,6 +1124,40 @@ test("staged snapshots stay private until publication and discard cleanly", asyn
   }
 });
 
+test("staged snapshots reject a replaced candidate without following it", async () => {
+  const root = await createPrivateFixtureRoot("token-ledger-stage-race-");
+  const output = resolve(root, "snapshot.json");
+  const victim = resolve(root, "victim.txt");
+  try {
+    await writePrivateSnapshot(output, { version: "previous", events: [] });
+    await writeFile(victim, "victim\n", { mode: 0o640 });
+    const victimBefore = await stat(victim);
+    const staged = await stagePrivateSnapshot(output, {
+      version: "candidate",
+      events: [],
+    });
+    const temporaryName = (await readdir(root)).find((name) =>
+      name.endsWith(".tmp")
+    );
+    assert.ok(temporaryName);
+    const temporary = resolve(root, temporaryName);
+    await rm(temporary);
+    await symlink(victim, temporary);
+
+    await assert.rejects(
+      staged.publish(),
+      (error) => error?.code === "ERR_SNAPSHOT_CANDIDATE_CHANGED",
+    );
+    const victimAfter = await stat(victim);
+    assert.equal(victimAfter.mode & 0o777, victimBefore.mode & 0o777);
+    assert.equal(await readFile(victim, "utf8"), "victim\n");
+    assert.equal((await readPrivateSnapshot(output)).version, "previous");
+    await staged.discard();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("gzip snapshots are compact, readable, atomic, and private", async () => {
   const root = await createPrivateFixtureRoot("token-ledger-gzip-write-");
   try {
