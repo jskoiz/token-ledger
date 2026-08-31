@@ -3014,13 +3014,13 @@ test("a post-commit source race keeps the complete revision and converges", asyn
 });
 
 test("a post-commit truncation race discards the transient append", async () => {
-  const fixture = await createFixture([100]);
+  const fixture = await createFixture([100], { usedPercent: 37 });
   let commitCount = 0;
   try {
     await collectUsage(options(fixture));
     await appendFile(
       fixture.file,
-      serialize(rolloutRows([200], { offset: 1 })),
+      serialize(rolloutRows([200], { offset: 1, usedPercent: 58 })),
     );
 
     const snapshot = await collectUsage(options(fixture, {
@@ -3028,7 +3028,10 @@ test("a post-commit truncation race discards the transient append", async () => 
         if (point === "after-sqlite-commit") {
           commitCount += 1;
           if (commitCount === 1) {
-            await writeFile(fixture.file, serialize(rolloutRows([100])));
+            await writeFile(
+              fixture.file,
+              serialize(rolloutRows([100], { usedPercent: 37 })),
+            );
           }
         }
       },
@@ -3039,11 +3042,27 @@ test("a post-commit truncation race discards the transient append", async () => 
     assert.equal(commitCount, 2);
     assert.equal(totalTokens(snapshot), 100);
     assert.deepEqual(ledger.usageRows.map((row) => row.totalTokens), [100]);
-    assert.equal(ledger.sourceSummary.states[0].changeState, "truncated");
+    // The rejected revision's transient quota reading is reverted with it.
+    assert.deepEqual(
+      snapshot.quotaObservations.map((quota) => quota.usedPercent),
+      [37],
+    );
+    assert.deepEqual(
+      ledger.quotaRows.map((row) => row.usedPercent),
+      [37],
+    );
+    // Reverting the rejected revision also restores its pre-race cursor, so
+    // the retry sees the truncated-back file as unchanged rather than
+    // truncated.
+    assert.equal(ledger.sourceSummary.states[0].changeState, "stable");
 
     await rm(fixture.file);
     const afterRemoval = await collectUsage(options(fixture));
     assert.equal(totalTokens(afterRemoval), 100);
+    assert.deepEqual(
+      afterRemoval.quotaObservations.map((quota) => quota.usedPercent),
+      [37],
+    );
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -3118,11 +3137,10 @@ test("exhausted post-commit races keep a readable ledger and old cache", async (
 
     assert.equal(commitCount, 3);
     assert.equal(ledger.revision, 4);
-    // Every rejected commit unwound its own net-new additions. The ordinal-0
-    // observation persists because positional identity reuse revises it in
-    // place across replacements; its value converges with the next scan that
-    // reconciles the replaced source.
-    assert.deepEqual(ledger.usageRows.map((row) => row.totalTokens), [500]);
+    // Every rejected commit was reverted from its undo log, including
+    // reconciliation deletions and in-place positional overwrites, so the
+    // exhausted ledger still holds exactly the last validated observation.
+    assert.deepEqual(ledger.usageRows.map((row) => row.totalTokens), [100]);
     assert.equal(stored.metadata.durableLedger.revision, 1);
     assert.equal(totalTokens(stored), 100);
     assert.notEqual(
