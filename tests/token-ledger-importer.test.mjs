@@ -446,31 +446,96 @@ test("SQLite WAL changes invalidate the source watermark", async () => {
   }
 });
 
-test("new rollout files during collection trigger a complete retry", async () => {
+test("new rollout files after the cutoff are deferred until the next refresh", async () => {
   const { root, directory } = await createRolloutFixture([100]);
+  const output = resolve(root, "snapshot.json.gz");
   const newFile = resolve(
     directory,
     "rollout-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.jsonl",
   );
   let created = false;
+  let progressCalls = 0;
   try {
     const snapshot = await collectUsage(
       {
-        output: resolve(root, "snapshot.json"),
+        output,
         codexHome: root,
         includeArchived: true,
         since: null,
+        stageSnapshot: (candidate) => stagePrivateSnapshot(output, candidate),
       },
       async ({ current }) => {
+        progressCalls += 1;
         if (current === 1 && !created) {
           created = true;
           await writeFile(newFile, serialize(rolloutRows([250])));
         }
       },
     );
+    const persisted = await readPrivateSnapshot(output);
+    const afterCreation = await sourceInventory(root, true);
+    const converged = await collectUsage({
+      output,
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+    const current = await sourceInventory(root, true);
 
-    assert.equal(snapshot.coverage.observedTokens, 350);
-    assert.equal(snapshot.coverage.filesScanned, 2);
+    assert.equal(progressCalls, 1);
+    assert.equal(snapshot.coverage.observedTokens, 100);
+    assert.equal(snapshot.coverage.filesScanned, 1);
+    assert.equal(persisted.coverage.observedTokens, 100);
+    assert.equal(
+      sourceWatermarksEqual(snapshot.sourceWatermark, afterCreation.watermark),
+      false,
+    );
+    assert.equal(converged.coverage.observedTokens, 350);
+    assert.equal(converged.coverage.filesScanned, 2);
+    assert.ok(sourceWatermarksEqual(converged.sourceWatermark, current.watermark));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("new rollout files after staging do not reject the captured cutoff", async () => {
+  const { root, directory } = await createRolloutFixture([100]);
+  const output = resolve(root, "snapshot.json.gz");
+  const newFile = resolve(
+    directory,
+    "rollout-cccccccc-cccc-4ccc-8ccc-cccccccccccc.jsonl",
+  );
+  let created = false;
+  try {
+    const snapshot = await collectUsage({
+      output,
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+      stageSnapshot: (candidate) => stagePrivateSnapshot(output, candidate),
+      faultInjector: async ({ point }) => {
+        if (point !== "after-sqlite-commit" || created) return;
+        created = true;
+        await writeFile(newFile, serialize(rolloutRows([250])));
+      },
+    });
+    const persisted = await readPrivateSnapshot(output);
+    const afterCreation = await sourceInventory(root, true);
+    const converged = await collectUsage({
+      output,
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+
+    assert.equal(created, true);
+    assert.equal(snapshot.coverage.observedTokens, 100);
+    assert.equal(persisted.coverage.observedTokens, 100);
+    assert.equal(
+      sourceWatermarksEqual(snapshot.sourceWatermark, afterCreation.watermark),
+      false,
+    );
+    assert.equal(converged.coverage.observedTokens, 350);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
