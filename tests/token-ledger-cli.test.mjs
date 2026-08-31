@@ -4698,6 +4698,14 @@ test("standard report preserves split prior-period comparison fragments", async 
         inputTokens: 900,
         outputTokens: 100,
       },
+      {
+        timestamp: "2026-08-15T18:00:00.000Z",
+        project: "after-cutoff",
+        model: "gpt-5.6-sol",
+        totalTokens: Number.MAX_SAFE_INTEGER,
+        inputTokens: Number.MAX_SAFE_INTEGER,
+        outputTokens: 0,
+      },
     ],
     threads: [],
     quotaObservations: [],
@@ -4726,9 +4734,12 @@ test("standard report preserves split prior-period comparison fragments", async 
       priorBounds: priorPeriodBounds(bounds, 7),
     });
     const currentEvents = filterDayEvents(snapshot, bounds, analysis);
+    const reportEvents = currentEvents.filter(
+      (event) => Date.parse(event.timestamp) < nowMs,
+    );
     const projectRows = aggregateProjects(
       snapshot,
-      currentEvents,
+      reportEvents,
       options,
       analysis,
     );
@@ -4739,7 +4750,7 @@ test("standard report preserves split prior-period comparison fragments", async 
       reportTimeMs: nowMs,
       sourceStatus: "explicit-snapshot",
       projectRows,
-      events: analysis.currentEvents,
+      events: reportEvents,
       priorEvents: analysis.priorEvents,
     });
     assert.ok(
