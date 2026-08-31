@@ -142,14 +142,17 @@ export function resolveEffectiveEnd({
   const startMs = bounds.start.getTime();
   const endMs = bounds.end.getTime();
   const generatedAtMs = finiteTimestamp(snapshot.generatedAt);
+  const sourceCutoffAtMs = finiteTimestamp(
+    snapshot.provenance?.sourceCutoffAt,
+  );
   const wallClockMs = Number.isFinite(reportTimeMs) ? reportTimeMs : endMs;
   // The capture-time cutoff is inclusive: an event stamped exactly at
   // generatedAt was part of the capture.
   const cutoff = sourceStatus === "verified-current"
     ? wallClockMs
-    : generatedAtMs === null
+    : (sourceCutoffAtMs ?? generatedAtMs) === null
       ? wallClockMs
-      : generatedAtMs + 1;
+      : (sourceCutoffAtMs ?? generatedAtMs) + 1;
   return Math.max(startMs, Math.min(endMs, cutoff));
 }
 

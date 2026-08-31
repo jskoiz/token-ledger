@@ -1075,7 +1075,11 @@ async function refreshSnapshot(options) {
   }
   let progressStarted = false;
   try {
-    const { collectUsage } = await import(
+    const {
+      collectUsage,
+      sourceInventory,
+      sourceWatermarksEqual,
+    } = await import(
       "../lib/token-ledger-importer.mjs"
     );
     process.stderr.write("Token Ledger: refreshing local snapshot…\n");
@@ -1111,7 +1115,18 @@ async function refreshSnapshot(options) {
         "Token Ledger: snapshot is above 70% of its safety limit; older buckets will compact automatically as it grows.\n",
       );
     }
-    return { snapshot: storedSnapshot, sourceStatus: "verified-current" };
+    const currentInventory = await sourceInventory(
+      options.codexHome,
+      options.includeArchived,
+    );
+    return {
+      snapshot: storedSnapshot,
+      sourceStatus: refreshedSnapshotSourceStatus(
+        storedSnapshot.sourceWatermark,
+        currentInventory.watermark,
+        sourceWatermarksEqual,
+      ),
+    };
   } catch (error) {
     if (progressStarted) process.stderr.write("\n");
     if (error?.code === "ERR_SNAPSHOT_SIZE_LIMIT" && existsSync(options.input)) {
@@ -1146,6 +1161,16 @@ async function refreshSnapshot(options) {
     wrapped.code = error?.code;
     throw wrapped;
   }
+}
+
+export function refreshedSnapshotSourceStatus(
+  snapshotWatermark,
+  currentWatermark,
+  watermarksEqual,
+) {
+  return watermarksEqual(snapshotWatermark, currentWatermark)
+    ? "verified-current"
+    : "unchecked-cache";
 }
 
 const RECOVERABLE_REFRESH_ERROR_CODES = new Set([

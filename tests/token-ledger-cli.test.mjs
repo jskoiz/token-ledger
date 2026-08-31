@@ -30,6 +30,7 @@ import {
   loadSnapshot,
   parseArgs,
   redactLocalPaths,
+  refreshedSnapshotSourceStatus,
   refreshFailureAllowsStaleFallback,
   rolling24hBounds,
   rollingDurationBounds,
@@ -2917,6 +2918,26 @@ test("source provenance labels cover every cache trust state", () => {
     "fresh · 12m old",
   );
   assert.throws(() => sourceStatusLabel("invented"), /Unknown report source status/);
+});
+
+test("a refreshed append-only cutoff is not verified current", () => {
+  const equal = (left, right) => left.fingerprint === right.fingerprint;
+  assert.equal(
+    refreshedSnapshotSourceStatus(
+      { fingerprint: "accepted-byte-cutoff" },
+      { fingerprint: "later-append" },
+      equal,
+    ),
+    "unchecked-cache",
+  );
+  assert.equal(
+    refreshedSnapshotSourceStatus(
+      { fingerprint: "same" },
+      { fingerprint: "same" },
+      equal,
+    ),
+    "verified-current",
+  );
 });
 
 test("interactive controls stay aligned with rendered and documented help", async () => {

@@ -527,6 +527,23 @@ test("effective end honors source status", () => {
   );
 });
 
+test("an accepted source cutoff bounds an unverified report interval", () => {
+  const bounds = bounds7();
+  const snapshot = snapshotOf([], [], {
+    generatedAt: iso(23, 11),
+    provenance: { sourceCutoffAt: iso(23, 9) },
+  });
+  assert.equal(
+    resolveEffectiveEnd({
+      snapshot,
+      bounds,
+      reportTimeMs: ms(23, 12),
+      sourceStatus: "unchecked-cache",
+    }),
+    ms(23, 9) + 1,
+  );
+});
+
 test("future events past the cutoff never reach the daily rows", () => {
   const events = [
     event(23, 10, { totalTokens: 100 }),

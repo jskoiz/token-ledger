@@ -389,6 +389,11 @@ test("source appends after the cutoff publish safely and converge next time", as
     const current = await sourceInventory(root, true);
 
     assert.equal(snapshot.coverage.observedTokens, 100);
+    assert.ok(Number.isFinite(Date.parse(snapshot.provenance.sourceCutoffAt)));
+    assert.ok(
+      Date.parse(snapshot.provenance.sourceCutoffAt) <=
+        Date.parse(snapshot.generatedAt),
+    );
     assert.equal(writeResult.snapshot.coverage.observedTokens, 100);
     assert.equal(persisted.coverage.observedTokens, 100);
     assert.equal(sourceWatermarksEqual(
@@ -548,15 +553,17 @@ test("continuously appended sources publish one stable cutoff", async () => {
 test("metadata churn does not invalidate a stable rollout cutoff", async () => {
   const { root } = await createRolloutFixture([100]);
   const wal = resolve(root, "state_5.sqlite-wal");
+  const output = resolve(root, "snapshot.json");
   let progressCalls = 0;
   try {
     await writeFile(wal, "before");
     const snapshot = await collectUsage(
       {
-        output: resolve(root, "snapshot.json"),
+        output,
         codexHome: root,
         includeArchived: true,
         since: null,
+        stageSnapshot: (candidate) => stagePrivateSnapshot(output, candidate),
       },
       async ({ current }) => {
         if (current !== 1) return;
@@ -564,9 +571,13 @@ test("metadata churn does not invalidate a stable rollout cutoff", async () => {
         await appendFile(wal, "after");
       },
     );
+    const persisted = await readPrivateSnapshot(output);
+    const current = await sourceInventory(root, true);
 
     assert.equal(progressCalls, 1);
     assert.equal(snapshot.coverage.observedTokens, 100);
+    assert.ok(sourceWatermarksEqual(snapshot.sourceWatermark, current.watermark));
+    assert.ok(sourceWatermarksEqual(persisted.sourceWatermark, current.watermark));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -2713,6 +2724,8 @@ test("bounded scans match the sequential reference across collector fixtures", a
     function withoutGeneratedAt(snapshot) {
       const stableSnapshot = { ...snapshot };
       delete stableSnapshot.generatedAt;
+      stableSnapshot.provenance = { ...stableSnapshot.provenance };
+      delete stableSnapshot.provenance.sourceCutoffAt;
       return stableSnapshot;
     }
 
