@@ -1317,6 +1317,23 @@ test("quota identity upgrade rolls back and remains pending after malformed scan
       "codex-limit-id-v1",
     );
 
+    await assert.rejects(
+      updateDurableLedger({
+        options: options(fixture),
+        codexHome: fixture.root,
+        inventory: { files: [], lifecycleFiles: [] },
+        validateAfterCommit: async () => {
+          throw new Error("reject quota contract upgrade");
+        },
+      }),
+      /reject quota contract upgrade/,
+    );
+    assert.deepEqual(contractState(), {
+      marker: "codex-limit-id-v1",
+      pending: 0,
+      quotaRows: 3,
+    });
+
     const malformedRows = rolloutRows([200], { usedPercent: 58 });
     Object.assign(malformedRows.at(-1).payload.rate_limits, {
       limit_id: { malformed: true },
