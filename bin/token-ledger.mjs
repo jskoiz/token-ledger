@@ -1465,6 +1465,7 @@ async function render(
         reportTimeMs: report.reportTimeMs ?? null,
         sourceStatus: report.sourceStatus ?? "unchecked-cache",
         analysis,
+        reportEvents: events,
       });
     }
     return renderTrendCombo({

@@ -387,7 +387,7 @@ export function renderTrendImage({
     reportTimeMs: effectiveReportTimeMs,
     sourceStatus: effectiveSourceStatus,
     projectRows,
-    events: analysis?.currentEvents ?? null,
+    events: reportEvents ?? analysis?.currentEvents ?? null,
     priorEvents: analysis?.priorEvents ?? null,
   });
   const { summary, meter, meta } = vm;
