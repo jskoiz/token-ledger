@@ -2966,11 +2966,13 @@ test("a post-commit source race keeps the complete revision and converges", asyn
               ).get().value),
               2,
             );
+            // The rejected commit's transient append was unwound, so only
+            // the previously validated observation remains durable.
             assert.equal(
               database.prepare(
                 "SELECT SUM(total_tokens) AS total FROM usage_observations",
               ).get().total,
-              300,
+              100,
             );
           } finally {
             database.close();
@@ -3011,6 +3013,77 @@ test("a post-commit source race keeps the complete revision and converges", asyn
   }
 });
 
+test("a post-commit truncation race discards the transient append", async () => {
+  const fixture = await createFixture([100]);
+  let commitCount = 0;
+  try {
+    await collectUsage(options(fixture));
+    await appendFile(
+      fixture.file,
+      serialize(rolloutRows([200], { offset: 1 })),
+    );
+
+    const snapshot = await collectUsage(options(fixture, {
+      faultInjector: async ({ point }) => {
+        if (point === "after-sqlite-commit") {
+          commitCount += 1;
+          if (commitCount === 1) {
+            await writeFile(fixture.file, serialize(rolloutRows([100])));
+          }
+        }
+      },
+    }));
+    const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
+    const ledger = await readDurableLedger(ledgerPath);
+
+    assert.equal(commitCount, 2);
+    assert.equal(totalTokens(snapshot), 100);
+    assert.deepEqual(ledger.usageRows.map((row) => row.totalTokens), [100]);
+    assert.equal(ledger.sourceSummary.states[0].changeState, "truncated");
+
+    await rm(fixture.file);
+    const afterRemoval = await collectUsage(options(fixture));
+    assert.equal(totalTokens(afterRemoval), 100);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a crash between commit and validation unwinds on the next refresh", async () => {
+  const fixture = await createFixture([100]);
+  try {
+    const initial = await collectUsage(options(fixture));
+    await writePrivateSnapshot(fixture.output, initial);
+    const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
+    await appendFile(
+      fixture.file,
+      serialize(rolloutRows([200], { offset: 1 })),
+    );
+
+    crashCollection(fixture, "after-sqlite-commit");
+    await writeFile(fixture.file, serialize(rolloutRows([100])));
+
+    const snapshot = await collectUsage(options(fixture));
+    const ledger = await readDurableLedger(ledgerPath);
+
+    assert.equal(totalTokens(snapshot), 100);
+    assert.deepEqual(ledger.usageRows.map((row) => row.totalTokens), [100]);
+    const database = new DatabaseSync(ledgerPath, { readOnly: true });
+    try {
+      assert.equal(
+        database.prepare(
+          "SELECT value FROM ledger_meta WHERE key = 'post_commit_validation_pending'",
+        ).get()?.value ?? null,
+        null,
+      );
+    } finally {
+      database.close();
+    }
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("exhausted post-commit races keep a readable ledger and old cache", async () => {
   const fixture = await createFixture([100]);
   let commitCount = 0;
@@ -3045,10 +3118,11 @@ test("exhausted post-commit races keep a readable ledger and old cache", async (
 
     assert.equal(commitCount, 3);
     assert.equal(ledger.revision, 4);
-    assert.equal(
-      ledger.usageRows.reduce((sum, row) => sum + row.totalTokens, 0),
-      1_100,
-    );
+    // Every rejected commit unwound its own net-new additions. The ordinal-0
+    // observation persists because positional identity reuse revises it in
+    // place across replacements; its value converges with the next scan that
+    // reconciles the replaced source.
+    assert.deepEqual(ledger.usageRows.map((row) => row.totalTokens), [500]);
     assert.equal(stored.metadata.durableLedger.revision, 1);
     assert.equal(totalTokens(stored), 100);
     assert.notEqual(
