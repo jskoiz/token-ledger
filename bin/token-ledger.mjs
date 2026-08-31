@@ -714,6 +714,8 @@ export function aggregateProjects(snapshot, events, options = {}, analysis = nul
   for (const event of events) {
     if (event?.invalidTokenRecord === true) continue;
     const allowFractional = event?.rangeAllocationEstimated === true;
+    const totalTokens = tokenValue(event.totalTokens, { allowFractional });
+    const estimatedTokenContribution = allowFractional && totalTokens > 0;
     const rawProject = cleanLabel(event.project, "Unlabelled activity");
     const project =
       !options.rawProjects && singletonProjects.has(rawProject)
@@ -734,7 +736,7 @@ export function aggregateProjects(snapshot, events, options = {}, analysis = nul
         models: new Map(),
         estimated: false,
       };
-    row.estimated ||= allowFractional;
+    row.estimated ||= estimatedTokenContribution;
     row.outputTokens = checkedTokenAdd(
       row.outputTokens,
       tokenValue(event.outputTokens, { allowFractional }),
@@ -772,10 +774,10 @@ export function aggregateProjects(snapshot, events, options = {}, analysis = nul
       rateCardCredits: 0,
       estimated: false,
     };
-    modelRow.estimated ||= allowFractional;
+    modelRow.estimated ||= estimatedTokenContribution;
     addSharedTokenContribution(
       sharedTokenScale,
-      tokenValue(event.totalTokens, { allowFractional }),
+      totalTokens,
       [row, modelRow],
     );
     modelRow.events = checkedTokenAdd(modelRow.events, usageCallCount(event), {
