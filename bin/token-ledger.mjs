@@ -1061,7 +1061,10 @@ async function snapshotAndLedgerHaveCurrentQuotaContract(snapshot, options) {
     resolveDurableLedgerPath,
   } = await import("../lib/token-ledger-ledger.mjs");
   const ledgerState = await readDurableLedgerCacheState(
-    resolveDurableLedgerPath({ output: options.input }),
+    resolveDurableLedgerPath({
+      codexHome: options.codexHome,
+      output: options.input,
+    }),
   );
   return ledgerState?.quotaIdentityContract ===
     QUOTA_IDENTITY_CONTRACT_VERSION;
@@ -1088,7 +1091,6 @@ async function refreshSnapshot(options) {
     const snapshot = await collectUsage(
       {
         output: options.input,
-        privateStateDirectory: options.input === DEFAULT_SNAPSHOT,
         codexHome: options.codexHome,
         includeArchived: options.includeArchived,
         since: options.since,
@@ -1380,7 +1382,10 @@ export async function loadSnapshot(options) {
     return refreshSnapshot(options);
   }
   const ledgerState = await readDurableLedgerCacheState(
-    resolveDurableLedgerPath({ output: options.input }),
+    resolveDurableLedgerPath({
+      codexHome: options.codexHome,
+      output: options.input,
+    }),
   );
   const quotaContractTrusted =
     ledgerState?.quotaIdentityContract === QUOTA_IDENTITY_CONTRACT_VERSION &&

@@ -14,7 +14,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import assert from "node:assert/strict";
-import { homedir, tmpdir } from "node:os";
+import { homedir, tmpdir, userInfo } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -53,6 +53,7 @@ import {
   readDurableLedgerRevision,
   resolveDurableLedgerPath,
 } from "../lib/token-ledger-ledger.mjs";
+
 import {
   quotaCycleSummary,
   renderFullscreen,
@@ -118,6 +119,21 @@ import {
   ACCOUNT_QUOTA_LIMIT_KEY,
   QUOTA_IDENTITY_CONTRACT_VERSION,
 } from "../lib/token-ledger-quota-contract.mjs";
+
+const TEST_LEDGER_STATE_ROOT = resolve(
+  userInfo().homedir,
+  ".token-ledger",
+  "test-state",
+  String(process.pid),
+);
+
+test.after(async () => {
+  await rm(TEST_LEDGER_STATE_ROOT, { recursive: true, force: true });
+});
+
+async function createPrivateFixtureRoot(prefix) {
+  return mkdtemp(resolve(tmpdir(), prefix));
+}
 
 const CURRENT_QUOTA_METADATA = Object.freeze({
   durableLedger: Object.freeze({
@@ -427,7 +443,7 @@ async function setLifecycleSourceNewer(sourcePath, cacheTimeMs) {
 }
 
 test("successful metadata-backed refresh lifecycle remains hermetic", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-refresh-lifecycle-"));
+  const root = await createPrivateFixtureRoot("token-ledger-refresh-lifecycle-");
   const codexHome = resolve(root, "codex-home");
   const cachePath = resolve(root, "cache", "token-ledger-snapshot-v3.json.gz");
   const noArchivedCachePath = resolve(
@@ -548,6 +564,10 @@ test("successful metadata-backed refresh lifecycle remains hermetic", async () =
     const initialCache = await readFile(cachePath);
     const unchangedCacheTimeMs = await ageLifecycleCache(cachePath);
     await lifecycleRun(codexHome, cachePath);
+    assert.equal(
+      (await readPrivateSnapshot(cachePath)).coverage.observedTokens,
+      firstSnapshot.coverage.observedTokens,
+    );
     assert.deepEqual(await readFile(cachePath), initialCache);
 
     await writeLifecycleRollout(
@@ -1120,7 +1140,7 @@ test("terminal renderers sanitize use types before grouping and layout", () => {
 });
 
 test("explicit snapshots sanitize labels in static output", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-terminal-text-"));
+  const root = await createPrivateFixtureRoot("token-ledger-terminal-text-");
   const snapshotPath = resolve(root, "explicit-snapshot.json");
   try {
     await writeFile(
@@ -1169,7 +1189,7 @@ test("explicit snapshots sanitize labels in static output", async () => {
 });
 
 test("legacy project output keeps snapshot age separate from provenance", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-legacy-provenance-"));
+  const root = await createPrivateFixtureRoot("token-ledger-legacy-provenance-");
   const snapshotPath = resolve(root, "snapshot.json");
   const fakeYouPlot = resolve(root, "uplot");
   const previousPath = process.env.PATH;
@@ -1399,7 +1419,7 @@ test("parseArgs accepts --no-open for trend images and rejects it elsewhere", ()
 });
 
 test("rolling view describes an empty range as the last 24 hours", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-rolling-empty-"));
+  const root = await createPrivateFixtureRoot("token-ledger-rolling-empty-");
   const snapshotPath = resolve(root, "snapshot.json");
   try {
     await writeFile(
@@ -1467,7 +1487,7 @@ test("redactLocalPaths preserves URL schemes while redacting UNC paths", () => {
 });
 
 test("snapshot errors retain safe labels without absolute paths", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-privacy-"));
+  const root = await createPrivateFixtureRoot("token-ledger-privacy-");
   const missingPath = resolve(root, "missing-snapshot.json");
   const malformedPath = resolve(root, "malformed-snapshot.json");
   const malformedGzipPath = resolve(root, "malformed-snapshot.json.gz");
@@ -1555,7 +1575,7 @@ test("snapshot errors retain safe labels without absolute paths", async () => {
 });
 
 test("CLI reads an explicit gzip-compressed snapshot", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-gzip-input-"));
+  const root = await createPrivateFixtureRoot("token-ledger-gzip-input-");
   const snapshotPath = resolve(root, "snapshot.json.gz");
   try {
     await writePrivateSnapshot(snapshotPath, {
@@ -1599,7 +1619,7 @@ test("CLI reads an explicit gzip-compressed snapshot", async () => {
 });
 
 test("explicit and unchecked old-contract snapshots keep tokens but no meter", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-old-contract-"));
+  const root = await createPrivateFixtureRoot("token-ledger-old-contract-");
   const snapshotPath = resolve(root, "snapshot.json.gz");
   try {
     await writePrivateSnapshot(snapshotPath, {
@@ -1666,7 +1686,7 @@ test("explicit and unchecked old-contract snapshots keep tokens but no meter", a
 });
 
 test("rejects legacy snapshots before repricing aliases", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-legacy-rate-card-"));
+  const root = await createPrivateFixtureRoot("token-ledger-legacy-rate-card-");
   const snapshotPath = resolve(root, "snapshot.json");
   try {
     await writeFile(snapshotPath, JSON.stringify({
@@ -1702,7 +1722,7 @@ test("rejects legacy snapshots before repricing aliases", async () => {
 });
 
 test("refresh and source failures retain context without absolute paths", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-source-privacy-"));
+  const root = await createPrivateFixtureRoot("token-ledger-source-privacy-");
   const missingCodexHome = resolve(root, "missing-codex-home");
   const staleSnapshotPath = resolve(root, "stale-snapshot.json");
   const codexHome = resolve(root, "codex-home");
@@ -1779,7 +1799,7 @@ test("1d renders deterministic project totals from a rolling 24-hour fixture", a
 });
 
 test("static freshness uses the wall clock after snapshot loading", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-post-load-time-"));
+  const root = await createPrivateFixtureRoot("token-ledger-post-load-time-");
   const snapshotPath = resolve(root, "snapshot.json");
   const beforeLoadMs = Date.parse("2026-08-20T00:00:00.000Z");
   const afterLoadMs = beforeLoadMs + 1_000;
@@ -1930,7 +1950,7 @@ test("source watermarks detect changes independent of cache mtime", () => {
 });
 
 test("refresh applies the normalized cutoff and records its collection scope", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-since-refresh-"));
+  const root = await createPrivateFixtureRoot("token-ledger-since-refresh-");
   const codexHome = resolve(root, "codex-home");
   const sessionDirectory = resolve(codexHome, "sessions", "2026", "08", "20");
   const outputPath = resolve(root, "snapshot.json");
@@ -2032,7 +2052,7 @@ test("refresh applies the normalized cutoff and records its collection scope", a
 });
 
 test("unfiltered reads reject a cache with a filtered collection scope", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-scope-cache-"));
+  const root = await createPrivateFixtureRoot("token-ledger-scope-cache-");
   const snapshotPath = resolve(root, "filtered-snapshot.json");
   try {
     await writePrivateSnapshot(snapshotPath, {
@@ -2124,7 +2144,7 @@ test("automatic loads check source watermarks regardless of cache age", () => {
 });
 
 test("automatic refresh ignores a newer cache mtime when the source watermark changes", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-watermark-load-"));
+  const root = await createPrivateFixtureRoot("token-ledger-watermark-load-");
   const codexHome = resolve(root, "codex-home");
   const sourceDirectory = resolve(codexHome, "sessions", "2026", "08");
   const sourceFile = resolve(
@@ -2196,7 +2216,7 @@ test("automatic refresh ignores a newer cache mtime when the source watermark ch
 });
 
 test("automatic cache validation rejects a different Codex home", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-home-cache-"));
+  const root = await createPrivateFixtureRoot("token-ledger-home-cache-");
   const codexHomeA = resolve(root, "codex-home-a");
   const codexHomeB = resolve(root, "codex-home-b");
   const snapshotPath = resolve(root, "snapshot.json.gz");
@@ -2236,10 +2256,10 @@ test("automatic cache validation rejects a different Codex home", async () => {
 });
 
 test("automatic cache validation rebuilds a missing or behind ledger", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-revision-cache-"));
+  const root = await createPrivateFixtureRoot("token-ledger-revision-cache-");
   const codexHome = resolve(root, "codex-home");
   const snapshotPath = resolve(root, "snapshot.json.gz");
-  const ledgerPath = resolveDurableLedgerPath({ output: snapshotPath });
+  let ledgerPath;
   try {
     await mkdir(codexHome, { recursive: true });
     await collectUsage({
@@ -2254,6 +2274,7 @@ test("automatic cache validation rebuilds a missing or behind ledger", async () 
       includeArchived: true,
       since: null,
     });
+    ledgerPath = resolveDurableLedgerPath({ codexHome, output: snapshotPath });
     await writePrivateSnapshot(snapshotPath, cached);
     const database = new DatabaseSync(ledgerPath);
     database.prepare(
@@ -2290,7 +2311,7 @@ test("automatic cache validation rebuilds a missing or behind ledger", async () 
 });
 
 test("matching cache refreshes when either quota contract is missing", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-contract-cache-"));
+  const root = await createPrivateFixtureRoot("token-ledger-contract-cache-");
   const codexHome = resolve(root, "codex-home");
   const sourceDirectory = resolve(codexHome, "sessions", "2026", "08");
   const sourceFile = resolve(
@@ -2298,7 +2319,7 @@ test("matching cache refreshes when either quota contract is missing", async () 
     "rollout-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl",
   );
   const snapshotPath = resolve(root, "snapshot.json.gz");
-  const ledgerPath = resolveDurableLedgerPath({ output: snapshotPath });
+  const ledgerPath = resolveDurableLedgerPath({ codexHome, output: snapshotPath });
   let database;
   try {
     await mkdir(sourceDirectory, { recursive: true });
@@ -2379,7 +2400,7 @@ test("matching cache refreshes when either quota contract is missing", async () 
 });
 
 test("automatic cache validation propagates unscoped ledger migration failures", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-migration-cache-"));
+  const root = await createPrivateFixtureRoot("token-ledger-migration-cache-");
   const codexHome = resolve(root, "codex-home");
   const sourceDirectory = resolve(codexHome, "sessions", "2026", "08");
   const sourceFile = resolve(
@@ -2387,7 +2408,7 @@ test("automatic cache validation propagates unscoped ledger migration failures",
     "rollout-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl",
   );
   const snapshotPath = resolve(root, "snapshot.json.gz");
-  const ledgerPath = resolveDurableLedgerPath({ output: snapshotPath });
+  const ledgerPath = resolveDurableLedgerPath({ codexHome, output: snapshotPath });
   let database;
   try {
     await mkdir(sourceDirectory, { recursive: true });
@@ -2536,7 +2557,7 @@ test("stale refresh fallback only accepts bounded transient failures", () => {
 });
 
 test("snapshot size fallback stays stale and does not advance ledger revisions", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-size-fallback-"));
+  const root = await createPrivateFixtureRoot("token-ledger-size-fallback-");
   const codexHome = resolve(root, "codex-home");
   const sourceDirectory = resolve(codexHome, "sessions", "2026", "08");
   const sourceFile = resolve(
@@ -2544,7 +2565,7 @@ test("snapshot size fallback stays stale and does not advance ledger revisions",
     "rollout-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl",
   );
   const snapshotPath = resolve(root, "snapshot.json.gz");
-  const ledgerPath = resolveDurableLedgerPath({ output: snapshotPath });
+  const ledgerPath = resolveDurableLedgerPath({ codexHome, output: snapshotPath });
   try {
     await mkdir(sourceDirectory, { recursive: true });
     await writeFile(
@@ -2626,10 +2647,9 @@ test("old quota contracts make every stale-fallback path meterless", async () =>
     },
   ];
   for (const entry of cases) {
-    const root = await mkdtemp(resolve(
-      tmpdir(),
+    const root = await createPrivateFixtureRoot(
       `token-ledger-contract-fallback-${entry.name}-`,
-    ));
+    );
     const codexHome = resolve(root, "codex-home");
     const sourceDirectory = resolve(codexHome, "sessions", "2026", "08");
     const sourceFile = resolve(
@@ -2637,7 +2657,7 @@ test("old quota contracts make every stale-fallback path meterless", async () =>
       "rollout-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl",
     );
     const snapshotPath = resolve(root, "snapshot.json.gz");
-    const ledgerPath = resolveDurableLedgerPath({ output: snapshotPath });
+    const ledgerPath = resolveDurableLedgerPath({ codexHome, output: snapshotPath });
     let database;
     try {
       await mkdir(sourceDirectory, { recursive: true });
@@ -2729,7 +2749,7 @@ test("old quota contracts make every stale-fallback path meterless", async () =>
 });
 
 test("snapshot size fallback requires exact scope and Codex-home provenance", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-fallback-gate-"));
+  const root = await createPrivateFixtureRoot("token-ledger-fallback-gate-");
   const requestedCodexHome = resolve(root, "requested-codex-home");
   const otherCodexHome = resolve(root, "other-codex-home");
   const generatedAt = "2026-08-23T10:00:00.000Z";
@@ -2799,7 +2819,7 @@ test("snapshot size fallback requires exact scope and Codex-home provenance", as
 });
 
 test("exhausted source retries never publish an uncommitted snapshot", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-staged-retry-"));
+  const root = await createPrivateFixtureRoot("token-ledger-staged-retry-");
   const codexHome = resolve(root, "codex-home");
   const sourceDirectory = resolve(codexHome, "sessions", "2026", "08");
   const sourceFile = resolve(
@@ -2807,7 +2827,7 @@ test("exhausted source retries never publish an uncommitted snapshot", async () 
     "rollout-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl",
   );
   const snapshotPath = resolve(root, "snapshot.json.gz");
-  const ledgerPath = resolveDurableLedgerPath({ output: snapshotPath });
+  const ledgerPath = resolveDurableLedgerPath({ codexHome, output: snapshotPath });
   let mutation = 0;
   try {
     await mkdir(sourceDirectory, { recursive: true });
@@ -3231,7 +3251,7 @@ test("filtered collection scope is visible in terminal and PNG renderers", () =>
 });
 
 test("empty ranges with uncollected history are reported as not collected", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-since-empty-"));
+  const root = await createPrivateFixtureRoot("token-ledger-since-empty-");
   const snapshotPath = resolve(root, "scoped-snapshot.json");
   try {
     await writePrivateSnapshot(snapshotPath, {
@@ -4323,7 +4343,7 @@ test("malformed snapshots keep terminal, bucket, and image totals bounded", asyn
   assert.doesNotMatch(terminal, /NaN|Infinity|undefined|null/);
   assert.doesNotMatch(svg, /NaN|Infinity|undefined|null/);
 
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-bounded-png-"));
+  const root = await createPrivateFixtureRoot("token-ledger-bounded-png-");
   try {
     const output = resolve(root, "bounded.png");
     await writeTrendPng(svg, output);
@@ -5521,7 +5541,7 @@ test("cache report spaces long multi-day labels at minimum width", () => {
 });
 
 test("PNG image output has a real PNG signature", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-png-"));
+  const root = await createPrivateFixtureRoot("token-ledger-png-");
   try {
     const output = resolve(root, "report.png");
     await writeTrendPng(
@@ -5539,7 +5559,7 @@ test("PNG image output has a real PNG signature", async () => {
 });
 
 test("report emits progress while generating the PNG", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-report-"));
+  const root = await createPrivateFixtureRoot("token-ledger-report-");
   const snapshotPath = resolve(root, "snapshot.json");
   const outputPath = resolve(root, "report.png");
   const originalWrite = process.stderr.write;
@@ -5599,7 +5619,7 @@ test("report emits progress while generating the PNG", async () => {
 });
 
 test("standard report preserves split prior-period comparison fragments", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-report-prior-split-"));
+  const root = await createPrivateFixtureRoot("token-ledger-report-prior-split-");
   const snapshotPath = resolve(root, "snapshot.json");
   const outputPath = resolve(root, "report.png");
   const expectedPath = resolve(root, "expected.png");
@@ -5698,7 +5718,7 @@ test("standard report preserves split prior-period comparison fragments", async 
 });
 
 test("cache-rate report uses its separate renderer and progress label", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-cache-report-"));
+  const root = await createPrivateFixtureRoot("token-ledger-cache-report-");
   const snapshotPath = resolve(root, "snapshot.json");
   const outputPath = resolve(root, "cache-report.png");
   const originalWrite = process.stderr.write;
@@ -5756,7 +5776,7 @@ test("cache-rate report uses its separate renderer and progress label", async ()
 });
 
 test("cache-rate report ignores unused project metadata for an empty range", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-cache-empty-"));
+  const root = await createPrivateFixtureRoot("token-ledger-cache-empty-");
   const snapshotPath = resolve(root, "snapshot.json");
   const outputPath = resolve(root, "cache-report.png");
   const originalWrite = process.stderr.write;
@@ -5808,7 +5828,7 @@ test("cache-rate report ignores unused project metadata for an empty range", asy
 });
 
 test("standard image views retain the empty-range diagnostic", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-standard-empty-"));
+  const root = await createPrivateFixtureRoot("token-ledger-standard-empty-");
   const snapshotPath = resolve(root, "snapshot.json");
   try {
     await writeFile(
@@ -5856,7 +5876,7 @@ test("standard image views retain the empty-range diagnostic", async () => {
 });
 
 test("cache-rate report uses a distinct default filename", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-cache-default-"));
+  const root = await createPrivateFixtureRoot("token-ledger-cache-default-");
   const snapshotPath = resolve(root, "snapshot.json");
   const outputPath = resolve(root, "token-ledger-cache-report-7d.png");
   try {

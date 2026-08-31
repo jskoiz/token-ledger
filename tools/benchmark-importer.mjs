@@ -2,7 +2,7 @@
 
 import { performance } from "node:perf_hooks";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { resolve } from "node:path";
 
 import {
@@ -162,7 +162,9 @@ try {
     });
     runWallTimeMs.push(Number((performance.now() - started).toFixed(1)));
   }
-  const ledger = await readDurableLedger(resolveDurableLedgerPath({ output }));
+  const ledger = await readDurableLedger(
+    resolveDurableLedgerPath({ codexHome: root }),
+  );
   const durableTotalTokens = ledger.usageRows.reduce(
     (sum, row) => sum + Number(row.totalTokens || 0),
     0,
@@ -227,4 +229,13 @@ try {
   );
 } finally {
   await rm(root, { recursive: true, force: true });
+  await rm(
+    resolve(
+      userInfo().homedir,
+      ".token-ledger",
+      "test-state",
+      String(process.pid),
+    ),
+    { recursive: true, force: true },
+  );
 }

@@ -238,21 +238,18 @@ therefore treats one `CODEX_HOME` and its durable ledger as one account boundary
 and keys pools only by the canonical provider limit id; omitted or blank ids
 mean the default `codex` pool. If different ChatGPT accounts share a
 `CODEX_HOME`, their equal provider ids cannot be separated. Use distinct Codex
-homes and ledger locations when account isolation matters.
+homes under separate OS user profiles when account isolation matters.
 
 Raw provider limit ids are normalized and then hash-derived into stored pool
 keys; the raw ids are not written to the ledger or generated snapshot.
 Sanitized optional display labels are not identity, but may remain in the
 ledger, generated snapshot, terminal report, and image report.
 
-The default snapshot and ledger directories are private (`0700`), and their
-files are private (`0600`). An explicit `--input` reads only that deliberate
-snapshot input; it does not use the default durable ledger as a hidden source.
-When a custom output or ledger location is supplied, existing parent directory
-permissions are left unchanged; only the ledger sidecar files receive `0600`.
-That custom parent must not be writable by untrusted users because its SQLite
-database, lock, and transient sidecar names remain part of the local storage
-trust boundary.
+The application state directory is private (`0700`), and its ledger, lock, and
+SQLite transient files are private (`0600`). The durable database location is
+fixed at `~/.token-ledger/token-ledger-ledger.sqlite`; custom snapshot outputs
+never relocate it. An explicit `--input` reads only that deliberate snapshot
+input and does not use the durable ledger as a hidden data source.
 
 The collector does not export message bodies, reasoning text, tool arguments or
 results, credentials, file contents, or full local paths. Display titles may

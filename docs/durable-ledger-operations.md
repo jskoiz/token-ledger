@@ -6,6 +6,10 @@ Token Ledger keeps two local artifacts with different responsibilities:
 - `token-ledger-snapshot-v3.json.gz` is a bounded report cache that can be
   regenerated from the ledger and currently available Codex sources.
 
+The durable database, writer guard, WAL, journal, and shared-memory files live
+only in the app-owned private `~/.token-ledger` directory. Snapshot exports may
+be written elsewhere, but output selection never relocates SQLite state.
+
 Deleting or replacing the report cache must not be treated as deleting ledger
 history. Conversely, a successfully parsed report cache is not proof that its
 revision matches the current ledger.
@@ -110,10 +114,11 @@ or erase usage.
 1. Stop concurrent Token Ledger refreshes and copy the ledger plus any SQLite
    `-wal` and `-shm` sidecars to a private backup location.
 2. For `ERR_DURABLE_LEDGER_CODEX_HOME`, select the Codex home that originally
-   created the ledger. Do not rebind the ledger to a different home.
+   created the ledger. Do not rebind the ledger to a different home; use a
+   separate OS user profile when account-level isolation is required.
 3. For `ERR_DURABLE_LEDGER_MIGRATION_SCOPE`, keep the preview ledger as a
-   backup. Create a new v2 ledger location and rebuild exact history from the
-   matching Codex sources. Import a legacy snapshot only when its collection
+   backup. Recreate the private app-owned ledger and rebuild exact history from
+   the matching Codex sources. Import a legacy snapshot only when its collection
    scope and Codex-home fingerprint are both known.
 4. For a stale or oversized report cache, preserve the ledger and retry with a
    compressed output, `--since`, or `--no-archived`. Removing only the cache is

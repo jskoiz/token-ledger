@@ -15,7 +15,7 @@ import {
   writeFile,
   mkdir,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
@@ -49,6 +49,21 @@ import {
   usageBuckets,
   usageBucketStats,
 } from "../lib/token-ledger-usage.mjs";
+
+const TEST_LEDGER_STATE_ROOT = resolve(
+  userInfo().homedir,
+  ".token-ledger",
+  "test-state",
+  String(process.pid),
+);
+
+test.after(async () => {
+  await rm(TEST_LEDGER_STATE_ROOT, { recursive: true, force: true });
+});
+
+async function createPrivateFixtureRoot(prefix) {
+  return mkdtemp(resolve(tmpdir(), prefix));
+}
 
 function tokenCount(timestamp, total, last) {
   return {
@@ -151,7 +166,7 @@ test("rollout workers receive only the matched scan metadata", () => {
 });
 
 async function createRolloutFixture(totals, fileName = "rollout-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl") {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-collection-"));
+  const root = await createPrivateFixtureRoot("token-ledger-collection-");
   const directory = resolve(root, "sessions", "2026", "08");
   const file = resolve(directory, fileName);
   await mkdir(directory, { recursive: true });
@@ -160,7 +175,7 @@ async function createRolloutFixture(totals, fileName = "rollout-aaaaaaaa-aaaa-4a
 }
 
 test("orphan spool cleanup removes only dead-process private directories", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-spool-cleanup-"));
+  const root = await createPrivateFixtureRoot("token-ledger-spool-cleanup-");
   const orphan = resolve(root, "token-ledger-import-999999-abc123");
   const live = resolve(root, `token-ledger-import-${process.pid}-def456`);
   const unrelated = resolve(root, "token-ledger-import-unrelated-ghi789");
@@ -197,7 +212,7 @@ test("orphan spool cleanup removes only dead-process private directories", async
 });
 
 test("orphan spool cleanup rejects hardlinks and raced directory identities", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-spool-race-"));
+  const root = await createPrivateFixtureRoot("token-ledger-spool-race-");
   const hardlinkTarget = resolve(root, "hardlink-target");
   const hardlinkPath = resolve(root, "token-ledger-import-999997-mno345");
   const raced = resolve(root, "token-ledger-import-999996-pqr678");
@@ -236,7 +251,7 @@ test("orphan spool cleanup rejects hardlinks and raced directory identities", as
 });
 
 test("temporary spool stores privacy-reduced source metadata", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-spool-privacy-"));
+  const root = await createPrivateFixtureRoot("token-ledger-spool-privacy-");
   const threadId = "60606060-6060-4060-8060-606060606060";
   const timestamp = "2026-08-23T10:00:00.000Z";
   const cwdCanary = "/private/user-secret/repo";
@@ -413,7 +428,7 @@ test("source appends after the cutoff publish safely and converge next time", as
 });
 
 test("SQLite WAL changes invalidate the source watermark", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-wal-watermark-"));
+  const root = await createPrivateFixtureRoot("token-ledger-wal-watermark-");
   const database = resolve(root, "state_5.sqlite");
   const wal = `${database}-wal`;
   try {
@@ -584,7 +599,7 @@ test("metadata churn does not invalidate a stable rollout cutoff", async () => {
 });
 
 test("empty thread settings reset the service tier for the next turn", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
+  const root = await createPrivateFixtureRoot("token-ledger-importer-");
   const threadId = "11111111-1111-4111-8111-111111111111";
   try {
     const rolloutDirectory = resolve(root, "sessions", "2026", "08", "18");
@@ -727,7 +742,7 @@ test("empty thread settings reset the service tier for the next turn", async () 
 });
 
 test("collector applies current Sol and priority Daybreak Red purchased-credit rates", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
+  const root = await createPrivateFixtureRoot("token-ledger-importer-");
   const threadId = "22222222-2222-4222-8222-222222222222";
   try {
     const rolloutDirectory = resolve(root, "sessions", "2026", "08", "18");
@@ -777,7 +792,7 @@ test("collector applies current Sol and priority Daybreak Red purchased-credit r
 });
 
 test("collector leaves unsupported Daybreak latest aliases unrated", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
+  const root = await createPrivateFixtureRoot("token-ledger-importer-");
   const threadId = "88888888-8888-4888-8888-888888888888";
   try {
     const rolloutDirectory = resolve(root, "sessions", "2026", "08", "18");
@@ -854,7 +869,7 @@ test("collector leaves unsupported Daybreak latest aliases unrated", async () =>
 });
 
 test("exports clamp token subsets and price whitespace model names", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
+  const root = await createPrivateFixtureRoot("token-ledger-importer-");
   const threadId = "33333333-3333-4333-8333-333333333333";
   try {
     const rolloutDirectory = resolve(root, "sessions", "2026", "08", "19");
@@ -927,7 +942,7 @@ test("exports clamp token subsets and price whitespace model names", async () =>
 });
 
 test("private snapshots replace atomically and enforce mode 0600", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-write-"));
+  const root = await createPrivateFixtureRoot("token-ledger-write-");
   try {
     const output = resolve(root, "snapshot.json");
     await writeFile(output, "old\n");
@@ -949,7 +964,7 @@ test("private snapshots replace atomically and enforce mode 0600", async () => {
 });
 
 test("staged snapshots stay private until publication and discard cleanly", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-stage-write-"));
+  const root = await createPrivateFixtureRoot("token-ledger-stage-write-");
   const output = resolve(root, "snapshot.json");
   try {
     await writePrivateSnapshot(output, { version: "previous", events: [] });
@@ -988,7 +1003,7 @@ test("staged snapshots stay private until publication and discard cleanly", asyn
 });
 
 test("gzip snapshots are compact, readable, atomic, and private", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-gzip-write-"));
+  const root = await createPrivateFixtureRoot("token-ledger-gzip-write-");
   try {
     const output = resolve(root, "snapshot.json.gz");
     const snapshot = {
@@ -1022,7 +1037,7 @@ test("gzip snapshots are compact, readable, atomic, and private", async () => {
 });
 
 test("snapshot reader rejects compressed inputs above the pre-read limit", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-gzip-read-size-"));
+  const root = await createPrivateFixtureRoot("token-ledger-gzip-read-size-");
   try {
     const output = resolve(root, "oversized.json.gz");
     await writeFile(output, Buffer.alloc(1_025, 0));
@@ -1044,7 +1059,7 @@ test("snapshot reader rejects compressed inputs above the pre-read limit", async
 });
 
 test("snapshot reader bounds gzip expansion and preserves valid reads", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-gzip-read-json-"));
+  const root = await createPrivateFixtureRoot("token-ledger-gzip-read-json-");
   try {
     const output = resolve(root, "snapshot.json.gz");
     const snapshot = { label: "x".repeat(4_096), events: [] };
@@ -1075,7 +1090,7 @@ test("snapshot reader bounds gzip expansion and preserves valid reads", async ()
 });
 
 test("snapshot size limit preserves the previous cache", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-size-limit-"));
+  const root = await createPrivateFixtureRoot("token-ledger-size-limit-");
   try {
     const output = resolve(root, "snapshot.json.gz");
     await writeFile(output, "previous-cache\n");
@@ -1104,7 +1119,7 @@ test("snapshot size limit preserves the previous cache", async () => {
 });
 
 test("expanded JSON limit preserves the previous compressed cache", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-json-limit-"));
+  const root = await createPrivateFixtureRoot("token-ledger-json-limit-");
   try {
     const output = resolve(root, "snapshot.json.gz");
     await writeFile(output, "previous-cache\n");
@@ -1379,7 +1394,7 @@ test("dense recent usage compacts during collection before memory grows unbounde
 });
 
 test("snapshot writer coarsens toward its soft target without losing totals", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-adaptive-write-"));
+  const root = await createPrivateFixtureRoot("token-ledger-adaptive-write-");
   try {
     const output = resolve(root, "snapshot.json.gz");
     const snapshot = {
@@ -1463,7 +1478,7 @@ async function writeSingleUsageRollout(root, threadId) {
 }
 
 test("state enrichment tolerates missing optional columns and edge table", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-state-schema-"));
+  const root = await createPrivateFixtureRoot("token-ledger-state-schema-");
   const threadId = "abababab-abab-4bab-8bab-abababababab";
   const database = new DatabaseSync(resolve(root, "state_5.sqlite"));
   try {
@@ -1500,7 +1515,7 @@ test("state enrichment tolerates missing optional columns and edge table", async
 });
 
 test("thread rows survive an incompatible spawn-edge schema", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-state-edges-"));
+  const root = await createPrivateFixtureRoot("token-ledger-state-edges-");
   const threadId = "acacacac-acac-4cac-8cac-acacacacacac";
   const database = new DatabaseSync(resolve(root, "state_5.sqlite"));
   try {
@@ -1536,7 +1551,7 @@ test("thread rows survive an incompatible spawn-edge schema", async () => {
 });
 
 test("rollout totals survive an incompatible state database schema", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-state-mismatch-"));
+  const root = await createPrivateFixtureRoot("token-ledger-state-mismatch-");
   const threadId = "bcbcbcbc-bcbc-4cbc-8cbc-bcbcbcbcbcbc";
   const database = new DatabaseSync(resolve(root, "state_5.sqlite"));
   try {
@@ -1566,7 +1581,7 @@ test("rollout totals survive an incompatible state database schema", async () =>
 });
 
 test("rollout totals survive a corrupt state database", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-state-corrupt-"));
+  const root = await createPrivateFixtureRoot("token-ledger-state-corrupt-");
   const threadId = "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd";
   try {
     await writeFile(resolve(root, "state_5.sqlite"), "not a sqlite database");
@@ -1593,7 +1608,7 @@ test("rollout totals survive a corrupt state database", async () => {
 });
 
 test("rollout totals survive a busy state database", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-state-busy-"));
+  const root = await createPrivateFixtureRoot("token-ledger-state-busy-");
   const threadId = "dededede-dede-4ede-8ede-dededededede";
   const database = new DatabaseSync(resolve(root, "state_5.sqlite"));
   try {
@@ -1626,7 +1641,7 @@ test("rollout totals survive a busy state database", async () => {
 });
 
 test("source labels resolve structured, encoded, and plain thread sources", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
+  const root = await createPrivateFixtureRoot("token-ledger-importer-");
   const parentId = "99999999-9999-4999-8999-999999999999";
   const threads = [
     {
@@ -1712,7 +1727,7 @@ test("source labels resolve structured, encoded, and plain thread sources", asyn
 });
 
 test("collection retries when an inventoried rollout disappears mid-scan", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-source-mutation-"));
+  const root = await createPrivateFixtureRoot("token-ledger-source-mutation-");
   const firstId = "12121212-1212-4121-8121-121212121212";
   const secondId = "34343434-3434-4343-8434-343434343434";
   try {
@@ -1774,7 +1789,7 @@ test("collection retries when an inventoried rollout disappears mid-scan", async
 });
 
 test("since filters events and quotas while recording archive scope", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-since-"));
+  const root = await createPrivateFixtureRoot("token-ledger-importer-since-");
   const activeThreadId = "abababab-abab-4aba-8aba-abababababab";
   const archivedThreadId = "cdcdcdcd-cdcd-4cdc-8cdc-cdcdcdcdcdcd";
   const cutoff = new Date("2026-08-18T12:00:00.000Z");
@@ -1842,7 +1857,7 @@ test("since filters events and quotas while recording archive scope", async () =
 });
 
 test("invalid usage makes its source evidence-only", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
+  const root = await createPrivateFixtureRoot("token-ledger-importer-");
   const threadId = "88888888-8888-4888-8888-888888888888";
   const timestamp = "2026-08-18T10:00:00.000Z";
   try {
@@ -1917,7 +1932,7 @@ test("null live timestamps never enter durable retention", async () => {
       since: null,
     });
     const ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ output }),
+      resolveDurableLedgerPath({ codexHome: root }),
     );
 
     assert.equal(snapshot.coverage.invalidTokenRecords, 1);
@@ -1936,7 +1951,7 @@ test("null live timestamps never enter durable retention", async () => {
 });
 
 test("invalid usage in a separate source makes weekly completeness false", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-completeness-"));
+  const root = await createPrivateFixtureRoot("token-ledger-completeness-");
   const rolloutDirectory = resolve(root, "sessions", "2026", "08", "18");
   const eventTimestamp = "2026-08-18T10:00:00.000Z";
   const quotaTimestamp = "2026-08-24T10:00:00.000Z";
@@ -2008,7 +2023,7 @@ test("invalid usage in a separate source makes weekly completeness false", async
 });
 
 test("validates token totals and preserves malformed breakdowns as unknown", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-token-validation-"));
+  const root = await createPrivateFixtureRoot("token-ledger-token-validation-");
   const threadId = "91919191-9191-4919-8919-919191919191";
   const validThreadId = "92929292-9292-4929-8929-929292929292";
   const validUsage = {
@@ -2112,7 +2127,7 @@ test("validates token totals and preserves malformed breakdowns as unknown", asy
 });
 
 test("coverage preserves unknown totals after safe-counter saturation", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-saturation-"));
+  const root = await createPrivateFixtureRoot("token-ledger-importer-saturation-");
   const threadId = "13131313-1313-4131-8131-131313131313";
   const firstTimestamp = "2026-08-18T21:00:00.000Z";
   const secondTimestamp = "2026-08-18T21:01:00.000Z";
@@ -2167,7 +2182,7 @@ test("coverage preserves unknown totals after safe-counter saturation", async ()
 });
 
 test("quota identities follow canonical provider ids with optional metadata", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
+  const root = await createPrivateFixtureRoot("token-ledger-importer-");
   const timestamp = "2026-08-18T10:00:00.000Z";
   const resetsAt = Date.parse("2026-08-24T00:00:00.000Z") / 1_000;
   const quotaRecord = (offset, rateLimits) => ({
@@ -2247,7 +2262,7 @@ test("quota identities follow canonical provider ids with optional metadata", as
 });
 
 test("malformed present quota identity metadata is excluded", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-quota-identity-"));
+  const root = await createPrivateFixtureRoot("token-ledger-quota-identity-");
   const timestamp = "2026-08-18T10:00:00.000Z";
   const resetsAt = Date.parse("2026-08-24T00:00:00.000Z") / 1_000;
   const bucket = {
@@ -2294,7 +2309,7 @@ test("malformed present quota identity metadata is excluded", async () => {
 });
 
 test("quota fields reject malformed values without fabricating durable meters", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-quota-validation-"));
+  const root = await createPrivateFixtureRoot("token-ledger-quota-validation-");
   const output = resolve(root, "snapshot.json");
   const timestamp = "2026-08-18T10:00:00.000Z";
   const resetsAt = Date.parse("2026-08-24T00:00:00.000Z") / 1_000;
@@ -2404,7 +2419,7 @@ test("quota fields reject malformed values without fabricating durable meters", 
       includeArchived: true,
       since: null,
     });
-    const ledger = await readDurableLedger(resolveDurableLedgerPath({ output }));
+    const ledger = await readDurableLedger(resolveDurableLedgerPath({ codexHome: root }));
     const expectedInvalid = invalidBuckets.length + 1;
 
     assert.equal(first.coverage.invalidQuotaRecords, expectedInvalid);
@@ -2434,7 +2449,7 @@ test("quota fields reject malformed values without fabricating durable meters", 
 });
 
 test("collector CLI reports excluded quota records", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-quota-cli-"));
+  const root = await createPrivateFixtureRoot("token-ledger-quota-cli-");
   const output = resolve(root, "snapshot.json");
   const timestamp = "2026-08-18T10:00:00.000Z";
   try {
@@ -2472,7 +2487,11 @@ test("collector CLI reports excluded quota records", async () => {
         "--output",
         output,
       ],
-      { encoding: "utf8", timeout: 30_000 },
+      {
+        encoding: "utf8",
+        env: process.env,
+        timeout: 30_000,
+      },
     );
 
     assert.equal(child.status, 0, child.stderr || child.stdout);
@@ -2483,7 +2502,7 @@ test("collector CLI reports excluded quota records", async () => {
 });
 
 test("named-only quota observations do not establish complete history", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
+  const root = await createPrivateFixtureRoot("token-ledger-importer-");
   const eventTimestamp = "2026-08-19T10:00:00.000Z";
   const quotaTimestamp = "2026-08-20T10:00:00.000Z";
   const resetsAt = Date.parse("2026-08-27T00:00:00.000Z") / 1_000;
@@ -2528,7 +2547,7 @@ test("named-only quota observations do not establish complete history", async ()
 });
 
 test("unchanged quota readings retain their full observed span", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
+  const root = await createPrivateFixtureRoot("token-ledger-importer-");
   const threadId = "89898989-8989-4989-8989-898989898989";
   const firstSeenAt = "2026-08-23T17:59:20.000Z";
   const lastSeenAt = "2026-08-23T18:08:57.000Z";
@@ -2576,7 +2595,7 @@ test("unchanged quota readings retain their full observed span", async () => {
 });
 
 test("cold scans conservatively skip irrelevant JSONL lines", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
+  const root = await createPrivateFixtureRoot("token-ledger-importer-");
   const threadId = "abababab-abab-4bab-8bab-abababababab";
   try {
     const rolloutDirectory = resolve(root, "sessions", "2026", "08", "23");
@@ -2631,7 +2650,7 @@ test("cold scans conservatively skip irrelevant JSONL lines", async () => {
 });
 
 test("cold scans pass escaped top-level type keys to the full parser", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
+  const root = await createPrivateFixtureRoot("token-ledger-importer-");
   const threadId = "abababab-abab-4bab-8bab-abababababab";
   try {
     const rolloutDirectory = resolve(root, "sessions", "2026", "08", "23");
@@ -2664,7 +2683,7 @@ test("cold scans pass escaped top-level type keys to the full parser", async () 
 });
 
 test("bounded scans match the sequential reference across collector fixtures", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
+  const root = await createPrivateFixtureRoot("token-ledger-importer-");
   const threadId = "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd";
   const parentId = "efefefef-efef-4fef-8fef-efefefefefef";
   const firstTimestamp = "2026-08-20T10:00:00.000Z";
@@ -2726,6 +2745,11 @@ test("bounded scans match the sequential reference across collector fixtures", a
       delete stableSnapshot.generatedAt;
       stableSnapshot.provenance = { ...stableSnapshot.provenance };
       delete stableSnapshot.provenance.sourceCutoffAt;
+      stableSnapshot.metadata = { ...stableSnapshot.metadata };
+      stableSnapshot.metadata.durableLedger = {
+        ...stableSnapshot.metadata.durableLedger,
+      };
+      delete stableSnapshot.metadata.durableLedger.revision;
       return stableSnapshot;
     }
 
@@ -2776,7 +2800,7 @@ test("bounded scans match the sequential reference across collector fixtures", a
 });
 
 test("pruning a queued rollout mid-scan retries the collection and removes the temporary spool", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
+  const root = await createPrivateFixtureRoot("token-ledger-importer-");
   try {
     const rolloutDirectory = resolve(root, "sessions", "2026", "08", "23");
     await mkdir(rolloutDirectory, { recursive: true });
@@ -2840,7 +2864,7 @@ test("pruning a queued rollout mid-scan retries the collection and removes the t
 });
 
 test("deeply nested rollout records fall back to the standard parser", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
+  const root = await createPrivateFixtureRoot("token-ledger-importer-");
   try {
     const rolloutDirectory = resolve(root, "sessions", "2026", "08", "23");
     await mkdir(rolloutDirectory, { recursive: true });
@@ -2868,7 +2892,7 @@ test("deeply nested rollout records fall back to the standard parser", async () 
 });
 
 test("rejected async progress callbacks fail collection cleanly", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-importer-"));
+  const root = await createPrivateFixtureRoot("token-ledger-importer-");
   try {
     const rolloutDirectory = resolve(root, "sessions", "2026", "08", "23");
     await mkdir(rolloutDirectory, { recursive: true });

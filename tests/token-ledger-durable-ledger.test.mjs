@@ -18,7 +18,7 @@ import {
   utimes,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
@@ -52,6 +52,16 @@ const ROLLOUT_NAME = `rollout-${THREAD_ID}.jsonl`;
 const ARCHIVED_THREAD_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const ARCHIVED_ROLLOUT_NAME = `rollout-${ARCHIVED_THREAD_ID}.jsonl`;
 const SHARED_THREAD_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const TEST_LEDGER_STATE_ROOT = resolve(
+  userInfo().homedir,
+  ".token-ledger",
+  "test-state",
+  String(process.pid),
+);
+
+test.after(async () => {
+  await rm(TEST_LEDGER_STATE_ROOT, { recursive: true, force: true });
+});
 const SHARED_ROLLOUT_NAME = `rollout-${SHARED_THREAD_ID}.jsonl`;
 const BASE_TIMESTAMP = "2026-08-20T10:00:00.000Z";
 const WEEKLY_RESET = Date.parse("2026-08-30T10:00:00.000Z") / 1_000;
@@ -143,28 +153,28 @@ function rolloutRows(
 
 async function createFixture(
   totals,
-  { usedPercent = null, baseTimestamp = BASE_TIMESTAMP } = {},
+  {
+    usedPercent = null,
+    baseTimestamp = BASE_TIMESTAMP,
+  } = {},
 ) {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-durable-"));
   const sessions = resolve(root, "sessions", "2026", "08", "20");
-  const stateDirectory = resolve(root, "private-state");
+  const stateDirectory = dirname(resolveDurableLedgerPath({ codexHome: root }));
   const output = resolve(root, "exports", "snapshot.json.gz");
-  const crashTempDirectory = resolve(root, "child-tmp");
   const file = resolve(sessions, ROLLOUT_NAME);
   await mkdir(sessions, { recursive: true });
-  await mkdir(crashTempDirectory);
   await writeFile(
     file,
     serialize(rolloutRows(totals, { usedPercent, baseTimestamp })),
   );
-  return { root, file, stateDirectory, output, crashTempDirectory };
+  return { root, file, stateDirectory, output };
 }
 
 function options(fixture, extra = {}) {
   return {
     output: fixture.output,
     codexHome: fixture.root,
-    stateDirectory: fixture.stateDirectory,
     includeArchived: true,
     since: null,
     ...extra,
@@ -194,6 +204,7 @@ function crashCollection(fixture, point, { stageSnapshot = false } = {}) {
     import { collectUsage } from ${JSON.stringify(importerUrl)};
     import { stagePrivateSnapshot } from ${JSON.stringify(snapshotUrl)};
     const selected = JSON.parse(process.env.TOKEN_LEDGER_CRASH_OPTIONS);
+    delete selected.stateDirectory;
     const faultInjector = ({ point }) => {
         if (point === process.env.TOKEN_LEDGER_CRASH_POINT) process.exit(86);
     };
@@ -209,9 +220,8 @@ function crashCollection(fixture, point, { stageSnapshot = false } = {}) {
       encoding: "utf8",
       env: {
         ...process.env,
-        TMPDIR: fixture.crashTempDirectory,
-        TMP: fixture.crashTempDirectory,
-        TEMP: fixture.crashTempDirectory,
+        NODE_TEST_CONTEXT: "child-process",
+        TOKEN_LEDGER_TEST_STATE_NAMESPACE: String(process.pid),
         TOKEN_LEDGER_CRASH_OPTIONS: JSON.stringify(options(fixture)),
         TOKEN_LEDGER_CRASH_POINT: point,
         TOKEN_LEDGER_STAGE_SNAPSHOT: stageSnapshot ? "1" : "0",
@@ -417,7 +427,7 @@ test("ledger statement preparation is constant across event volume", async () =>
         DatabaseSync.prototype.prepare = originalPrepare;
       }
       const ledger = await readDurableLedger(
-        resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+        resolveDurableLedgerPath({ codexHome: fixture.root }),
       );
       return { ledger, prepareCount, snapshot };
     } finally {
@@ -489,10 +499,9 @@ test("quota normalization accepts only exact provider percentage fields", () => 
 
 test("durable writes reject quota key and scope mismatches", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-quota-scope-"));
-  const stateDirectory = resolve(root, "state");
-  const ledgerPath = resolveDurableLedgerPath({ stateDirectory });
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: root });
   const base = {
-    options: { stateDirectory },
+    options: {},
     codexHome: root,
     inventory: { files: [], lifecycleFiles: [] },
   };
@@ -535,9 +544,7 @@ test("durable writes reject quota key and scope mismatches", async () => {
 
 test("persisted quota key and scope mismatches fail closed without mutation", async () => {
   const fixture = await createFixture([100], { usedPercent: 37 });
-  const ledgerPath = resolveDurableLedgerPath({
-    stateDirectory: fixture.stateDirectory,
-  });
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
   let database;
   try {
     await collectUsage(options(fixture));
@@ -585,9 +592,7 @@ test("persisted quota key and scope mismatches fail closed without mutation", as
 
 test("non-v2 durable reads preserve usage but suppress opaque quota", async () => {
   const fixture = await createFixture([100], { usedPercent: 37 });
-  const ledgerPath = resolveDurableLedgerPath({
-    stateDirectory: fixture.stateDirectory,
-  });
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
   let database;
   try {
     await collectUsage(options(fixture));
@@ -631,9 +636,7 @@ test("non-v2 durable reads preserve usage but suppress opaque quota", async () =
 
 test("persisted invalid quota fields fail closed before ledger upgrade", async () => {
   const fixture = await createFixture([100], { usedPercent: 37 });
-  const ledgerPath = resolveDurableLedgerPath({
-    stateDirectory: fixture.stateDirectory,
-  });
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
   let database;
   try {
     await collectUsage(options(fixture));
@@ -703,9 +706,7 @@ test("usage and quota survive rollout source disappearance", async () => {
     const activeOnly = await collectUsage(options(fixture, {
       includeArchived: false,
     }));
-    const ledgerPath = resolveDurableLedgerPath({
-      stateDirectory: fixture.stateDirectory,
-    });
+    const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
     const ledger = await readDurableLedger(ledgerPath);
 
     assert.equal(second.coverage.observedTokens, 100);
@@ -740,7 +741,7 @@ test("invalid quota replacements retain last-known quota until a clean rescan", 
     const invalid = await collectUsage(options(fixture));
     const invalidReload = await collectUsage(options(fixture));
     let ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
 
     assert.equal(totalTokens(invalid), 200);
@@ -767,7 +768,7 @@ test("invalid quota replacements retain last-known quota until a clean rescan", 
     const recovered = await collectUsage(options(fixture));
     const recoveredReload = await collectUsage(options(fixture));
     ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
 
     assert.equal(totalTokens(recovered), 300);
@@ -812,7 +813,7 @@ test("missing primary is a clean optional-bucket replacement", async () => {
     const replaced = await collectUsage(options(fixture));
     const reloaded = await collectUsage(options(fixture));
     const ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
     for (const snapshot of [replaced, reloaded]) {
       assert.equal(snapshot.coverage.invalidQuotaRecords, 0);
@@ -867,7 +868,7 @@ test("sparse quota labels survive changed readings and reloads", async () => {
     const changed = await collectUsage(options(fixture));
     const reloaded = await collectUsage(options(fixture));
     const ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
 
     for (const snapshot of [changed, reloaded]) {
@@ -1036,7 +1037,7 @@ test("malformed quota identity retains durable quota until a clean rescan", asyn
     const invalid = await collectUsage(options(fixture));
     const invalidReload = await collectUsage(options(fixture));
     let ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
 
     assert.equal(totalTokens(invalid), 200);
@@ -1058,7 +1059,7 @@ test("malformed quota identity retains durable quota until a clean rescan", asyn
     const recovered = await collectUsage(options(fixture));
     const recoveredReload = await collectUsage(options(fixture));
     ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
 
     assert.equal(totalTokens(recovered), 300);
@@ -1084,9 +1085,7 @@ test("malformed quota identity retains durable quota until a clean rescan", asyn
 test("malformed quota siblings cannot relabel trusted history", async () => {
   const fixture = await createFixture([100], { usedPercent: 37 });
   const replacement = resolve(fixture.root, "replacement.jsonl");
-  const ledgerPath = resolveDurableLedgerPath({
-    stateDirectory: fixture.stateDirectory,
-  });
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
   const rowsWithIdentity = (total, usedPercent, limitName) => {
     const rows = rolloutRows([total], { usedPercent });
     Object.assign(rows.at(-1).payload.rate_limits, {
@@ -1188,9 +1187,7 @@ test("malformed quota siblings cannot relabel trusted history", async () => {
 
 test("preview quota identities converge without rekeying opaque hashes", async () => {
   const fixture = await createFixture([100], { usedPercent: 37 });
-  const ledgerPath = resolveDurableLedgerPath({
-    stateDirectory: fixture.stateDirectory,
-  });
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
   try {
     const rows = rolloutRows([100], { usedPercent: 37 });
     rows.at(-1).payload.rate_limits.limit_name = "Legacy label";
@@ -1234,9 +1231,7 @@ test("malformed pre-contract quota cannot block a safe v2 upgrade", async () => 
     ["v1", "codex-limit-id-v1", true],
   ]) {
     const fixture = await createFixture([100], { usedPercent: 37 });
-    const ledgerPath = resolveDurableLedgerPath({
-      stateDirectory: fixture.stateDirectory,
-    });
+    const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
     let database;
     try {
       await collectUsage(options(fixture));
@@ -1289,9 +1284,7 @@ test("malformed pre-contract quota cannot block a safe v2 upgrade", async () => 
 
 test("quota identity upgrade rolls back and remains pending after malformed scans", async () => {
   const fixture = await createFixture([100], { usedPercent: 37 });
-  const ledgerPath = resolveDurableLedgerPath({
-    stateDirectory: fixture.stateDirectory,
-  });
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
   const replacement = resolve(fixture.root, "replacement.jsonl");
   const contractState = () => {
     const database = new DatabaseSync(ledgerPath, { readOnly: true });
@@ -1426,7 +1419,7 @@ test("first active-only refresh excludes a rollout moved into the archive", asyn
       includeArchived: false,
     }));
     const ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
       { includeArchived: false },
     );
 
@@ -1479,7 +1472,7 @@ test("active-only refresh preserves an atomically replaced archive source", asyn
       includeArchived: false,
     }));
     const retainedAfterActiveOnly = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
 
     await rm(archivedFile);
@@ -1549,11 +1542,11 @@ test("full refresh reconciles an archive replaced during active-only tracking", 
       includeArchived: false,
     }));
     const retainedBeforeRescan = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
     const rescanned = await collectUsage(options(fixture));
     const reconciled = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
     await rm(archivedFile);
     const afterDeletion = await collectUsage(options(fixture));
@@ -1625,7 +1618,7 @@ test("active move reconciles an archive replaced during active-only tracking", a
       includeArchived: false,
     }));
     const ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
 
     assert.equal(totalTokens(activeOnlyBeforeMove), 0);
@@ -1669,7 +1662,7 @@ test("uncertain replacement is evidence-only until a clean rescan", async () => 
     await rename(replacement, fixture.file);
     const uncertain = await collectUsage(options(fixture));
     const retained = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
 
     await rm(fixture.file);
@@ -1678,7 +1671,7 @@ test("uncertain replacement is evidence-only until a clean rescan", async () => 
     await rename(recovered, fixture.file);
     const clean = await collectUsage(options(fixture));
     const reconciled = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
 
     assert.equal(totalTokens(initial), 250);
@@ -1821,7 +1814,7 @@ test("same-inode uncertain scans cannot overwrite positional usage", async () =>
     await rm(fixture.file);
     const afterRemoval = await collectUsage(options(fixture));
     const ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
 
     assert.equal(totalTokens(initial), 250);
@@ -1857,7 +1850,7 @@ test("uncertain scans cannot clear prior tool ownership", async () => {
     await rm(fixture.file);
     const afterRemoval = await collectUsage(options(fixture));
     const ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
 
     assert.equal(totalTokens(initial), 100);
@@ -1894,7 +1887,7 @@ test("deferred replacement reconciles after a clean append", async () => {
     await rename(replacement, fixture.file);
     const uncertain = await collectUsage(options(fixture));
     let ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
     assert.equal(totalTokens(uncertain), 250);
     assert.equal(ledger.sourceSummary.states[0].changeCount, 1);
@@ -1903,7 +1896,7 @@ test("deferred replacement reconciles after a clean append", async () => {
     await appendFile(fixture.file, `completed"}}\n`);
     const recovered = await collectUsage(options(fixture));
     ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
 
     assert.equal(recovered.coverage.parseErrors, 0);
@@ -1933,9 +1926,7 @@ test("pending reconciliation survives truncation lifecycle tracking and tombston
     "08",
     ROLLOUT_NAME,
   );
-  const ledgerPath = resolveDurableLedgerPath({
-    stateDirectory: fixture.stateDirectory,
-  });
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
   try {
     await collectUsage(options(fixture));
     await writeFile(
@@ -1973,9 +1964,7 @@ test("pending reconciliation survives truncation lifecycle tracking and tombston
 test("pending reconciliation survives a missing zero-observation source", async () => {
   const fixture = await createFixture([]);
   const replacement = resolve(fixture.root, "uncertain-empty-replacement.jsonl");
-  const ledgerPath = resolveDurableLedgerPath({
-    stateDirectory: fixture.stateDirectory,
-  });
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
   try {
     await collectUsage(options(fixture));
     await writeFile(
@@ -2018,7 +2007,7 @@ test("active-only lifecycle keeps simultaneous active and archived copies distin
     }));
     const allSources = await collectUsage(options(fixture));
     const ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
 
     assert.equal(totalTokens(activeOnly), 100);
@@ -2035,18 +2024,19 @@ test("active-only lifecycle keeps simultaneous active and archived copies distin
 
 test("durable ledgers reject a different Codex data directory", async () => {
   const firstFixture = await createFixture([100]);
-  const secondFixture = await createFixture([200]);
+  const secondCodexHome = resolve(firstFixture.root, "other-codex-home");
   try {
     await collectUsage(options(firstFixture));
+    await mkdir(secondCodexHome);
     await assert.rejects(
-      collectUsage(options(secondFixture, {
+      collectUsage(options(firstFixture, {
+        codexHome: secondCodexHome,
         output: firstFixture.output,
-        stateDirectory: firstFixture.stateDirectory,
       })),
       (error) => error?.code === "ERR_DURABLE_LEDGER_CODEX_HOME",
     );
     const ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: firstFixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: firstFixture.root }),
     );
 
     assert.equal(
@@ -2056,7 +2046,6 @@ test("durable ledgers reject a different Codex data directory", async () => {
     assert.equal(ledger.revision, 1);
   } finally {
     await rm(firstFixture.root, { recursive: true, force: true });
-    await rm(secondFixture.root, { recursive: true, force: true });
   }
 });
 
@@ -2070,7 +2059,7 @@ test("durable ledger binding canonicalizes Codex home aliases", async () => {
       codexHome: alias,
     }));
     const ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
 
     assert.equal(totalTokens(throughAlias), 100);
@@ -2181,7 +2170,7 @@ test("replacement removes only its stale shared-event membership", async () => {
       includeArchived: false,
     }));
     const ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
     const archivedSourceId = ledger.sourceSummary.states.find(
       (state) => state.location === "archived",
@@ -2209,7 +2198,7 @@ test("unchanged and appended sources add each logical event once", async () => {
     const appended = await collectUsage(options(fixture));
     const unchanged = await collectUsage(options(fixture));
     const ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
 
     assert.equal(first.coverage.observedTokens, 100);
@@ -2235,7 +2224,7 @@ test("replacement and truncation reconcile without double counting", async () =>
     );
     const replaced = await collectUsage(options(fixture));
     let ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
     assert.equal(replaced.coverage.observedTokens, 400);
     assert.equal(ledger.usageRows.filter((row) => row.identityKind === "exact").length, 2);
@@ -2245,7 +2234,7 @@ test("replacement and truncation reconcile without double counting", async () =>
     await writeFile(fixture.file, serialize(rolloutRows([100])));
     const truncated = await collectUsage(options(fixture));
     ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
     assert.equal(truncated.coverage.observedTokens, 400);
     assert.equal(ledger.usageRows.filter((row) => row.identityKind === "exact").length, 2);
@@ -2271,7 +2260,7 @@ test("turnless usage events reconcile by stable source position", async () => {
     await rm(fixture.file);
     const afterRemoval = await collectUsage(options(fixture));
     const ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
 
     assert.equal(totalTokens(first), 300);
@@ -2292,9 +2281,7 @@ test("exact event identity lookup uses the partial event-key index", async () =>
   let database;
   try {
     await collectUsage(options(fixture));
-    const ledgerPath = resolveDurableLedgerPath({
-      stateDirectory: fixture.stateDirectory,
-    });
+    const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
     database = new DatabaseSync(ledgerPath, { readOnly: true });
     const plan = database.prepare(`
       EXPLAIN QUERY PLAN
@@ -2323,14 +2310,14 @@ test("atomic replacement preserves source identity and reconciles positions", as
   try {
     await collectUsage(options(fixture));
     const beforeLedger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
     await writeFile(replacement, serialize(rolloutRows([100, 300])));
     await rename(replacement, fixture.file);
 
     const replaced = await collectUsage(options(fixture));
     const ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
 
     assert.equal(totalTokens(replaced), 400);
@@ -2358,7 +2345,7 @@ test("shorter atomic replacement removes unmatched source observations", async (
     await rm(fixture.file);
     const afterRemoval = await collectUsage(options(fixture));
     const ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
 
     assert.equal(totalTokens(replaced), 300);
@@ -2385,7 +2372,7 @@ test("true append after atomic replacement does not count another replacement", 
     );
     const appended = await collectUsage(options(fixture));
     const ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
 
     assert.equal(totalTokens(replaced), 200);
@@ -2419,7 +2406,7 @@ test("move plus same-inode rewrite reconciles as a replacement", async () => {
 
     const rewritten = await collectUsage(options(fixture));
     const ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
     assert.equal(totalTokens(rewritten), 300);
     assert.equal(ledger.usageRows.length, 1);
@@ -2435,9 +2422,7 @@ test("forced reconciliation removes stale positions for shared observations", as
   const fixture = await createFixture([100, 200]);
   const sharedFile = resolve(fixture.file, "..", SHARED_ROLLOUT_NAME);
   const replacement = resolve(fixture.root, "replacement.jsonl");
-  const ledgerPath = resolveDurableLedgerPath({
-    stateDirectory: fixture.stateDirectory,
-  });
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
   let database;
   try {
     await writeFile(sharedFile, await readFile(fixture.file));
@@ -2506,7 +2491,7 @@ test("larger same-inode overwrite removes unmatched source observations", async 
     await rm(fixture.file);
     const afterRemoval = await collectUsage(options(fixture));
     const ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
 
     assert.equal(totalTokens(replaced), 300);
@@ -2523,9 +2508,7 @@ test("metadata-only touches with identical content remain stable", async () => {
   const fixture = await createFixture([100]);
   try {
     await collectUsage(options(fixture));
-    const ledgerPath = resolveDurableLedgerPath({
-      stateDirectory: fixture.stateDirectory,
-    });
+    const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
     const touchedAt = new Date(Date.now() + 2_000);
     await utimes(fixture.file, touchedAt, touchedAt);
 
@@ -2555,7 +2538,7 @@ test("replacing one source does not rewrite a shared observation", async () => {
     await rm(sharedFile);
     const afterRemoval = await collectUsage(options(fixture));
     const ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
 
     assert.equal(totalTokens(shared), 100);
@@ -2582,7 +2565,7 @@ test("original promotion refreshes persisted origin attribution", async () => {
     await writeFile(fixture.file, serialize(inheritedRows));
     await collectUsage(options(fixture));
     let ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
     assert.equal(ledger.usageRows[0].originalLikely, false);
     assert.equal(ledger.usageRows[0].originThreadId, THREAD_ID);
@@ -2590,7 +2573,7 @@ test("original promotion refreshes persisted origin attribution", async () => {
     await writeFile(originalFile, serialize(originalRows));
     await collectUsage(options(fixture));
     ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
     assert.equal(ledger.usageRows[0].originalLikely, true);
     assert.equal(ledger.usageRows[0].threadId, SHARED_THREAD_ID);
@@ -2602,7 +2585,7 @@ test("original promotion refreshes persisted origin attribution", async () => {
     await rm(originalFile);
     await collectUsage(options(fixture));
     ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
     assert.equal(ledger.usageRows[0].originThreadId, SHARED_THREAD_ID);
     assert.equal(ledger.usageRows[0].originModel, "gpt-5.6-sol");
@@ -2661,7 +2644,7 @@ test("active-to-archived movement preserves one source and event set", async () 
 
     const moved = await collectUsage(options(fixture));
     const ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
     const withoutArchived = await collectUsage(
       options(fixture, { includeArchived: false }),
@@ -2697,7 +2680,7 @@ test("simultaneous active and archived rollout copies keep separate scope", asyn
     );
     const allSources = await collectUsage(options(fixture));
     const ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
     const activeOnly = await collectUsage(options(fixture, {
       includeArchived: false,
@@ -2743,14 +2726,14 @@ test("atomic replacement keeps one simultaneous rollout copy isolated", async ()
     );
     await collectUsage(options(fixture));
     const beforeLedger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
     await writeFile(replacement, serialize(rolloutRows([300])));
     await rename(replacement, fixture.file);
 
     const replaced = await collectUsage(options(fixture));
     const ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
     const sourceIdByLocation = (value) => new Map(
       value.sourceSummary.states.map((state) => [state.location, state.sourceId]),
@@ -2776,9 +2759,7 @@ test("a failed persistence transaction leaves the last complete ledger usable", 
   const fixture = await createFixture([100]);
   try {
     await collectUsage(options(fixture));
-    const ledgerPath = resolveDurableLedgerPath({
-      stateDirectory: fixture.stateDirectory,
-    });
+    const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
     const priorRevision = await readDurableLedgerRevision(ledgerPath);
     await appendFile(
       fixture.file,
@@ -2812,9 +2793,7 @@ test("overlapping ledger writers serialize on the writer guard", async () => {
   let writerGuard;
   try {
     await collectUsage(options(fixture));
-    const ledgerPath = resolveDurableLedgerPath({
-      stateDirectory: fixture.stateDirectory,
-    });
+    const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
     const priorRevision = await readDurableLedgerRevision(ledgerPath);
     writerGuard = new DatabaseSync(`${ledgerPath}.writer-lock.sqlite`);
     writerGuard.exec("BEGIN IMMEDIATE");
@@ -2855,9 +2834,7 @@ test("ledger readers block writers until they close", async () => {
   let readerGuard;
   try {
     await collectUsage(options(fixture));
-    const ledgerPath = resolveDurableLedgerPath({
-      stateDirectory: fixture.stateDirectory,
-    });
+    const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
     const priorRevision = await readDurableLedgerRevision(ledgerPath);
     readerGuard = new DatabaseSync(`${ledgerPath}.writer-lock.sqlite`);
     readerGuard.exec("BEGIN");
@@ -2891,9 +2868,7 @@ test("ledger readers block writers until they close", async () => {
 
 test("revision reads tolerate Node SQLite corruption error codes", async () => {
   const fixture = await createFixture([]);
-  const ledgerPath = resolveDurableLedgerPath({
-    stateDirectory: fixture.stateDirectory,
-  });
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
   try {
     await mkdir(fixture.stateDirectory, { recursive: true });
     await writeFile(ledgerPath, "not a sqlite database");
@@ -2918,7 +2893,7 @@ test("source changes before commit roll back transient observations", async () =
     await rm(fixture.file);
     const afterRemoval = await collectUsage(options(fixture));
     const ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
 
     assert.equal(totalTokens(snapshot), 200);
@@ -2947,7 +2922,7 @@ test("source changes after validation roll back the candidate before retry", asy
       },
     }));
     const ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
 
     assert.equal(changed, true);
@@ -3013,9 +2988,7 @@ test("a post-commit source race keeps the complete revision and converges", asyn
         }
       },
     }));
-    const ledgerPath = resolveDurableLedgerPath({
-      stateDirectory: fixture.stateDirectory,
-    });
+    const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
     const ledger = await readDurableLedger(ledgerPath);
     const stored = await readPrivateSnapshot(fixture.output);
 
@@ -3044,9 +3017,7 @@ test("exhausted post-commit races keep a readable ledger and old cache", async (
   try {
     const initial = await collectUsage(options(fixture));
     await writePrivateSnapshot(fixture.output, initial);
-    const ledgerPath = resolveDurableLedgerPath({
-      stateDirectory: fixture.stateDirectory,
-    });
+    const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
     await replaceRollout(fixture, [100, 200]);
     const replacements = [
       [300, 400],
@@ -3097,24 +3068,24 @@ test("exhausted post-commit races keep a readable ledger and old cache", async (
 
 test("main-ledger aliases fail closed before opening transactions", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-main-path-"));
-  const target = resolve(root, "target.sqlite");
+  const target = resolveDurableLedgerPath({ codexHome: root });
   const symbolicAlias = resolve(root, "symbolic.sqlite");
   const hardAlias = resolve(root, "hard.sqlite");
   const inventory = { files: [], lifecycleFiles: [] };
-  const update = (ledgerPath, extra = {}) => updateDurableLedger({
-    options: { ledgerPath },
+  const update = (options, extra = {}) => updateDurableLedger({
+    options,
     codexHome: root,
     inventory,
     ...extra,
   });
   try {
-    await update(target);
+    await update({});
     assert.equal(await readDurableLedgerRevision(target), 1);
     await symlink(target, symbolicAlias);
 
     let postCommitValidationCalled = false;
     await assert.rejects(
-      () => update(symbolicAlias, {
+      () => update({ ledgerPath: symbolicAlias }, {
         validateAfterCommit: async () => {
           postCommitValidationCalled = true;
           throw new Error("reject committed candidate");
@@ -3132,7 +3103,7 @@ test("main-ledger aliases fail closed before opening transactions", async () => 
 
     await link(target, hardAlias);
     await assert.rejects(
-      () => update(hardAlias),
+      () => update({ ledgerPath: hardAlias }),
       (error) => error?.code === "ERR_DURABLE_LEDGER_PATH",
     );
     await assert.rejects(
@@ -3158,11 +3129,11 @@ test("main-ledger aliases fail closed before opening transactions", async () => 
 
 test("writer-guard aliases fail closed without mutating their targets", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-guard-path-"));
-  const ledgerPath = resolve(root, "ledger.sqlite");
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: root });
   const guardPath = `${ledgerPath}.writer-lock.sqlite`;
   const victimPath = resolve(root, "victim.sqlite");
   const update = () => updateDurableLedger({
-    options: { ledgerPath },
+    options: {},
     codexHome: root,
     inventory: { files: [], lifecycleFiles: [] },
   });
@@ -3253,9 +3224,9 @@ test("writer-guard aliases fail closed without mutating their targets", async ()
 
 test("SQLite sidecar aliases fail closed without touching victims", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-sidecar-path-"));
-  const ledgerPath = resolve(root, "ledger.sqlite");
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: root });
   const update = () => updateDurableLedger({
-    options: { ledgerPath },
+    options: {},
     codexHome: root,
     inventory: { files: [], lifecycleFiles: [] },
   });
@@ -3328,12 +3299,14 @@ test("SQLite sidecar aliases fail closed without touching victims", async () => 
 
 test("non-regular main-ledger paths fail before creating sidecars", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-main-nonregular-"));
-  const ledgerPath = resolve(root, "ledger-directory");
+  const stateDirectory = dirname(resolveDurableLedgerPath({ codexHome: root }));
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: root });
   try {
+    await mkdir(dirname(ledgerPath), { recursive: true });
     await mkdir(ledgerPath);
     await assert.rejects(
       () => updateDurableLedger({
-        options: { ledgerPath },
+        options: {},
         codexHome: root,
         inventory: { files: [], lifecycleFiles: [] },
       }),
@@ -3343,42 +3316,24 @@ test("non-regular main-ledger paths fail before creating sidecars", async () => 
       () => readDurableLedger(ledgerPath),
       (error) => error?.code === "ERR_DURABLE_LEDGER_PATH",
     );
-    assert.deepEqual(await readdir(root), ["ledger-directory"]);
+    assert.deepEqual(await readdir(stateDirectory), [DURABLE_LEDGER_FILENAME]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("a symlinked parent keeps an ordinary single-link WAL ledger supported", async () => {
+test("custom state directories are rejected before SQLite access", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-parent-link-"));
   const realStateDirectory = resolve(root, "real-state");
   const linkedStateDirectory = resolve(root, "linked-state");
-  const linkedLedgerPath = resolveDurableLedgerPath({
-    stateDirectory: linkedStateDirectory,
-  });
   try {
     await mkdir(realStateDirectory);
     await symlink(realStateDirectory, linkedStateDirectory, "dir");
-    await updateDurableLedger({
-      options: { stateDirectory: linkedStateDirectory },
-      codexHome: root,
-      inventory: { files: [], lifecycleFiles: [] },
-      validateAfterCommit: async () => {},
-    });
-
-    assert.equal(await readDurableLedgerRevision(linkedLedgerPath), 1);
-    const ledgerStat = await lstat(linkedLedgerPath);
-    assert.equal(ledgerStat.isFile(), true);
-    assert.equal(ledgerStat.nlink, 1);
-    const database = new DatabaseSync(linkedLedgerPath, { readOnly: true });
-    try {
-      assert.equal(
-        database.prepare("PRAGMA journal_mode").get().journal_mode,
-        "wal",
-      );
-    } finally {
-      database.close();
-    }
+    assert.throws(
+      () => resolveDurableLedgerPath({ stateDirectory: linkedStateDirectory }),
+      (error) => error?.code === "ERR_DURABLE_LEDGER_PATH",
+    );
+    assert.deepEqual(await readdir(realStateDirectory), []);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -3389,9 +3344,7 @@ test("a process crash before commit rolls back the candidate", async () => {
   try {
     const initial = await collectUsage(options(fixture));
     await writePrivateSnapshot(fixture.output, initial);
-    const ledgerPath = resolveDurableLedgerPath({
-      stateDirectory: fixture.stateDirectory,
-    });
+    const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
     await appendFile(
       fixture.file,
       serialize(rolloutRows([200], { offset: 1 })),
@@ -3413,16 +3366,13 @@ test("a process crash before commit rolls back the candidate", async () => {
 test("a process crash after commit leaves a complete ledger and stale cache", async () => {
   const fixture = await createFixture([100]);
   try {
-    fixture.stateDirectory = resolve(fixture.root, ".token-ledger");
     fixture.output = resolve(
       fixture.stateDirectory,
       "token-ledger-snapshot-v3.json.gz",
     );
     const initial = await collectUsage(options(fixture));
     await writePrivateSnapshot(fixture.output, initial);
-    const ledgerPath = resolveDurableLedgerPath({
-      stateDirectory: fixture.stateDirectory,
-    });
+    const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
     await appendFile(
       fixture.file,
       serialize(rolloutRows([200], { offset: 1 })),
@@ -3553,9 +3503,7 @@ test("snapshot orphan cleanup preserves non-regular and linked canaries", async 
 
 test("refresh creates no recovery artifacts or ledger-sized copy", async () => {
   const fixture = await createFixture([100]);
-  const ledgerPath = resolveDurableLedgerPath({
-    stateDirectory: fixture.stateDirectory,
-  });
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
   let database;
   let observedCommittedFiles = false;
   try {
@@ -3644,9 +3592,7 @@ test("staged cleanup errors do not mask post-commit failures", async () => {
         return true;
       },
     );
-    const ledger = await readDurableLedger(resolveDurableLedgerPath({
-      stateDirectory: fixture.stateDirectory,
-    }));
+    const ledger = await readDurableLedger(resolveDurableLedgerPath({ codexHome: fixture.root }));
     assert.equal(ledger.revision, 2);
     assert.deepEqual(
       ledger.usageRows.map((row) => row.totalTokens),
@@ -3669,9 +3615,7 @@ test("source changes after commit do not retry an already committed attempt", as
         }
       },
     }));
-    const ledgerPath = resolveDurableLedgerPath({
-      stateDirectory: fixture.stateDirectory,
-    });
+    const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
     const ledger = await readDurableLedger(ledgerPath);
 
     assert.equal(changed, true);
@@ -3689,9 +3633,7 @@ test("source changes after commit do not retry an already committed attempt", as
 
 test("write-open rejects newer durable ledger schemas without rewriting them", async () => {
   const fixture = await createFixture([100]);
-  const ledgerPath = resolveDurableLedgerPath({
-    stateDirectory: fixture.stateDirectory,
-  });
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
   let database;
   try {
     await mkdir(fixture.stateDirectory, { recursive: true });
@@ -3734,9 +3676,7 @@ test("write-open rejects newer durable ledger schemas without rewriting them", a
 
 test("write-open rejects future quota contracts without downgrading them", async () => {
   const fixture = await createFixture([100], { usedPercent: 37 });
-  const ledgerPath = resolveDurableLedgerPath({
-    stateDirectory: fixture.stateDirectory,
-  });
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
   let database;
   try {
     await collectUsage(options(fixture));
@@ -3795,9 +3735,7 @@ test("write-open rejects future quota contracts without downgrading them", async
 
 test("v2 ledgers add reconciliation state without breaking read-only access", async () => {
   const fixture = await createFixture([100]);
-  const ledgerPath = resolveDurableLedgerPath({
-    stateDirectory: fixture.stateDirectory,
-  });
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
   let database;
   try {
     await collectUsage(options(fixture));
@@ -3826,9 +3764,9 @@ test("v2 ledgers add reconciliation state without breaking read-only access", as
 
 test("source identity compares device and inode as one pair", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-device-identity-"));
-  const stateDirectory = resolve(root, "private-state");
+  const stateDirectory = dirname(resolveDurableLedgerPath({ codexHome: root }));
   const sourcePath = resolve(root, "sessions", ROLLOUT_NAME);
-  const ledgerPath = resolveDurableLedgerPath({ stateDirectory });
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: root });
   const source = ({
     device,
     inode = 17,
@@ -3851,7 +3789,7 @@ test("source identity compares device and inode as one pair", async () => {
     continuityFingerprint,
   });
   const update = async (entry) => updateDurableLedger({
-    options: { stateDirectory },
+    options: {},
     codexHome: root,
     inventory: { files: [entry], lifecycleFiles: [entry] },
     includeArchived: true,
@@ -3895,9 +3833,7 @@ test("source identity compares device and inode as one pair", async () => {
 test("malformed legacy snapshots preserve the one-shot migration retry", async () => {
   const fixture = await createFixture([]);
   const legacySnapshotPath = resolve(fixture.root, "exports", "snapshot.json");
-  const ledgerPath = resolveDurableLedgerPath({
-    stateDirectory: fixture.stateDirectory,
-  });
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
   const malformed = Buffer.from("{not-json\n", "utf8");
   const generatedAt = "2026-08-20T12:00:00.000Z";
   let database;
@@ -3980,9 +3916,7 @@ test("malformed legacy snapshots preserve the one-shot migration retry", async (
 test("readable non-v3 legacy snapshots remain retryable hard failures", async () => {
   const fixture = await createFixture([]);
   const legacySnapshotPath = resolve(fixture.root, "exports", "snapshot.json");
-  const ledgerPath = resolveDurableLedgerPath({
-    stateDirectory: fixture.stateDirectory,
-  });
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
   let database;
   try {
     await mkdir(dirname(legacySnapshotPath), { recursive: true });
@@ -4066,7 +4000,7 @@ test("markerless legacy quota is quarantined while usage migrates", async () => 
 
     const migrated = await collectUsage(options(fixture));
     let ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
     assert.equal(totalTokens(migrated), 100);
     assert.equal(migrated.quotaObservations.length, 0);
@@ -4086,7 +4020,7 @@ test("markerless legacy quota is quarantined while usage migrates", async () => 
     const recovered = await collectUsage(options(fixture));
     const recoveredReload = await collectUsage(options(fixture));
     ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
     for (const snapshot of [recovered, recoveredReload]) {
       assert.deepEqual(
@@ -4108,9 +4042,7 @@ test("markerless legacy quota is quarantined while usage migrates", async () => 
 test("malformed v3 legacy rows cannot burn the one-shot migration", async () => {
   const fixture = await createFixture([]);
   const legacySnapshotPath = resolve(fixture.root, "exports", "legacy.json");
-  const ledgerPath = resolveDurableLedgerPath({
-    stateDirectory: fixture.stateDirectory,
-  });
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
   const generatedAt = "2026-08-20T12:00:00.000Z";
   const validLegacy = legacySnapshotForFixture(fixture, {
     schemaVersion: 3,
@@ -4312,7 +4244,7 @@ test("legacy usage migrates independently of invalid v2 quota claims", async () 
       const first = await collectUsage(options(fixture));
       const second = await collectUsage(options(fixture));
       const ledger = await readDurableLedger(
-        resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+        resolveDurableLedgerPath({ codexHome: fixture.root }),
       );
       assert.equal(totalTokens(first), 100, name);
       assert.equal(totalTokens(second), 100, name);
@@ -4389,9 +4321,7 @@ test("old v3 snapshot migration is idempotent and marks compacted estimates", as
       legacySnapshotForFixture(fixture, legacy),
     );
     const first = await collectUsage(options(fixture));
-    const ledgerPath = resolveDurableLedgerPath({
-      stateDirectory: fixture.stateDirectory,
-    });
+    const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
     const firstLedger = await readDurableLedger(ledgerPath);
     const second = await collectUsage(options(fixture));
     const secondLedger = await readDurableLedger(ledgerPath);
@@ -4500,7 +4430,7 @@ test("legacy overlap subtracts rescanned observations after compaction", async (
     );
     const snapshot = await collectUsage(options(fixture));
     const ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
 
     assert.equal(snapshot.coverage.observedTokens, 100);
@@ -4560,7 +4490,7 @@ test("active-only legacy migrations survive --no-archived refreshes", async () =
       includeArchived: false,
     }));
     const ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
       { includeArchived: false },
     );
 
@@ -4631,9 +4561,7 @@ test("active-only migration does not subtract unrelated archived exact usage", a
       includeArchived: false,
     }));
     const full = await collectUsage(options(fixture));
-    const ledgerPath = resolveDurableLedgerPath({
-      stateDirectory: fixture.stateDirectory,
-    });
+    const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
     const activeLedger = await readDurableLedger(ledgerPath, {
       includeArchived: false,
     });
@@ -4685,9 +4613,7 @@ test("legacy migration requires matching collection and Codex-home provenance", 
   try {
     await writePrivateSnapshot(fixture.output, legacy);
     const snapshot = await collectUsage(options(fixture));
-    const ledgerPath = resolveDurableLedgerPath({
-      stateDirectory: fixture.stateDirectory,
-    });
+    const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
     const ledger = await readDurableLedger(ledgerPath);
     database = new DatabaseSync(ledgerPath, { readOnly: true });
 
@@ -4757,7 +4683,7 @@ test("collection cutoff slices migrated compacted ranges", async () => {
       since: "2026-08-21T00:00:00.000Z",
     }));
     const ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
 
     assert.ok(Math.abs(totalTokens(snapshot) - 100) < 1e-6);
@@ -4948,7 +4874,7 @@ test("replacement prunes orphaned compacted observations", async () => {
     await rm(fixture.file);
     const afterRemoval = await collectUsage(options(fixture));
     const ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
 
     assert.equal(totalTokens(initial), 300);
@@ -4972,9 +4898,7 @@ test("old compacted observations retain source membership without rescan double 
     );
     const first = await collectUsage(options(fixture));
     const second = await collectUsage(options(fixture));
-    const ledgerPath = resolveDurableLedgerPath({
-      stateDirectory: fixture.stateDirectory,
-    });
+    const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
     const ledger = await readDurableLedger(ledgerPath);
     await rm(fixture.file);
     const afterRemoval = await collectUsage(options(fixture));
@@ -5002,9 +4926,7 @@ test("unchanged compacted observations retain membership provenance", async () =
   });
   try {
     await collectUsage(options(fixture));
-    const ledgerPath = resolveDurableLedgerPath({
-      stateDirectory: fixture.stateDirectory,
-    });
+    const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
     let database = new DatabaseSync(ledgerPath, { readOnly: true });
     const before = database.prepare(`
       SELECT event_key AS eventKey, observation_id AS observationId,
@@ -5067,9 +4989,7 @@ test("compacted observations retain tool-call ownership after source disappearan
       }]),
     );
     const first = await collectUsage(options(fixture));
-    const ledgerPath = resolveDurableLedgerPath({
-      stateDirectory: fixture.stateDirectory,
-    });
+    const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
     const ledger = await readDurableLedger(ledgerPath);
 
     assert.equal(first.events[0].toolCalls, 1);
@@ -5116,7 +5036,7 @@ test("active-only reads exclude tool calls owned only by archived sources", asyn
       includeArchived: false,
     }));
     const activeOnlyLedger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
       { includeArchived: false },
     );
 
@@ -5160,7 +5080,7 @@ test("active-only refreshes preserve archived tool ownership durably", async () 
       includeArchived: false,
     }));
     const afterActiveOnlyLedger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
     assert.deepEqual(
       afterActiveOnlyLedger.usageRows[0].toolCallKeys,
@@ -5176,7 +5096,7 @@ test("active-only refreshes preserve archived tool ownership durably", async () 
     await rm(archivedFile);
     const afterArchiveRemoval = await collectUsage(options(fixture));
     const ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
 
     assert.equal(allSources.events[0].toolCalls, 1);
@@ -5223,7 +5143,7 @@ test("active-only compacted reads derive tool totals from scoped memberships", a
       includeArchived: false,
     }));
     const activeOnlyLedger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
       { includeArchived: false },
     );
 
@@ -5275,7 +5195,7 @@ test("compaction keeps active and archived source scopes filterable", async () =
     );
     const allSources = await collectUsage(options(fixture));
     const ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
     const activeOnly = await collectUsage(options(fixture, {
       includeArchived: false,
@@ -5313,7 +5233,7 @@ test("a reappearing compacted member does not expose its archived siblings", asy
     );
     const archivedOnly = await collectUsage(options(fixture));
     let ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
     assert.equal(totalTokens(archivedOnly), 300);
     assert.equal(ledger.compactedUsageRows, 1);
@@ -5331,7 +5251,7 @@ test("a reappearing compacted member does not expose its archived siblings", asy
       includeArchived: false,
     }));
     ledger = await readDurableLedger(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
 
     assert.equal(totalTokens(withReappearedMember), 300);
@@ -5343,62 +5263,106 @@ test("a reappearing compacted member does not expose its archived siblings", asy
   }
 });
 
-test("user-selected output directories keep their existing permissions", async () => {
+test("custom snapshot outputs never relocate SQLite state", async () => {
   const fixture = await createFixture([100]);
   const selectedDirectory = resolve(fixture.root, "shared-output");
   const selectedOutput = resolve(selectedDirectory, "snapshot.json.gz");
+  const oldAdjacentLedger = `${selectedOutput}.ledger.sqlite`;
+  const victim = resolve(fixture.root, "victim.sqlite");
   try {
     await mkdir(selectedDirectory, { recursive: true });
     await chmod(selectedDirectory, 0o755);
+    await writeFile(victim, "unchanged", { mode: 0o644 });
+    await symlink(victim, oldAdjacentLedger);
     await collectUsage(options(fixture, {
       output: selectedOutput,
       stateDirectory: undefined,
     }));
 
-    const ledgerPath = resolveDurableLedgerPath({ output: selectedOutput });
+    const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
     assert.equal((await stat(selectedDirectory)).mode & 0o777, 0o755);
     assert.equal((await stat(ledgerPath)).mode & 0o777, 0o600);
+    assert.equal(dirname(ledgerPath), fixture.stateDirectory);
+    assert.equal((await lstat(oldAdjacentLedger)).isSymbolicLink(), true);
+    assert.equal(await readFile(victim, "utf8"), "unchanged");
+    assert.equal(
+      (await readdir(selectedDirectory)).some((name) =>
+        name.endsWith(".writer-lock.sqlite") ||
+        name.endsWith("-wal") ||
+        name.endsWith("-shm")
+      ),
+      false,
+    );
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
 
-test("user-selected state directories keep their existing permissions", async () => {
+test("custom SQLite paths and state directories are rejected", async () => {
   const fixture = await createFixture([100]);
   const selectedDirectory = resolve(fixture.root, "shared-state");
+  const selectedLedger = resolve(selectedDirectory, "custom.sqlite");
   try {
     await mkdir(selectedDirectory, { recursive: true });
     await chmod(selectedDirectory, 0o755);
-    await collectUsage(options(fixture, {
-      stateDirectory: selectedDirectory,
-    }));
-
-    const ledgerPath = resolveDurableLedgerPath({
-      stateDirectory: selectedDirectory,
-    });
+    assert.throws(
+      () => resolveDurableLedgerPath({ stateDirectory: selectedDirectory }),
+      (error) => error?.code === "ERR_DURABLE_LEDGER_PATH",
+    );
+    assert.throws(
+      () => resolveDurableLedgerPath({ ledgerPath: selectedLedger }),
+      (error) => error?.code === "ERR_DURABLE_LEDGER_PATH",
+    );
+    await assert.rejects(
+      () => readDurableLedger(selectedLedger),
+      (error) => error?.code === "ERR_DURABLE_LEDGER_PATH",
+    );
     assert.equal((await stat(selectedDirectory)).mode & 0o777, 0o755);
-    assert.equal((await stat(ledgerPath)).mode & 0o777, 0o600);
+    assert.deepEqual(await readdir(selectedDirectory), []);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
 
-test("existing default private state directory is tightened to 0700", async () => {
-  const fixture = await createFixture([100]);
-  const defaultDirectory = resolve(fixture.root, ".token-ledger");
-  const output = resolve(defaultDirectory, "token-ledger-snapshot-v3.json.gz");
+test("caller-controlled HOME cannot relocate durable SQLite state", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-home-override-"));
+  const moduleUrl = new URL("../lib/token-ledger-ledger.mjs", import.meta.url).href;
+  const env = { ...process.env, HOME: root };
+  delete env.NODE_TEST_CONTEXT;
   try {
-    await mkdir(defaultDirectory, { recursive: true });
-    await chmod(defaultDirectory, 0o755);
+    const child = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `import { resolveDurableLedgerPath } from ${JSON.stringify(moduleUrl)}; console.log(resolveDurableLedgerPath());`,
+      ],
+      { encoding: "utf8", env, timeout: 30_000 },
+    );
+    assert.equal(child.status, 0, child.stderr || child.stdout);
+    assert.equal(
+      child.stdout.trim(),
+      resolve(userInfo().homedir, ".token-ledger", DURABLE_LEDGER_FILENAME),
+    );
+    assert.deepEqual(await readdir(root), []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("existing app-owned private state directory is tightened to 0700", async () => {
+  const fixture = await createFixture([100]);
+  const output = resolve(fixture.stateDirectory, "token-ledger-snapshot-v3.json.gz");
+  try {
+    await mkdir(fixture.stateDirectory, { recursive: true });
+    await chmod(fixture.stateDirectory, 0o755);
     await collectUsage(options(fixture, {
       output,
-      stateDirectory: undefined,
-      privateStateDirectory: true,
     }));
 
-    assert.equal((await stat(defaultDirectory)).mode & 0o777, 0o700);
+    assert.equal((await stat(fixture.stateDirectory)).mode & 0o777, 0o700);
     assert.equal(
-      (await stat(resolveDurableLedgerPath({ output }))).mode & 0o777,
+      (await stat(resolveDurableLedgerPath({ codexHome: fixture.root }))).mode & 0o777,
       0o600,
     );
   } finally {
@@ -5412,9 +5376,7 @@ test("schema v1 upgrades transactionally and scrubs persisted private metadata",
   const remoteCanary = "https://user:secret@example.test/private.git";
   const sourceCanary = "/private/raw-source-canary.jsonl";
   const homeCanary = "/private/canonical-codex-home-canary";
-  const ledgerPath = resolveDurableLedgerPath({
-    stateDirectory: fixture.stateDirectory,
-  });
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
   let database;
   try {
     await collectUsage(options(fixture));
@@ -5504,9 +5466,7 @@ test("schema v1 upgrades transactionally and scrubs persisted private metadata",
 
 test("unscoped early-v1 migrated history is rejected without mutation", async () => {
   const fixture = await createFixture([100]);
-  const ledgerPath = resolveDurableLedgerPath({
-    stateDirectory: fixture.stateDirectory,
-  });
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
   let database;
   try {
     await collectUsage(options(fixture));
@@ -5565,9 +5525,7 @@ test("unscoped early-v1 migrated history is rejected without mutation", async ()
 
 test("scoped v1 migration records upgrade without changing exact totals", async () => {
   const fixture = await createFixture([100]);
-  const ledgerPath = resolveDurableLedgerPath({
-    stateDirectory: fixture.stateDirectory,
-  });
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
   let database;
   try {
     await collectUsage(options(fixture));
@@ -5665,9 +5623,7 @@ test("durable storage and exported snapshots keep privacy and permissions", asyn
     const snapshot = await collectUsage(options(fixture));
     const writeResult = await writePrivateSnapshot(fixture.output, snapshot);
     const encoded = await readFile(fixture.output, "utf8");
-    const ledgerPath = resolveDurableLedgerPath({
-      stateDirectory: fixture.stateDirectory,
-    });
+    const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
 
     assert.equal(writeResult.snapshot.coverage.observedTokens, 100);
     assert.equal(encoded.includes(fixture.root), false);
@@ -5679,7 +5635,7 @@ test("durable storage and exported snapshots keep privacy and permissions", asyn
     assert.equal((await stat(ledgerPath)).mode & 0o777, 0o600);
     assert.equal((await stat(fixture.output)).mode & 0o777, 0o600);
     assert.equal(
-      resolveDurableLedgerPath({ stateDirectory: fixture.stateDirectory }),
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
       resolve(fixture.stateDirectory, DURABLE_LEDGER_FILENAME),
     );
     assert.deepEqual(
