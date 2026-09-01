@@ -1,7 +1,8 @@
 import { spawnSync } from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
-import {
+import fsPromises, {
   appendFile,
   chmod,
   mkdir,
@@ -56,6 +57,7 @@ import {
 } from "../lib/token-ledger-ledger.mjs";
 
 import {
+  incompleteSourceWarning,
   quotaCycleSummary,
   renderFullscreen,
   renderTerminal,
@@ -2661,6 +2663,82 @@ test("snapshot size fallback stays stale and does not advance ledger revisions",
   }
 });
 
+test("retry exhaustion serves the cached report after repeated source identity failures", async () => {
+  const root = await createPrivateFixtureRoot("token-ledger-identity-fallback-");
+  const codexHome = resolve(root, "codex-home");
+  const sourceDirectory = resolve(codexHome, "sessions", "2026", "08");
+  const sourceFile = resolve(
+    sourceDirectory,
+    "rollout-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl",
+  );
+  const snapshotPath = resolve(root, "snapshot.json.gz");
+  try {
+    await mkdir(sourceDirectory, { recursive: true });
+    await writeFile(
+      sourceFile,
+      serializeRows(sourceRolloutRows(
+        100,
+        "turn-1",
+        "2026-08-23T10:00:00.000Z",
+      )),
+    );
+    const initial = await collectUsage({
+      output: snapshotPath,
+      codexHome,
+      includeArchived: true,
+      since: null,
+    });
+    await writePrivateSnapshot(snapshotPath, initial);
+    await appendFile(
+      sourceFile,
+      serializeRows(sourceRolloutRows(
+        200,
+        "turn-2",
+        "2026-08-23T10:01:00.000Z",
+      )),
+    );
+
+    const options = parseArgs([
+      "day",
+      "2026-08-23",
+      "--static",
+      "--plain",
+      "--ascii",
+      "--tz",
+      "UTC",
+    ]);
+    options.codexHome = codexHome;
+    options.input = snapshotPath;
+    options.inputExplicit = false;
+    let failures = 0;
+    const originalOpen = fsPromises.open;
+    fsPromises.open = async (...args) => {
+      if (String(args[0]) === sourceFile && failures < 3) {
+        failures += 1;
+        const error = new Error("Rollout identity changed during collection.");
+        error.code = "ERR_SOURCE_IDENTITY_CHANGED";
+        throw error;
+      }
+      return originalOpen(...args);
+    };
+    syncBuiltinESMExports();
+    try {
+      const fallback = await loadSnapshot(options);
+      assert.equal(failures, 3);
+      assert.equal(fallback.sourceStatus, "stale-fallback");
+      assert.equal(
+        fallback.snapshot.coverage.observedTokens,
+        initial.coverage.observedTokens,
+      );
+    } finally {
+      fsPromises.open = originalOpen;
+      syncBuiltinESMExports();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("old quota contracts make every stale-fallback path meterless", async () => {
   const cases = [
     {
@@ -2972,6 +3050,74 @@ test("source provenance labels cover every cache trust state", () => {
     "fresh · 12m old",
   );
   assert.throws(() => sourceStatusLabel("invented"), /Unknown report source status/);
+});
+
+test("terminal report surfaces incomplete source coverage across text headers", () => {
+  const snapshot = {
+    generatedAt: "2026-08-20T12:00:00.000Z",
+    coverage: { parseErrors: 1 },
+    events: [],
+    threads: [],
+  };
+  const events = [];
+  const rows = aggregateProjects(snapshot, events, { rawProjects: true });
+  const terminal = renderTerminal({
+    options: { plain: true, ascii: true, width: 120 },
+    snapshot,
+    bounds: dayBounds("2026-08-20", "UTC"),
+    events,
+    rows,
+    allRows: rows,
+  });
+  const trend = renderTrendPlain({
+    snapshot,
+    bounds: multiDayBounds("2026-08-20", "UTC", 7),
+    options: { plain: true, width: 120 },
+  });
+  const cache = renderCacheReportImage({
+    snapshot,
+    bounds: multiDayBounds("2026-08-20", "UTC", 7),
+    options: { imageWidth: 900 },
+  });
+  const warning = "SOURCES INCOMPLETE · 1 PARSE ERROR";
+
+  assert.equal(incompleteSourceWarning(snapshot), warning);
+  assert.match(terminal, new RegExp(warning));
+  assert.match(trend, new RegExp(warning));
+  assert.match(cache, new RegExp(warning));
+
+  const cleanSnapshot = {
+    ...snapshot,
+    coverage: {
+      parseErrors: 0,
+      invalidTokenRecords: 0,
+      sourceIncomplete: false,
+    },
+  };
+  const cleanRows = aggregateProjects(cleanSnapshot, events, { rawProjects: true });
+  const cleanTerminal = renderTerminal({
+    options: { plain: true, ascii: true, width: 120 },
+    snapshot: cleanSnapshot,
+    bounds: dayBounds("2026-08-20", "UTC"),
+    events,
+    rows: cleanRows,
+    allRows: cleanRows,
+  });
+  const cleanTrend = renderTrendPlain({
+    snapshot: cleanSnapshot,
+    bounds: multiDayBounds("2026-08-20", "UTC", 7),
+    options: { plain: true, width: 120 },
+  });
+  const cleanCache = renderCacheReportImage({
+    snapshot: cleanSnapshot,
+    bounds: multiDayBounds("2026-08-20", "UTC", 7),
+    options: { imageWidth: 900 },
+  });
+
+  assert.equal(incompleteSourceWarning(cleanSnapshot), null);
+  assert.doesNotMatch(cleanTerminal, /SOURCES INCOMPLETE/);
+  assert.doesNotMatch(cleanTrend, /SOURCES INCOMPLETE/);
+  assert.doesNotMatch(cleanCache, /SOURCES INCOMPLETE/);
 });
 
 test("a refreshed append-only cutoff is not verified current", () => {

@@ -49,6 +49,10 @@ import {
   usageBuckets,
   usageBucketStats,
 } from "../lib/token-ledger-usage.mjs";
+import {
+  calculateCodexPurchasedCredits,
+  hasDetailedTokenBreakdown,
+} from "../lib/token-ledger-rates.mjs";
 
 const TEST_LEDGER_STATE_ROOT = resolve(
   userInfo().homedir,
@@ -422,6 +426,111 @@ test("source appends after the cutoff publish safely and converge next time", as
       codexHomeFingerprint(root),
     );
     assert.ok(!JSON.stringify(persisted).includes(root));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("truncated trailing lines are deferred and later appended as a stable continuation", async () => {
+  const root = await createPrivateFixtureRoot("token-ledger-trailing-partial-");
+  const threadId = "45454545-4545-4454-8454-454545454545";
+  const timestamp = "2026-08-23T10:00:00.000Z";
+  const rolloutDirectory = resolve(root, "sessions", "2026", "08", "23");
+  const file = resolve(rolloutDirectory, `rollout-${threadId}.jsonl`);
+  const output = resolve(root, "snapshot.json");
+  try {
+    await mkdir(rolloutDirectory, { recursive: true });
+    const initialRows = [
+      ...turnStart(timestamp, "turn-initial"),
+      tokenCount("2026-08-23T10:00:01.000Z", 100, 100),
+    ];
+    const initialText = serialize(initialRows);
+    const appendedTurn = turnStart("2026-08-23T10:01:00.000Z", "turn-appended");
+    const appendedTurnLine = JSON.stringify(appendedTurn[0]);
+    const partialPrefix = appendedTurnLine.slice(
+      0,
+      Math.max(1, Math.floor(appendedTurnLine.length / 2)),
+    );
+    await writeFile(file, `${initialText}${partialPrefix}`);
+
+    const options = {
+      output,
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    };
+    const first = await collectUsage(options);
+    assert.equal(first.coverage.parseErrors, 0);
+    assert.equal(first.coverage.observedTokens, 100);
+    assert.equal(first.coverage.filesScanned, 1);
+    assert.equal(first.coverage.bytesScanned, Buffer.byteLength(initialText));
+
+    const ledgerPath = resolveDurableLedgerPath({ codexHome: root });
+    const firstLedger = new DatabaseSync(ledgerPath, { readOnly: true });
+    let firstSource;
+    try {
+      firstSource = firstLedger.prepare(`
+        SELECT cursor_bytes AS cursorBytes,
+               change_state AS changeState,
+               reconciliation_pending AS reconciliationPending
+          FROM source_state
+      `).get();
+    } finally {
+      firstLedger.close();
+    }
+    assert.equal(firstSource.cursorBytes, Buffer.byteLength(initialText));
+    assert.equal(firstSource.changeState, "stable");
+    assert.equal(firstSource.reconciliationPending, 0);
+
+    await appendFile(
+      file,
+      `${appendedTurnLine.slice(partialPrefix.length)}\n${JSON.stringify(appendedTurn[1])}\n${serialize([
+        tokenCount("2026-08-23T10:01:01.000Z", 200, 200),
+      ])}`,
+    );
+
+    const second = await collectUsage(options);
+    assert.equal(second.coverage.parseErrors, 0);
+    assert.equal(second.coverage.observedTokens, 300);
+    assert.equal(second.coverage.filesScanned, 1);
+    assert.equal(second.coverage.sourceIncomplete, false);
+
+    const secondLedger = new DatabaseSync(ledgerPath, { readOnly: true });
+    try {
+      const source = secondLedger.prepare(`
+        SELECT cursor_bytes AS cursorBytes,
+               change_state AS changeState,
+               reconciliation_pending AS reconciliationPending
+          FROM source_state
+      `).get();
+      assert.equal(source.cursorBytes, (await stat(file)).size);
+      assert.equal(source.changeState, "stable");
+      assert.equal(source.reconciliationPending, 0);
+      assert.equal(
+        secondLedger.prepare(`
+          SELECT COUNT(*) AS count, SUM(total_tokens) AS totalTokens
+            FROM usage_observations
+           WHERE identity_kind = 'exact'
+        `).get().count,
+        2,
+      );
+      assert.equal(
+        secondLedger.prepare(`
+          SELECT SUM(total_tokens) AS totalTokens
+            FROM usage_observations
+           WHERE identity_kind = 'exact'
+        `).get().totalTokens,
+        300,
+      );
+    } finally {
+      secondLedger.close();
+    }
+
+    const third = await collectUsage(options);
+    assert.equal(third.coverage.parseErrors, 0);
+    assert.equal(third.coverage.observedTokens, 300);
+    assert.equal(third.coverage.filesScanned, 0);
+    assert.equal(third.coverage.filesReused, 1);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -1511,6 +1620,127 @@ test("estimated token components tolerate floating-point reconciliation", () => 
   });
 
   assert.equal(normalized.breakdownAvailable, true);
+});
+
+test("fractional migrated residuals preserve breakdowns and recompute credits", async () => {
+  const root = await createPrivateFixtureRoot("token-ledger-fractional-residual-");
+  const output = resolve(root, "snapshot.json.gz");
+  const threadId = "56565656-5656-4565-8565-565656565656";
+  const firstTimestamp = "2015-08-20T23:58:00.000Z";
+  const secondTimestamp = "2015-08-20T23:58:59.001Z";
+  const legacyStart = "2015-08-20T23:58:30.000Z";
+  const legacyEnd = "2015-08-20T23:59:30.000Z";
+  try {
+    const rolloutDirectory = resolve(root, "sessions", "2026", "08", "20");
+    await mkdir(rolloutDirectory, { recursive: true });
+    await writeFile(
+      resolve(rolloutDirectory, `rollout-${threadId}.jsonl`),
+      serialize([
+        ...turnStart(firstTimestamp, "turn-fractional-a"),
+        tokenCount(firstTimestamp, 100, 100),
+        ...turnStart(secondTimestamp, "turn-fractional-b"),
+        tokenCount(secondTimestamp, 200, 200),
+      ]),
+    );
+    await writePrivateSnapshot(output, {
+      schemaVersion: 3,
+      generatedAt: "2026-08-25T00:00:00.000Z",
+      provenance: {
+        collection: { since: null, includeArchived: true },
+      },
+      metadata: {
+        durableLedger: {
+          codexHomeFingerprint: codexHomeFingerprint(root),
+        },
+      },
+      events: [{
+        timestamp: "2015-08-20T23:59:00.000Z",
+        startAt: legacyStart,
+        endAt: legacyEnd,
+        project: "Unknown project",
+        model: "gpt-5.5",
+        rateCardModel: "gpt-5.5",
+        effort: "medium",
+        source: "unknown",
+        useType: "unknown",
+        serviceTier: null,
+        inputTokens: 900,
+        cachedInputTokens: 100,
+        outputTokens: 100,
+        reasoningTokens: 40,
+        totalTokens: 1_000,
+        toolCalls: 0,
+        callCount: 1,
+        detailedCallCount: 1,
+        inputCallCount: 1,
+        rateCardCredits: 7,
+        breakdownAvailable: true,
+        threadIds: [threadId],
+      }],
+    });
+
+    const snapshot = await collectUsage({
+      output,
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+    const ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ codexHome: root }),
+    );
+    const residual = ledger.usageRows.find(
+      (row) => row.identityKind === "migrated_compacted",
+    );
+    const compacted = ledger.usageRows.find(
+      (row) => row.identityKind === "compacted",
+    );
+
+    assert.ok(compacted);
+    assert.equal(compacted.startAt, firstTimestamp);
+    assert.equal(compacted.endAt, secondTimestamp);
+    assert.ok(residual);
+    assert.equal(residual.rangeAllocationEstimated, true);
+    assert.ok(residual.totalTokens > 800 && residual.totalTokens < 900);
+    assert.equal(snapshot.coverage.unknownBreakdownTokens, 0);
+    assert.ok(snapshot.coverage.observedTokens > 1_150);
+    const residualEvent = snapshot.events.find(
+      (event) => event.rangeAllocationEstimated === true &&
+        event.totalTokens > 800 && event.totalTokens < 900,
+    );
+    assert.ok(residualEvent);
+    assert.equal(residualEvent.breakdownAvailable, true);
+    assert.ok(Number.isFinite(residualEvent.rateCardCredits));
+    assert.ok(snapshot.events.every((event) => Number.isFinite(event.rateCardCredits)));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("fractional range allocations retain detailed breakdowns and credits", () => {
+  const usage = {
+    inputTokens: 225.25,
+    cachedInputTokens: 25.25,
+    cacheWriteInputTokens: 0,
+    outputTokens: 75.25,
+    reasoningTokens: 20.25,
+    totalTokens: 300.5,
+    rangeAllocationEstimated: true,
+    breakdownAvailable: true,
+    componentsValid: true,
+  };
+
+  assert.equal(hasDetailedTokenBreakdown(usage), true);
+  assert.equal(
+    hasDetailedTokenBreakdown({ ...usage, rangeAllocationEstimated: false }),
+    false,
+  );
+  const credits = calculateCodexPurchasedCredits({
+    model: "gpt-5.6-luna",
+    serviceTier: "standard",
+    usage,
+  });
+  assert.equal(Number.isFinite(credits), true);
+  assert.ok(credits > 0);
 });
 
 test("usage buckets omit invalid token rows before metadata consumers see them", () => {

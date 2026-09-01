@@ -19,6 +19,7 @@ import {
 } from "./token-ledger-image-primitives.mjs";
 import { historyScopeLabel } from "../lib/token-ledger-collection.mjs";
 import { sourceStatusLine } from "./token-ledger-source-status.mjs";
+import { incompleteSourceWarning } from "./token-ledger-terminal.mjs";
 
 function percent(value) {
   if (!Number.isFinite(value)) return "—";
@@ -216,6 +217,8 @@ function createCacheReportContext({
   const qualifierLineCount = Math.max(
     ...footerItems.map((item) => item.qualifiers.length),
   );
+  const sourceWarning = incompleteSourceWarning(snapshot);
+  const headerOffset = sourceWarning ? 24 : 0;
   const headerTitle = "TOKEN LEDGER · CACHE REPORT";
   const history = historyScopeLabel(snapshot);
   const headerMetadata = [periodLabel(bounds), bounds.timeZone, history]
@@ -228,16 +231,16 @@ function createCacheReportContext({
   const renderedHeaderMetadata = textWidth(headerMetadata, 14) <= contentRight - outer
     ? headerMetadata
     : truncateText(headerMetadata, contentRight - outer, 14);
-  const ratePlotTop = 320;
+  const ratePlotTop = 320 + headerOffset;
   const ratePlotHeight = 270;
   const ratePlotBottom = ratePlotTop + ratePlotHeight;
-  const volumeTop = 635;
+  const volumeTop = 635 + headerOffset;
   const volumeHeight = 55;
   const volumeBottom = volumeTop + volumeHeight;
-  const legendBaseline = 770;
-  const modelRuleY = 800;
-  const modelHeaderBaseline = 830;
-  const modelRowsTop = 858;
+  const legendBaseline = 770 + headerOffset;
+  const modelRuleY = 800 + headerOffset;
+  const modelHeaderBaseline = 830 + headerOffset;
+  const modelRowsTop = 858 + headerOffset;
   const modelRowHeight = 44;
   const modelRowCount = Math.max(1, models.length);
   const footerRuleY = modelRowsTop + modelRowCount * modelRowHeight + 28;
@@ -261,6 +264,8 @@ function createCacheReportContext({
     headerTitle,
     headerMetadata: renderedHeaderMetadata,
     headerMetadataFits,
+    sourceWarning,
+    headerOffset,
     sourceStatus,
     ratePlotTop,
     ratePlotHeight,
@@ -290,6 +295,8 @@ export function buildCacheHeaderSection(context) {
     headerTitle,
     headerMetadata,
     headerMetadataFits,
+    sourceWarning = null,
+    headerOffset = 0,
     sourceStatus,
   } = context;
   const elements = [
@@ -332,12 +339,23 @@ export function buildCacheHeaderSection(context) {
       spacing: ".72",
     }),
   ];
+  if (sourceWarning) {
+    elements.push(svgText({
+      x: outer,
+      y: 116,
+      value: sourceWarning,
+      fill: COLORS.weighted,
+      size: 12,
+      weight: 700,
+      spacing: ".72",
+    }));
+  }
   const summaryValue = Number.isFinite(data.rate)
     ? `${percent(data.rate)} cached`
     : "No measured input";
   elements.push(svgText({
     x: outer,
-    y: 135,
+    y: 135 + headerOffset,
     value: summaryValue,
     size: 29,
     weight: 800,
@@ -345,14 +363,14 @@ export function buildCacheHeaderSection(context) {
   }));
   elements.push(svgText({
     x: contentRight,
-    y: 133,
+    y: 133 + headerOffset,
     value: periodComparison(data.rate, prior.rate),
     fill: COLORS.secondary,
     size: 14,
     weight: 600,
     anchor: "end",
   }));
-  const railTop = 153;
+  const railTop = 153 + headerOffset;
   const railHeight = 52;
   const railWidth = contentRight - outer;
   elements.push(
@@ -398,7 +416,7 @@ export function buildCacheHeaderSection(context) {
   }
   elements.push(svgText({
     x: outer,
-    y: 230,
+    y: 230 + headerOffset,
     value: Number.isFinite(data.rate)
       ? `${compact(data.cachedInputTokens)} cached · ${compact(data.uncachedInputTokens)} uncached · ${compact(data.inputTokens)} total input`
       : "No events with a usable input-token breakdown in this range",
@@ -407,7 +425,7 @@ export function buildCacheHeaderSection(context) {
   }));
   elements.push(svgText({
     x: contentRight,
-    y: 230,
+    y: 230 + headerOffset,
     value: `${data.inputEventCount.toLocaleString("en-US")} measured input-bearing ${data.inputEventCount === 1 ? "call" : "calls"}`,
     fill: COLORS.muted,
     size: 13,
@@ -415,7 +433,7 @@ export function buildCacheHeaderSection(context) {
   }));
   elements.push(svgText({
     x: outer,
-    y: 283,
+    y: 283 + headerOffset,
     value: "CACHE RATE BY PERIOD",
     fill: COLORS.muted,
     size: 12,
@@ -423,7 +441,7 @@ export function buildCacheHeaderSection(context) {
   }));
   elements.push(svgText({
     x: contentRight,
-    y: 283,
+    y: 283 + headerOffset,
     value: "Rate bars are normalized to 100% · input volume below",
     fill: COLORS.muted,
     size: 12.5,
@@ -446,6 +464,7 @@ export function buildCacheRateSection(context) {
     volumeHeight,
     volumeBottom,
     legendBaseline,
+    headerOffset = 0,
   } = context;
   const elements = [];
   for (const value of [100, 75, 50, 25, 0]) {
@@ -532,7 +551,7 @@ export function buildCacheRateSection(context) {
       if (daily) {
         elements.push(svgText({
           x: centerX,
-          y: 718,
+          y: 718 + headerOffset,
           value: weekdayLabel(bin.startDateString),
           fill: COLORS.muted,
           size: 11.5,
@@ -542,7 +561,7 @@ export function buildCacheRateSection(context) {
       }
       elements.push(svgText({
         x: centerX,
-        y: daily ? 739 : 730,
+        y: (daily ? 739 : 730) + headerOffset,
         value: binDateLabel(bin),
         fill: COLORS.secondary,
         size: 13,

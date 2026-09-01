@@ -69,11 +69,12 @@ classified as a replacement rather than an append.
 A source scan with malformed JSON or an invalid token record is evidence-only:
 its coverage counters and source watermark are retained, but none of its token,
 quota, tool, position, ownership, origin, or thread operations can change the
-last complete durable interpretation. If that scan also detected a replacement,
-the source state records a pending reconciliation. The bit survives lifecycle
-moves, missing or tombstoned state, and truncation, then clears atomically only
-after a clean complete scan reconciles every source-owned membership and
-position.
+last complete durable interpretation. The affected file's usage is excluded
+from totals until it scans cleanly. To recover, fix or remove the malformed
+line, then refresh. If that scan also detected a replacement, the source state
+records a pending reconciliation. The bit survives lifecycle moves, missing or
+tombstoned state, and truncation, then clears atomically only after a clean
+complete scan reconciles every source-owned membership and position.
 
 Quota labels are stored separately as explicit, timestamped source evidence.
 Malformed quota scans cannot update that evidence. Missing or tombstoned

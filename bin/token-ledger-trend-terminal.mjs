@@ -21,6 +21,7 @@ import {
   snapshotFreshnessDetail,
   sourceStatusLine,
 } from "./token-ledger-source-status.mjs";
+import { incompleteSourceWarning } from "./token-ledger-terminal.mjs";
 
 export { chooseBinSize } from "./token-ledger-image-layout.mjs";
 import { historyScopeLabel } from "../lib/token-ledger-collection.mjs";
@@ -608,6 +609,7 @@ export function renderTrendCombo({
 
   const axisRows = [0, Math.floor(baseline / 2), baseline];
   const history = historyScopeLabel(snapshot);
+  const sourceWarning = incompleteSourceWarning(snapshot);
   const lines = [
     `┌${"─".repeat(frameWidth - 2)}┐`,
     frameLine(
@@ -644,6 +646,9 @@ export function renderTrendCombo({
     ),
     ...(history
       ? [frameLine(colorize(history, SECONDARY_STYLE, enabled), frameWidth)]
+      : []),
+    ...(sourceWarning
+      ? [frameLine(colorize(sourceWarning, SECONDARY_STYLE, enabled), frameWidth)]
       : []),
     `├${"─".repeat(frameWidth - 2)}┤`,
   ];

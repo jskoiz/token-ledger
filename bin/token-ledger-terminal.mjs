@@ -654,6 +654,43 @@ function provenanceLine(sourceStatus, enabled) {
   return colorize(sourceStatusLine(sourceStatus), SECONDARY_STYLE, enabled);
 }
 
+function positiveCoverageCount(value) {
+  try {
+    const count = Number(value);
+    return Number.isFinite(count) && count > 0 ? count : 0;
+  } catch {
+    return 0;
+  }
+}
+
+export function incompleteSourceWarning(snapshot = {}) {
+  const coverage = snapshot?.coverage ?? {};
+  const parseErrors = positiveCoverageCount(coverage.parseErrors);
+  const invalidTokenRecords = positiveCoverageCount(coverage.invalidTokenRecords);
+  if (
+    parseErrors <= 0 &&
+    invalidTokenRecords <= 0 &&
+    coverage.sourceIncomplete !== true
+  ) {
+    return null;
+  }
+  const details = [];
+  if (parseErrors > 0) {
+    details.push(
+      `${parseErrors.toLocaleString("en-US")} PARSE ERROR${parseErrors === 1 ? "" : "S"}`,
+    );
+  }
+  if (invalidTokenRecords > 0) {
+    details.push(
+      `${invalidTokenRecords.toLocaleString("en-US")} INVALID TOKEN RECORD${invalidTokenRecords === 1 ? "" : "S"}`,
+    );
+  }
+  if (coverage.sourceIncomplete === true) {
+    details.push("INCOMPLETE SOURCE PROVENANCE");
+  }
+  return ["SOURCES INCOMPLETE", ...details].join(" · ");
+}
+
 function headerLines(
   stats,
   bounds,
@@ -687,13 +724,19 @@ function headerLines(
   const appendHistory = (lines) => history
     ? [...lines, alignHeader(colorize(history, SECONDARY_STYLE, enabled))]
     : lines;
-  const appendSnapshotMetadata = (lines) => appendHistory([
-    ...lines,
-    ...(isRollingRange(options.range)
-      ? [alignHeader(snapshotLine(freshness, enabled))]
-      : []),
-    alignHeader(provenanceLine(sourceStatus, enabled)),
-  ]);
+  const appendSnapshotMetadata = (lines) => {
+    const metadata = appendHistory([
+      ...lines,
+      ...(isRollingRange(options.range)
+        ? [alignHeader(snapshotLine(freshness, enabled))]
+        : []),
+      alignHeader(provenanceLine(sourceStatus, enabled)),
+    ]);
+    const warning = incompleteSourceWarning(snapshot);
+    return warning
+      ? [...metadata, alignHeader(colorize(warning, SECONDARY_STYLE, enabled))]
+      : metadata;
+  };
   const fullLine = [
     left,
     date,

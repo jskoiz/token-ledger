@@ -34,6 +34,7 @@ import {
   durableQuotaObservationKey,
   normalizeQuotaObservationFields,
   readDurableLedger,
+  readDurableLedgerCacheState,
   readDurableLedgerRevision,
   resolveDurableLedgerPath,
   updateDurableLedger,
@@ -562,10 +563,7 @@ test("persisted quota key and scope mismatches fail closed without mutation", as
       (error) => error?.code === "ERR_DURABLE_LEDGER_QUOTA",
     );
     assert.deepEqual(await readFile(ledgerPath), before);
-    await assert.rejects(
-      () => readDurableLedgerRevision(ledgerPath),
-      (error) => error?.code === "ERR_DURABLE_LEDGER_QUOTA",
-    );
+    assert.equal(await readDurableLedgerRevision(ledgerPath), null);
     assert.deepEqual(await readFile(ledgerPath), before);
     await assert.rejects(
       () => collectUsage(options(fixture)),
@@ -584,6 +582,39 @@ test("persisted quota key and scope mismatches fail closed without mutation", as
       recovered.quotaObservations.map((quota) => quota.usedPercent),
       [37],
     );
+  } finally {
+    database?.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("malformed quota rows make cache state unavailable without losing the cache", async () => {
+  const fixture = await createFixture([100], { usedPercent: 37 });
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
+  let database;
+  try {
+    const snapshot = await collectUsage(options(fixture));
+    await writePrivateSnapshot(fixture.output, snapshot);
+    database = new DatabaseSync(ledgerPath);
+    database.prepare(
+      "UPDATE quota_observations SET scope = 'named'",
+    ).run();
+    database.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get();
+    database.close();
+    database = null;
+
+    assert.equal(await readDurableLedgerCacheState(ledgerPath), null);
+    const loaded = await loadSnapshot({
+      input: fixture.output,
+      codexHome: fixture.root,
+      includeArchived: true,
+      since: null,
+      refresh: false,
+      inputExplicit: false,
+      autoRefresh: false,
+    });
+    assert.equal(loaded.sourceStatus, "unchecked-cache");
+    assert.equal(totalTokens(loaded.snapshot), 100);
   } finally {
     database?.close();
     await rm(fixture.root, { recursive: true, force: true });
@@ -1906,9 +1937,10 @@ test("deferred replacement reconciles after a clean append", async () => {
     let ledger = await readDurableLedger(
       resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
-    assert.equal(totalTokens(uncertain), 250);
+    assert.equal(uncertain.coverage.parseErrors, 0);
+    assert.equal(totalTokens(uncertain), 200);
     assert.equal(ledger.sourceSummary.states[0].changeCount, 1);
-    assert.equal(ledger.sourceSummary.states[0].reconciliationPending, true);
+    assert.equal(ledger.sourceSummary.states[0].reconciliationPending, false);
 
     await appendFile(fixture.file, `completed"}}\n`);
     const recovered = await collectUsage(options(fixture));
@@ -2328,6 +2360,154 @@ test("replacement and truncation reconcile without double counting", async () =>
     assert.equal(truncated.coverage.sourceStates.changed, 1);
     assert.equal(ledger.sourceSummary.states[0].changeState, "truncated");
   } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("same-inode rewrite with a non-original turn replaces positional usage", async () => {
+  const fixture = await createFixture([100]);
+  const replacementTimestamp = "2026-08-20T10:00:00.000Z";
+  const replacementRows = [
+    ...turnStart(replacementTimestamp, "turn-2"),
+    tokenCount("2026-08-20T10:00:01.000Z", 200),
+  ];
+  replacementRows[0].payload.started_at =
+    Date.parse("2026-08-19T10:00:00.000Z") / 1_000;
+  try {
+    const first = await collectUsage(options(fixture));
+    const before = await stat(fixture.file);
+    await writeFile(fixture.file, serialize(replacementRows));
+    const after = await stat(fixture.file);
+    const replaced = await collectUsage(options(fixture));
+    const replacedLedger = await readDurableLedger(
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
+    );
+    const unchanged = await collectUsage(options(fixture));
+    const ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
+    );
+    const exactRows = ledger.usageRows.filter(
+      (row) => row.identityKind === "exact",
+    );
+
+    assert.equal(totalTokens(first), 100);
+    assert.equal(before.ino, after.ino);
+    assert.equal(totalTokens(replaced), 200);
+    assert.equal(totalTokens(unchanged), 200);
+    assert.equal(exactRows.length, 1);
+    assert.equal(exactRows[0].turnId, "turn-2");
+    assert.equal(exactRows[0].totalTokens, 200);
+    assert.equal(replacedLedger.sourceSummary.states[0].changeState, "replaced");
+    assert.equal(ledger.sourceSummary.states[0].changeState, "stable");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("split after salted allocation keeps memberships and positions aligned", async () => {
+  const fixture = await createFixture([100]);
+  const oldSource = resolve(
+    dirname(fixture.file),
+    SHARED_ROLLOUT_NAME,
+  );
+  const rescanSource = resolve(
+    dirname(fixture.file),
+    "rollout-dddddddd-dddd-4ddd-8ddd-dddddddddddd.jsonl",
+  );
+  const replacementRows = [
+    ...turnStart(BASE_TIMESTAMP, "turn-2"),
+    tokenCount("2026-08-20T10:00:01.000Z", 200),
+  ];
+  replacementRows[0].payload.started_at =
+    Date.parse("2026-08-19T10:00:00.000Z") / 1_000;
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
+  let database;
+  try {
+    // First establish an exact row for B, then repurpose its identity for C.
+    await collectUsage(options(fixture));
+    await writeFile(fixture.file, serialize(replacementRows));
+    await collectUsage(options(fixture));
+
+    // B's old copy is compacted while C retains the unsalted exact identity.
+    await writeFile(
+      oldSource,
+      serialize(rolloutRows([100], {
+        baseTimestamp: "2015-08-20T10:00:00.000Z",
+      })),
+    );
+    await collectUsage(options(fixture));
+
+    database = new DatabaseSync(ledgerPath, { readOnly: true });
+    const membership = database.prepare(`
+      SELECT event_key AS eventKey
+        FROM usage_compaction_membership
+       LIMIT 1
+    `).get();
+    assert.ok(membership?.eventKey);
+    const eventKeyB = String(membership.eventKey);
+    const foreign = database.prepare(`
+      SELECT observation_id AS observationId, event_key AS eventKey
+        FROM usage_observations
+       WHERE identity_kind = 'exact' AND turn_id = 'turn-2'
+       LIMIT 1
+    `).get();
+    assert.ok(foreign?.observationId);
+    const unsaltedId = `exact-${stableHash(eventKeyB)}`;
+    assert.equal(foreign.observationId, unsaltedId);
+    assert.notEqual(foreign.eventKey, eventKeyB);
+    database.close();
+    database = null;
+
+    // A current B copy splits out of the compacted row. The split must retain
+    // the salted exact identity because C occupies B's unsalted candidate.
+    await writeFile(rescanSource, serialize(rolloutRows([100])));
+    await collectUsage(options(fixture));
+
+    database = new DatabaseSync(ledgerPath, { readOnly: true });
+    const saltedId = `exact-${stableHash(JSON.stringify([eventKeyB, 1]))}`;
+    const exactB = database.prepare(`
+      SELECT observation_id AS observationId, event_key AS eventKey,
+             identity_kind AS identityKind
+        FROM usage_observations
+       WHERE event_key = ?
+    `).get(eventKeyB);
+    const exactForeign = database.prepare(`
+      SELECT observation_id AS observationId, event_key AS eventKey
+        FROM usage_observations
+       WHERE observation_id = ?
+    `).get(unsaltedId);
+    const bPositions = database.prepare(`
+      SELECT COUNT(*) AS count
+        FROM source_event_positions
+       WHERE event_key = ? AND observation_id = ?
+    `).get(eventKeyB, saltedId);
+    const foreignPositions = database.prepare(`
+      SELECT COUNT(*) AS count
+        FROM source_event_positions
+       WHERE event_key = ? AND observation_id = ?
+    `).get(eventKeyB, unsaltedId);
+    const bSources = database.prepare(`
+      SELECT COUNT(*) AS count
+        FROM usage_sources
+       WHERE observation_id = ?
+    `).get(saltedId);
+    const compactedMemberships = database.prepare(`
+      SELECT COUNT(*) AS count
+        FROM usage_compaction_membership
+       WHERE event_key = ?
+    `).get(eventKeyB);
+
+    assert.equal(exactB?.observationId, saltedId);
+    assert.equal(exactB?.eventKey, eventKeyB);
+    assert.equal(exactB?.identityKind, "exact");
+    assert.equal(exactForeign?.observationId, unsaltedId);
+    assert.equal(exactForeign?.eventKey, foreign.eventKey);
+    assert.equal(Number(bPositions.count), 2);
+    assert.equal(Number(foreignPositions.count), 0);
+    assert.equal(Number(bSources.count), 2);
+    assert.equal(Number(compactedMemberships.count), 0);
+  } finally {
+    database?.close();
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
@@ -4894,6 +5074,109 @@ test("active-only migration does not subtract unrelated archived exact usage", a
       200,
     );
   } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("active-only legacy migration keeps subtracting after the rollout is archived", async () => {
+  const fixture = await createFixture([40]);
+  const archivedFile = resolve(
+    fixture.root,
+    "archived_sessions",
+    "2026",
+    "08",
+    "20",
+    ROLLOUT_NAME,
+  );
+  const eventTimestamp = "2026-08-20T10:00:01.000Z";
+  const legacy = legacySnapshotForFixture(fixture, {
+    schemaVersion: 3,
+    generatedAt: "2026-08-20T12:00:00.000Z",
+    provenance: {
+      collection: { since: null, includeArchived: false },
+    },
+    events: [{
+      timestamp: eventTimestamp,
+      startAt: eventTimestamp,
+      endAt: eventTimestamp,
+      project: "Unknown project",
+      model: "gpt-5.4",
+      rateCardModel: "gpt-5.4",
+      effort: "medium",
+      source: "unknown",
+      useType: "unknown",
+      inputTokens: 30,
+      cachedInputTokens: 10,
+      outputTokens: 10,
+      reasoningTokens: 4,
+      totalTokens: 40,
+      toolCalls: 0,
+      callCount: 1,
+      detailedCallCount: 1,
+      inputCallCount: 1,
+      breakdownAvailable: true,
+      threadIds: [THREAD_ID],
+    }],
+  });
+  try {
+    await writePrivateSnapshot(fixture.output, legacy);
+    const initial = await collectUsage(options(fixture, {
+      includeArchived: false,
+    }));
+    assert.equal(totalTokens(initial), 40);
+
+    await mkdir(dirname(archivedFile), { recursive: true });
+    await rename(fixture.file, archivedFile);
+    const archived = await collectUsage(options(fixture));
+    const archivedLedger = await readDurableLedger(
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
+    );
+    const archivedMigrated = archivedLedger.usageRows.filter(
+      (row) => row.identityKind === "migrated_compacted",
+    );
+    const activeOnly = await collectUsage(options(fixture, {
+      includeArchived: false,
+    }));
+
+    assert.equal(totalTokens(archived), 40);
+    assert.equal(totalTokens(activeOnly), 0);
+    assert.ok(archivedMigrated.every((row) => row.totalTokens === 0));
+    assert.equal(
+      archivedLedger.sourceSummary.states[0].firstSeenLocation,
+      "active",
+    );
+    assert.equal(archivedLedger.sourceSummary.states[0].location, "archived");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("pre-fix source schema adds and backfills first-seen location", async () => {
+  const fixture = await createFixture([100]);
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
+  let database;
+  try {
+    await collectUsage(options(fixture));
+    database = new DatabaseSync(ledgerPath);
+    database.exec("ALTER TABLE source_state DROP COLUMN first_seen_location");
+    database.close();
+    database = null;
+
+    await collectUsage(options(fixture));
+
+    database = new DatabaseSync(ledgerPath, { readOnly: true });
+    const columns = new Set(database.prepare(
+      "PRAGMA table_info(source_state)",
+    ).all().map((column) => String(column.name)));
+    const source = database.prepare(`
+      SELECT first_seen_location AS firstSeenLocation
+        FROM source_state
+       LIMIT 1
+    `).get();
+    assert.equal(columns.has("first_seen_location"), true);
+    assert.equal(source.firstSeenLocation, "active");
+  } finally {
+    database?.close();
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
