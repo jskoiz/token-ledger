@@ -2275,6 +2275,31 @@ test("unchanged and appended sources add each logical event once", async () => {
   }
 });
 
+test("unchanged rollouts rescan when state-backed metadata changes", async () => {
+  const fixture = await createFixture([100]);
+  const state = new DatabaseSync(resolve(fixture.root, "state_5.sqlite"));
+  try {
+    state.exec(
+      "CREATE TABLE threads (id TEXT PRIMARY KEY, cwd TEXT, updated_at INTEGER)",
+    );
+    state.prepare("INSERT INTO threads (id, cwd, updated_at) VALUES (?, ?, ?)")
+      .run(THREAD_ID, "/projects/old-project", Date.now());
+
+    const first = await collectUsage(options(fixture));
+    state.prepare("UPDATE threads SET cwd = ?, updated_at = ? WHERE id = ?")
+      .run("/projects/new-project", Date.now() + 1_000, THREAD_ID);
+    const refreshed = await collectUsage(options(fixture));
+
+    assert.equal(first.events[0].project, "old-project");
+    assert.equal(refreshed.events[0].project, "new-project");
+    assert.equal(refreshed.coverage.filesScanned, 1);
+    assert.equal(refreshed.coverage.filesReused, 0);
+  } finally {
+    state.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("replacement and truncation reconcile without double counting", async () => {
   const fixture = await createFixture([100, 200]);
   try {
