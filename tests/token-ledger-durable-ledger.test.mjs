@@ -2510,7 +2510,7 @@ test("unchanged rollouts rescan when a session-index title has no timestamp", as
   }
 });
 
-test("unchanged rollout paths without UUIDs are rescanned for enrichment", async () => {
+test("metadata changes rescan rollout paths without UUIDs", async () => {
   const fixture = await createFixture([100]);
   const nonUuidFile = resolve(
     dirname(fixture.file),
@@ -2519,11 +2519,15 @@ test("unchanged rollout paths without UUIDs are rescanned for enrichment", async
   try {
     await rename(fixture.file, nonUuidFile);
     const first = await collectUsage(options(fixture));
-    const unchanged = await collectUsage(options(fixture));
+    await writeFile(
+      resolve(fixture.root, "session_index.jsonl"),
+      serialize([{ id: THREAD_ID, thread_name: "Metadata changed" }]),
+    );
+    const refreshed = await collectUsage(options(fixture));
 
     assert.equal(first.coverage.filesScanned, 1);
-    assert.equal(unchanged.coverage.filesScanned, 1);
-    assert.equal(unchanged.coverage.filesReused, 0);
+    assert.equal(refreshed.coverage.filesScanned, 1);
+    assert.equal(refreshed.coverage.filesReused, 0);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
