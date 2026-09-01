@@ -20,8 +20,9 @@ import {
   localDateString,
   shiftCalendarDate,
 } from "../lib/token-ledger-calendar.mjs";
+import { SOURCE_STATUSES } from "./token-ledger-source-status.mjs";
 
-export { shiftCalendarDate };
+export { shiftCalendarDate, SOURCE_STATUSES };
 
 const DAY_MS = 86_400_000;
 // Two readings this close in percent confirm a flat reported interval.
@@ -30,13 +31,6 @@ const METER_EQUAL_TOLERANCE = 0.05;
 const METER_EXHAUSTED_TOLERANCE = 0.05;
 const RECONCILE_RELATIVE_TOLERANCE = 1e-6;
 const RECONCILE_ABSOLUTE_TOLERANCE = 1.5;
-
-export const SOURCE_STATUSES = [
-  "verified-current",
-  "explicit-snapshot",
-  "unchecked-cache",
-  "stale-fallback",
-];
 
 // Fast mode is an overlapping usage property, not a separate model. Both
 // recognized service-tier labels count.
@@ -47,6 +41,15 @@ export function isFastMode(serviceTier) {
 function finiteTimestamp(value) {
   const timestamp = new Date(value).getTime();
   return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function primitiveString(value) {
+  try {
+    const text = String.prototype.valueOf.call(value);
+    return text === value ? text : null;
+  } catch {
+    return null;
+  }
 }
 
 function dateStringFromParts(year, month, day) {
@@ -139,14 +142,17 @@ export function resolveEffectiveEnd({
   const startMs = bounds.start.getTime();
   const endMs = bounds.end.getTime();
   const generatedAtMs = finiteTimestamp(snapshot.generatedAt);
+  const sourceCutoffAtMs = finiteTimestamp(
+    snapshot.provenance?.sourceCutoffAt,
+  );
   const wallClockMs = Number.isFinite(reportTimeMs) ? reportTimeMs : endMs;
   // The capture-time cutoff is inclusive: an event stamped exactly at
   // generatedAt was part of the capture.
   const cutoff = sourceStatus === "verified-current"
     ? wallClockMs
-    : generatedAtMs === null
+    : (sourceCutoffAtMs ?? generatedAtMs) === null
       ? wallClockMs
-      : generatedAtMs + 1;
+      : (sourceCutoffAtMs ?? generatedAtMs) + 1;
   return Math.max(startMs, Math.min(endMs, cutoff));
 }
 
@@ -177,6 +183,7 @@ function modelRowFor(map, model) {
     cacheInputTokens: 0,
     cachedInputTokens: 0,
     uncachedInputTokens: 0,
+    estimated: false,
   };
   map.set(model, row);
   return row;
@@ -188,9 +195,9 @@ function buildMeter({ snapshot, bounds, effectiveEndMs, sourceStatus, events }) 
   // A named per-model pool is a different meter; if only named observations
   // exist, the account-wide weekly limit is unobserved, not substituted.
   const selected = weeklyQuotaObservations(snapshot);
-  const accountWide = selected.some((observation) => !observation.limitName)
-    ? selected
-    : [];
+  const accountWide = selected.filter(
+    (observation) => observation.scope === "account",
+  );
   const observationsAll = normalizeQuotaTimeline(accountWide).filter(
     (observation) => observation.timestampMs < effectiveEndMs,
   );
@@ -455,6 +462,7 @@ export function buildTrendReportViewModel({
   ).getTime();
   let priorEquivalentTokens = 0;
   let priorHasEvents = false;
+  let priorEquivalentEstimated = false;
 
   const models = new Map();
   let totalTokens = 0;
@@ -489,6 +497,8 @@ export function buildTrendReportViewModel({
     if (timestampMs >= priorStartMs && timestampMs < priorEndMs) {
       priorEquivalentTokens += tokens;
       priorHasEvents = true;
+      priorEquivalentEstimated ||=
+        tokens > 0 && event.rangeAllocationEstimated === true;
     }
   }
   for (const event of currentEvents) {
@@ -505,6 +515,7 @@ export function buildTrendReportViewModel({
     const cached = usable
       ? Math.min(input, scaledTokens(event.cachedInputTokens))
       : 0;
+    const estimated = tokens > 0 && event.rangeAllocationEstimated === true;
 
     boundedEvents.push({ timestampMs, tokens, model, fast, event });
     totalTokens += tokens;
@@ -524,6 +535,7 @@ export function buildTrendReportViewModel({
     else modelRow.normalTokens += tokens;
     modelRow.cacheInputTokens += input;
     modelRow.cachedInputTokens += cached;
+    modelRow.estimated ||= estimated;
 
     const dayRow = daily[dayIndexByString.get(localDateString(timestampMs, timeZone)) ?? -1];
     if (dayRow) {
@@ -532,15 +544,18 @@ export function buildTrendReportViewModel({
       dayRow.outputTokens += output;
       dayRow.cachedInputTokens += cached;
       dayRow.modelCalls += 1;
+      dayRow.estimated ||= estimated;
       const dayModel = dayRow.models.get(model) ?? {
         model,
         totalTokens: 0,
         normalTokens: 0,
         fastTokens: 0,
+        estimated: false,
       };
       dayModel.totalTokens += tokens;
       if (fast) dayModel.fastTokens += tokens;
       else dayModel.normalTokens += tokens;
+      dayModel.estimated ||= estimated;
       dayRow.models.set(model, dayModel);
     }
   }
@@ -584,6 +599,7 @@ export function buildTrendReportViewModel({
       project: row.project,
       displayProject: row.displayProject ?? row.project,
       totalTokens: Math.max(0, Number(row.totalTokens) || 0),
+      estimated: row.estimated === true,
     }));
   } else {
     const projectTotals = new Map();
@@ -594,13 +610,20 @@ export function buildTrendReportViewModel({
           .replace(/[\t\r\n]+/g, " ")
           .replace(/\s+/g, " ")
           .trim() || "Unlabelled activity";
-      projectTotals.set(project, (projectTotals.get(project) ?? 0) + tokens);
+      const row = projectTotals.get(project) ?? {
+        totalTokens: 0,
+        estimated: false,
+      };
+      row.totalTokens += tokens;
+      row.estimated ||= event.rangeAllocationEstimated === true;
+      projectTotals.set(project, row);
     }
     allProjectRows = [...projectTotals.entries()].map(
-      ([project, tokens]) => ({
+      ([project, row]) => ({
         project,
         displayProject: project,
-        totalTokens: tokens,
+        totalTokens: row.totalTokens,
+        estimated: row.estimated,
       }),
     );
   }
@@ -622,6 +645,7 @@ export function buildTrendReportViewModel({
     count: remainderRows.length,
     totalTokens: remainderTokens,
     sharePercent: totalTokens > 0 ? (remainderTokens / totalTokens) * 100 : 0,
+    estimated: remainderRows.some((row) => row.estimated),
   };
   const topThreeProjectTokens = topProjects.reduce(
     (sum, row) => sum + row.totalTokens,
@@ -641,6 +665,22 @@ export function buildTrendReportViewModel({
     priorHasEvents && priorEquivalentTokens > 0 && durationMs > 0
       ? (totalTokens / priorEquivalentTokens - 1) * 100
       : null;
+  const estimated = daily.some((row) => row.estimated);
+  const rawLegacySnapshotStatus = snapshot.coverage?.legacySnapshotStatus ??
+    snapshot.metadata?.durableLedger?.legacySnapshotStatus;
+  const legacySnapshotStatus = primitiveString(rawLegacySnapshotStatus);
+  const maximumEstimatedResolutionSeconds = boundedEvents.reduce(
+    (maximum, { tokens, event }) => {
+      if (!(tokens > 0) || event.rangeAllocationEstimated !== true) {
+        return maximum;
+      }
+      const resolutionSeconds = Number(event.resolutionSeconds);
+      return Number.isFinite(resolutionSeconds) && resolutionSeconds > 0
+        ? Math.max(maximum, resolutionSeconds)
+        : maximum;
+    },
+    0,
+  );
 
   const snapshotGeneratedAtMs = finiteTimestamp(snapshot.generatedAt);
   const viewModel = {
@@ -661,8 +701,13 @@ export function buildTrendReportViewModel({
     },
     summary: {
       totalTokens,
+      estimated,
       priorEquivalentTokens: priorHasEvents ? priorEquivalentTokens : null,
+      priorEquivalentEstimated:
+        priorHasEvents && priorEquivalentEstimated,
       totalDeltaPercent,
+      totalDeltaEstimated:
+        totalDeltaPercent !== null && (estimated || priorEquivalentEstimated),
       inputTokens,
       outputTokens,
       cachedInputTokens,
@@ -670,6 +715,10 @@ export function buildTrendReportViewModel({
       cacheRatePercent:
         inputTokens > 0 ? (cachedInputTokens / inputTokens) * 100 : null,
       fastTokens,
+      fastEstimated: boundedEvents.some(
+        ({ fast, tokens, event }) =>
+          fast && tokens > 0 && event.rangeAllocationEstimated === true,
+      ),
       fastSharePercent: totalTokens > 0 ? (fastTokens / totalTokens) * 100 : null,
       activeProjects: allProjectRows.length,
       topThreeProjectTokens,
@@ -688,9 +737,19 @@ export function buildTrendReportViewModel({
       componentCoveragePercent:
         totalTokens > 0 ? (detailedTokens / totalTokens) * 100 : 100,
       parseErrors: Math.max(0, Number(snapshot.coverage?.parseErrors) || 0),
-      estimated: daily.some((row) => row.estimated),
+      invalidTokenRecords: Math.max(
+        0,
+        Number(snapshot.coverage?.invalidTokenRecords) || 0,
+      ),
+      invalidQuotaRecords: Math.max(
+        0,
+        Number(snapshot.coverage?.invalidQuotaRecords) || 0,
+      ),
+      sourceIncomplete: snapshot.coverage?.sourceIncomplete === true,
+      estimated,
       estimatedBucketCount: daily.filter((row) => row.estimated).length,
-      maximumResolutionSeconds: null,
+      maximumResolutionSeconds: maximumEstimatedResolutionSeconds || null,
+      legacySnapshotStatus,
     },
     provenance: {
       localOnly: (snapshot.provenance?.kind ?? "codex-local-metadata") ===

@@ -20,12 +20,15 @@ import {
   priorPeriodBounds,
 } from "./token-ledger-trend.mjs";
 import {
-  buildTrendReportViewModel,
   resolveEffectiveEnd,
 } from "./token-ledger-report-data.mjs";
 import { renderTrendCombo } from "./token-ledger-trend-terminal.mjs";
 import { renderCostTerminal } from "./token-ledger-cost-terminal.mjs";
 import { startInteractive } from "./token-ledger-tui.mjs";
+import {
+  snapshotFreshnessDetail,
+  sourceStatusLine,
+} from "./token-ledger-source-status.mjs";
 import {
   createTimeZoneFormatter,
   formatCalendarDate,
@@ -36,7 +39,7 @@ import {
 } from "../lib/token-ledger-calendar.mjs";
 import {
   readPrivateSnapshot,
-  writePrivateSnapshot,
+  stagePrivateSnapshot,
 } from "../lib/token-ledger-snapshot.mjs";
 import {
   collectionScope,
@@ -60,6 +63,10 @@ import {
 } from "../lib/token-ledger-usage.mjs";
 import { calculateCodexPurchasedCredits } from "../lib/token-ledger-rates.mjs";
 import { sanitizeTerminalText } from "../lib/token-ledger-terminal-text.mjs";
+import {
+  QUOTA_IDENTITY_CONTRACT_VERSION,
+  snapshotHasCurrentQuotaIdentityContract,
+} from "../lib/token-ledger-quota-contract.mjs";
 
 export { sanitizeTerminalText };
 
@@ -197,7 +204,8 @@ Help:
   -h, --help                Show the quick guide
   --help-all                Show this complete reference
 
-The default snapshot is ~/.token-ledger/token-ledger-snapshot-v3.json.gz.
+The default snapshot is ~/.token-ledger/token-ledger-snapshot-v3.json.gz and
+the durable ledger is ~/.token-ledger/token-ledger-ledger.sqlite.
 Token Ledger reads local Codex data only. It does not upload your usage.`;
 }
 
@@ -706,6 +714,8 @@ export function aggregateProjects(snapshot, events, options = {}, analysis = nul
   for (const event of events) {
     if (event?.invalidTokenRecord === true) continue;
     const allowFractional = event?.rangeAllocationEstimated === true;
+    const totalTokens = tokenValue(event.totalTokens, { allowFractional });
+    const estimatedTokenContribution = allowFractional && totalTokens > 0;
     const rawProject = cleanLabel(event.project, "Unlabelled activity");
     const project =
       !options.rawProjects && singletonProjects.has(rawProject)
@@ -724,7 +734,9 @@ export function aggregateProjects(snapshot, events, options = {}, analysis = nul
         rateCardCredits: 0,
         knownCreditTokens: 0,
         models: new Map(),
+        estimated: false,
       };
+    row.estimated ||= estimatedTokenContribution;
     row.outputTokens = checkedTokenAdd(
       row.outputTokens,
       tokenValue(event.outputTokens, { allowFractional }),
@@ -760,10 +772,12 @@ export function aggregateProjects(snapshot, events, options = {}, analysis = nul
       totalTokens: 0,
       events: 0,
       rateCardCredits: 0,
+      estimated: false,
     };
+    modelRow.estimated ||= estimatedTokenContribution;
     addSharedTokenContribution(
       sharedTokenScale,
-      tokenValue(event.totalTokens, { allowFractional }),
+      totalTokens,
       [row, modelRow],
     );
     modelRow.events = checkedTokenAdd(modelRow.events, usageCallCount(event), {
@@ -1018,6 +1032,46 @@ function snapshotScopeError(snapshot, options) {
   );
 }
 
+async function snapshotAllowsStaleFallback(snapshot, options) {
+  if (!snapshotMatchesCollectionScope(snapshot, collectionScope(options))) {
+    return false;
+  }
+  const { codexHomeFingerprint } = await import(
+    "../lib/token-ledger-ledger.mjs"
+  );
+  return primitiveString(
+    snapshot.metadata?.durableLedger?.codexHomeFingerprint,
+  ) === codexHomeFingerprint(options.codexHome);
+}
+
+function snapshotWithUnavailableUntrustedQuota(snapshot, force = false) {
+  if (!force && snapshotHasCurrentQuotaIdentityContract(snapshot)) return snapshot;
+  return {
+    ...snapshot,
+    coverage: {
+      ...snapshot.coverage,
+      quotaMeterUnavailableReason: "quota-contract-unverified",
+    },
+    quotaObservations: [],
+  };
+}
+
+async function snapshotAndLedgerHaveCurrentQuotaContract(snapshot, options) {
+  if (!snapshotHasCurrentQuotaIdentityContract(snapshot)) return false;
+  const {
+    readDurableLedgerCacheState,
+    resolveDurableLedgerPath,
+  } = await import("../lib/token-ledger-ledger.mjs");
+  const ledgerState = await readDurableLedgerCacheState(
+    resolveDurableLedgerPath({
+      codexHome: options.codexHome,
+      output: options.input,
+    }),
+  );
+  return ledgerState?.quotaIdentityContract ===
+    QUOTA_IDENTITY_CONTRACT_VERSION;
+}
+
 async function refreshSnapshot(options) {
   if (!existsSync(options.codexHome)) {
     throw new Error(
@@ -1026,25 +1080,42 @@ async function refreshSnapshot(options) {
   }
   let progressStarted = false;
   try {
-    const { collectUsage } = await import(
+    const {
+      collectUsage,
+      sourceInventory,
+      sourceWatermarksEqual,
+    } = await import(
       "../lib/token-ledger-importer.mjs"
     );
     process.stderr.write("Token Ledger: refreshing local snapshot…\n");
     progressStarted = true;
+    let writeResult = null;
     const snapshot = await collectUsage(
       {
         output: options.input,
         codexHome: options.codexHome,
         includeArchived: options.includeArchived,
         since: options.since,
+        stageSnapshot: async (candidate) => {
+          writeResult = await stagePrivateSnapshot(
+            options.input,
+            candidate,
+            options.snapshotWriteOptions,
+          );
+          return writeResult;
+        },
       },
       ({ current, total }) => {
         process.stderr.write(`\rToken Ledger: scanned ${current}/${total} rollout files`);
       },
     );
     process.stderr.write("\n");
-    const writeResult = await writePrivateSnapshot(options.input, snapshot);
-    const storedSnapshot = writeResult.snapshot;
+    const storedSnapshot = snapshot;
+    if (storedSnapshot.coverage.filesReused > 0) {
+      process.stderr.write(
+        `Token Ledger: reused ${storedSnapshot.coverage.filesReused.toLocaleString()} unchanged rollout files from the durable ledger.\n`,
+      );
+    }
     process.stderr.write(
       `Token Ledger: cached ${(writeResult.bytesWritten / 1_000_000).toFixed(1)} MB ${writeResult.encoding} snapshot (${(writeResult.jsonBytes / 1_000_000).toFixed(1)} MB JSON before encoding; ${storedSnapshot.events.length.toLocaleString()} buckets for ${storedSnapshot.coverage.observedModelCalls.toLocaleString()} calls; ${(writeResult.maxBytes / 1_000_000).toFixed(1)} MB limit).\n`,
     );
@@ -1053,26 +1124,162 @@ async function refreshSnapshot(options) {
         "Token Ledger: snapshot is above 70% of its safety limit; older buckets will compact automatically as it grows.\n",
       );
     }
-    return storedSnapshot;
+    let sourceStatus = "unchecked-cache";
+    try {
+      const currentInventory = await sourceInventory(
+        options.codexHome,
+        options.includeArchived,
+      );
+      sourceStatus = refreshedSnapshotSourceStatus(
+        storedSnapshot.sourceWatermark,
+        currentInventory.watermark,
+        sourceWatermarksEqual,
+      );
+    } catch (error) {
+      if (!postRefreshStatusAllowsUnchecked(error)) throw error;
+    }
+    return {
+      snapshot: storedSnapshot,
+      sourceStatus,
+    };
   } catch (error) {
     if (progressStarted) process.stderr.write("\n");
     if (error?.code === "ERR_SNAPSHOT_SIZE_LIMIT" && existsSync(options.input)) {
       try {
         const previous = await readSnapshot(options.input);
-        if (snapshotScopeMatchesOptions(previous, options)) {
+        if (await snapshotAllowsStaleFallback(previous, options)) {
+          const quotaContractTrusted =
+            await snapshotAndLedgerHaveCurrentQuotaContract(
+              previous,
+              options,
+            );
           process.stderr.write(
             "Token Ledger: refresh exceeded the safety limit; continuing with the previous cache, which may be stale.\n",
           );
-          return previous;
+          return {
+            snapshot: snapshotWithUnavailableUntrustedQuota(
+              previous,
+              !quotaContractTrusted,
+            ),
+            sourceStatus: "stale-fallback",
+          };
         }
       } catch {
         // Preserve the original refresh error when the previous cache cannot
-        // prove that it has the requested collection scope.
+        // prove its exact collection scope and Codex-home identity.
       }
     }
-    throw new Error(
+    const wrapped = new Error(
       `Could not refresh local snapshot: ${safeErrorMessage(error, [options.input, options.codexHome])}`,
+      { cause: error },
     );
+    wrapped.code = error?.code;
+    throw wrapped;
+  }
+}
+
+export function refreshedSnapshotSourceStatus(
+  snapshotWatermark,
+  currentWatermark,
+  watermarksEqual,
+) {
+  return watermarksEqual(snapshotWatermark, currentWatermark)
+    ? "verified-current"
+    : "unchecked-cache";
+}
+
+export function postRefreshStatusAllowsUnchecked(error) {
+  return ["ENOENT", "ENOTDIR"].includes(primitiveString(error?.code));
+}
+
+const RECOVERABLE_REFRESH_ERROR_CODES = new Set([
+  "ERR_SNAPSHOT_SIZE_LIMIT",
+  "ERR_SOURCE_CHANGED_DURING_COLLECTION",
+  "SQLITE_BUSY",
+  "SQLITE_LOCKED",
+]);
+const RECOVERABLE_SQLITE_ERROR_CODES = new Set([5, 6]);
+const RECOVERABLE_SQLITE_ERROR_NAMES = new Set([
+  "SQLITE_BUSY",
+  "SQLITE_LOCKED",
+]);
+const HARD_SQLITE_ERROR_CODES = new Set([11, 26]);
+const HARD_SQLITE_ERROR_NAMES = new Set([
+  "SQLITE_CORRUPT",
+  "SQLITE_NOTADB",
+]);
+
+export function refreshFailureAllowsStaleFallback(error) {
+  const seen = new Set();
+  let recoverable = false;
+  let current = error;
+  while (current instanceof Error) {
+    if (seen.has(current)) return false;
+    seen.add(current);
+    const code = primitiveString(current.code);
+    if (RECOVERABLE_REFRESH_ERROR_CODES.has(code)) recoverable = true;
+    if (
+      code?.startsWith("ERR_DURABLE_LEDGER_") ||
+      (
+        code?.startsWith("ERR_SNAPSHOT_") &&
+        code !== "ERR_SNAPSHOT_SIZE_LIMIT"
+      ) ||
+      code === "ERR_BUFFER_TOO_LARGE" ||
+      HARD_SQLITE_ERROR_NAMES.has(code)
+    ) {
+      return false;
+    }
+    if (code === "ERR_SQLITE_ERROR") {
+      if (RECOVERABLE_SQLITE_ERROR_CODES.has(Number(current.errcode))) {
+        recoverable = true;
+      }
+      if (HARD_SQLITE_ERROR_CODES.has(Number(current.errcode))) {
+        return false;
+      }
+      const name = primitiveString(current.errstr)?.toUpperCase();
+      if (RECOVERABLE_SQLITE_ERROR_NAMES.has(name)) recoverable = true;
+      if (HARD_SQLITE_ERROR_NAMES.has(name)) return false;
+    }
+    current = current.cause;
+  }
+  return recoverable;
+}
+
+async function refreshSnapshotOrUseStaleFallback(
+  options,
+  cached,
+  { quotaContractTrusted = true } = {},
+) {
+  try {
+    const refreshed = await refreshSnapshot(options);
+    if (
+      refreshed.sourceStatus === "stale-fallback" &&
+      !quotaContractTrusted
+    ) {
+      return {
+        ...refreshed,
+        snapshot: snapshotWithUnavailableUntrustedQuota(
+          refreshed.snapshot,
+          true,
+        ),
+      };
+    }
+    return refreshed;
+  } catch (error) {
+    // Default to surfacing refresh failures. Only bounded cache growth, source
+    // races, and SQLite lock contention are safe reasons to reuse known-good
+    // cached data; migration, schema, corruption, and unknown failures are not.
+    if (
+      !refreshFailureAllowsStaleFallback(error) ||
+      !(await snapshotAllowsStaleFallback(cached, options))
+    ) throw error;
+    return {
+      snapshot: snapshotWithUnavailableUntrustedQuota(
+        cached,
+        !quotaContractTrusted,
+      ),
+      sourceStatus: "stale-fallback",
+    };
   }
 }
 
@@ -1135,10 +1342,7 @@ export function snapshotFreshness(snapshot = {}, nowMs = Date.now()) {
 // this status separate from the age label shown in terminal output.
 export async function loadSnapshot(options) {
   if (options.refresh) {
-    return {
-      snapshot: await refreshSnapshot(options),
-      sourceStatus: "verified-current",
-    };
+    return refreshSnapshot(options);
   }
   if (!existsSync(options.input)) {
     if (options.inputExplicit || !options.autoRefresh) {
@@ -1146,20 +1350,14 @@ export async function loadSnapshot(options) {
         `Snapshot not found: ${safeDisplayLabel(options.input, "snapshot")}`,
       );
     }
-    return {
-      snapshot: await refreshSnapshot(options),
-      sourceStatus: "verified-current",
-    };
+    return refreshSnapshot(options);
   }
   const cached = await readSnapshot(options.input);
   if (!snapshotScopeMatchesOptions(cached, options)) {
     if (options.inputExplicit || !options.autoRefresh) {
       throw snapshotScopeError(cached, options);
     }
-    return {
-      snapshot: await refreshSnapshot(options),
-      sourceStatus: "verified-current",
-    };
+    return refreshSnapshot(options);
   }
 
   if (options.inputExplicit) {
@@ -1187,15 +1385,48 @@ export async function loadSnapshot(options) {
       `Could not inspect local Codex source: ${safeErrorMessage(error, [options.codexHome])}`,
     );
   }
+  const {
+    codexHomeFingerprint,
+    readDurableLedgerCacheState,
+    resolveDurableLedgerPath,
+  } = await import("../lib/token-ledger-ledger.mjs");
+  const cachedCodexHomeFingerprint = primitiveString(
+    cached.metadata?.durableLedger?.codexHomeFingerprint,
+  );
+  if (
+    cachedCodexHomeFingerprint !== codexHomeFingerprint(options.codexHome)
+  ) {
+    return refreshSnapshot(options);
+  }
+  const ledgerState = await readDurableLedgerCacheState(
+    resolveDurableLedgerPath({
+      codexHome: options.codexHome,
+      output: options.input,
+    }),
+  );
+  const quotaContractTrusted =
+    ledgerState?.quotaIdentityContract === QUOTA_IDENTITY_CONTRACT_VERSION &&
+    snapshotHasCurrentQuotaIdentityContract(cached);
   if (!sourceWatermarksEqual(cached.sourceWatermark, inventory.watermark)) {
-    try {
-      return {
-        snapshot: await refreshSnapshot(options),
-        sourceStatus: "verified-current",
-      };
-    } catch {
-      return { snapshot: cached, sourceStatus: "stale-fallback" };
-    }
+    return refreshSnapshotOrUseStaleFallback(options, cached, {
+      quotaContractTrusted,
+    });
+  }
+  const snapshotRevision = Number(
+    cached.metadata?.durableLedger?.revision,
+  );
+  if (
+    !Number.isSafeInteger(snapshotRevision) ||
+    ledgerState?.revision !== snapshotRevision
+  ) {
+    return refreshSnapshotOrUseStaleFallback(options, cached, {
+      quotaContractTrusted,
+    });
+  }
+  if (!quotaContractTrusted) {
+    return refreshSnapshotOrUseStaleFallback(options, cached, {
+      quotaContractTrusted: false,
+    });
   }
   return { snapshot: cached, sourceStatus: "verified-current" };
 }
@@ -1212,7 +1443,13 @@ async function render(
   analysis,
 ) {
   if (options.view === "cost") {
-    return renderCostTerminal({ events, bounds, basis: options.basis });
+    return renderCostTerminal({
+      events,
+      bounds,
+      basis: options.basis,
+      snapshotFreshness: freshness,
+      sourceStatus: report.sourceStatus ?? "unchecked-cache",
+    });
   }
   if (options.view === "trend") {
     if (options.image && options.cacheRate) {
@@ -1225,6 +1462,7 @@ async function render(
         days: options.trendDays,
         options,
         analysis,
+        sourceStatus: report.sourceStatus ?? "unchecked-cache",
       });
     }
     const trend = buildUsageTrend(snapshot, bounds, { analysis });
@@ -1238,15 +1476,11 @@ async function render(
         trend,
         days: options.trendDays,
         options,
-        viewModel: buildTrendReportViewModel({
-          snapshot,
-          bounds,
-          days: options.trendDays,
-          reportTimeMs: report.reportTimeMs ?? null,
-          sourceStatus: report.sourceStatus ?? "unchecked-cache",
-          projectRows: allRows,
-          events,
-        }),
+        projectRows: allRows,
+        reportTimeMs: report.reportTimeMs ?? null,
+        sourceStatus: report.sourceStatus ?? "unchecked-cache",
+        analysis,
+        reportEvents: events,
       });
     }
     return renderTrendCombo({
@@ -1256,6 +1490,8 @@ async function render(
       days: options.trendDays,
       options,
       analysis,
+      snapshotFreshness: freshness,
+      sourceStatus: report.sourceStatus ?? "unchecked-cache",
     });
   }
   if (!options.legacyPlot) {
@@ -1263,6 +1499,7 @@ async function render(
       options,
       snapshot,
       snapshotFreshness: freshness,
+      sourceStatus: report.sourceStatus ?? "unchecked-cache",
       bounds,
       events,
       rows,
@@ -1295,6 +1532,8 @@ async function render(
     `Token Ledger · ${dateLabel} · ${bounds.timeZone}`,
     `${compact(totalTokens)} tokens · ${summary.threadIds.size.toLocaleString()} threads · ${summary.calls.toLocaleString()} calls · ${compact(summary.outputTokens)} output`,
     ...(historyScope ? [`History: ${historyScope}`] : []),
+    `Snapshot: ${snapshotFreshnessDetail(freshness)}`,
+    sourceStatusLine(report.sourceStatus ?? "unchecked-cache"),
     `Source: ${sourceLabel(options.input, snapshot)}`,
     "",
     chart,
@@ -1339,7 +1578,15 @@ function rangeDescription(options, bounds) {
   return bounds.dateString;
 }
 
-function emptyRangeMessage(options, snapshot, bounds) {
+function emptyRangeMessage(
+  options,
+  snapshot,
+  bounds,
+  {
+    sourceStatus = "unchecked-cache",
+    reportTimeMs = Date.now(),
+  } = {},
+) {
   const range = rangeDescription(options, bounds);
   const cutoffMs = snapshotCollectionCutoffMs(snapshot);
   const hasUncollectedHistory =
@@ -1351,6 +1598,10 @@ function emptyRangeMessage(options, snapshot, bounds) {
   ];
   const scope = historyScopeLabel(snapshot);
   if (scope) lines.push(`History: ${scope}`);
+  lines.push(
+    `Snapshot: ${snapshotFreshnessDetail(snapshotFreshness(snapshot, reportTimeMs))}`,
+  );
+  lines.push(sourceStatusLine(sourceStatus));
   lines.push(`Source: ${sourceLabel(options.input, snapshot)}`);
   return lines.join("\n");
 }
@@ -1360,6 +1611,7 @@ export async function run(options, { nowMs } = {}) {
   const now = new Date(hasInjectedNow ? nowMs : Date.now());
   const bounds = boundsForOptions(options, now);
   const { snapshot, sourceStatus } = await loadSnapshot(options);
+  const reportTimeMs = hasInjectedNow ? now.getTime() : Date.now();
   const analysis = buildRangeAnalysis(
     snapshot,
     bounds,
@@ -1373,7 +1625,6 @@ export async function run(options, { nowMs } = {}) {
   let events = filterDayEvents(snapshot, bounds, analysis);
   const writingImage = options.view === "trend" && options.image;
   const writingEmptyCacheReport = writingImage && options.cacheRate;
-  const reportTimeMs = hasInjectedNow ? now.getTime() : Date.now();
   if (writingImage && !options.cacheRate) {
     const effectiveEndMs = resolveEffectiveEnd({
       snapshot,
@@ -1389,7 +1640,10 @@ export async function run(options, { nowMs } = {}) {
     );
   }
   if (events.length === 0 && !writingEmptyCacheReport) {
-    return emptyRangeMessage(options, snapshot, bounds);
+    return emptyRangeMessage(options, snapshot, bounds, {
+      sourceStatus,
+      reportTimeMs,
+    });
   }
   const allRows = options.cacheRate || options.view === "cost"
     ? []
@@ -1475,18 +1729,23 @@ function shouldUseInteractive(options) {
 
 async function runInteractive(options) {
   const bounds = boundsForOptions(options);
-  const { snapshot } = await loadSnapshot(options);
+  const { snapshot, sourceStatus } = await loadSnapshot(options);
+  const reportTimeMs = Date.now();
   const analysis = buildRangeAnalysis(snapshot, bounds, { includeTrend: false });
   const events = filterDayEvents(snapshot, bounds, analysis);
   if (events.length === 0) {
-    process.stdout.write(`${emptyRangeMessage(options, snapshot, bounds)}\n`);
+    process.stdout.write(`${emptyRangeMessage(options, snapshot, bounds, {
+      sourceStatus,
+      reportTimeMs,
+    })}\n`);
     return;
   }
   const allRows = aggregateProjects(snapshot, events, options, analysis);
   await startInteractive({
     options,
     snapshot,
-    snapshotFreshness: snapshotFreshness(snapshot),
+    snapshotFreshness: snapshotFreshness(snapshot, reportTimeMs),
+    sourceStatus,
     bounds,
     events,
     rows: allRows.slice(0, options.top),

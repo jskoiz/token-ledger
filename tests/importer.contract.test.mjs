@@ -3,7 +3,6 @@ import {
   appendFile,
   mkdir,
   mkdtemp,
-  readFile,
   rename,
   rm,
   writeFile,
@@ -234,7 +233,13 @@ test("bounds retries when sources keep changing and never emits a partial snapsh
         async ({ current }) => {
           if (current !== 1) return;
           progressCalls += 1;
-          await appendFile(path, "\n");
+          await writeFile(path, serialize([
+            ...turnStart("2026-08-18T10:00:00.000Z", "turn-1"),
+            tokenCount(
+              "2026-08-18T10:00:01.000Z",
+              100 + progressCalls * 100,
+            ),
+          ]));
         },
       ),
       (error) => {
@@ -323,6 +328,11 @@ test("malformed JSONL and malformed rate limits are ignored while valid usage su
   try {
     const path = await writeRollout(root, [
       ...turnStart("2026-08-18T10:00:00.000Z", "turn-valid"),
+      tokenCount("2026-08-18T10:00:01.000Z", 100),
+    ]);
+    await collectUsageSequential(collectionOptions(root));
+    await writeFile(path, `{this is not JSON\n${serialize([
+      ...turnStart("2026-08-18T10:00:00.000Z", "turn-valid"),
       {
         timestamp: "2026-08-18T10:00:00.500Z",
         type: "event_msg",
@@ -332,8 +342,7 @@ test("malformed JSONL and malformed rate limits are ignored while valid usage su
         },
       },
       tokenCount("2026-08-18T10:00:01.000Z", 100),
-    ]);
-    await writeFile(path, `{this is not JSON\n${await readFile(path, "utf8")}`);
+    ])}`);
 
     const snapshot = await collectUsageSequential(collectionOptions(root));
     assert.equal(snapshot.coverage.parseErrors, 1);

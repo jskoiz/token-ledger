@@ -13,6 +13,10 @@ import {
   renderTrendImage,
   writeTrendPng,
 } from "../bin/token-ledger-trend-image.mjs";
+import {
+  ACCOUNT_QUOTA_LIMIT_KEY,
+  QUOTA_IDENTITY_CONTRACT_VERSION,
+} from "../lib/token-ledger-quota-contract.mjs";
 
 const TIME_ZONE = "Pacific/Honolulu";
 const bounds = multiDayBounds("2026-08-23", TIME_ZONE, 7);
@@ -48,6 +52,8 @@ function quota(day, hour, usedPercent, resetsAt, limitName = null) {
     windowMinutes: 10_080,
     resetsAt,
     limitName,
+    limitKey: limitName === null ? ACCOUNT_QUOTA_LIMIT_KEY : "0123456789abcdef",
+    scope: limitName === null ? "account" : "named",
   };
 }
 
@@ -56,6 +62,11 @@ function snapshotOf(events = [], quotaObservations = [], overrides = {}) {
     schemaVersion: 3,
     generatedAt: timestamp(23, 23),
     provenance: { kind: "codex-local-metadata", rateCardAsOf: "2026-08-17" },
+    metadata: {
+      durableLedger: {
+        quotaIdentityContract: QUOTA_IDENTITY_CONTRACT_VERSION,
+      },
+    },
     coverage: { parseErrors: 0 },
     events,
     threads: [],
