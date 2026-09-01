@@ -536,6 +536,56 @@ test("truncated trailing lines are deferred and later appended as a stable conti
   }
 });
 
+test("oversized unterminated trailing lines preserve the complete prefix", async () => {
+  const root = await createPrivateFixtureRoot("token-ledger-trailing-oversized-");
+  const threadId = "56565656-5656-4565-8565-565656565656";
+  const timestamp = "2026-08-23T10:00:00.000Z";
+  const rolloutDirectory = resolve(root, "sessions", "2026", "08", "23");
+  const file = resolve(rolloutDirectory, `rollout-${threadId}.jsonl`);
+  const output = resolve(root, "snapshot.json");
+  try {
+    await mkdir(rolloutDirectory, { recursive: true });
+    const prefix = serialize([
+      ...turnStart(timestamp, "turn-oversized-prefix"),
+      tokenCount("2026-08-23T10:00:01.000Z", 100, 100),
+    ]);
+    const oversizedPartial = Buffer.concat([
+      Buffer.from('{"type":"event_msg","payload":{"type":"token_count","text":"'),
+      Buffer.alloc(1_048_577, 0x78),
+    ]);
+    await writeFile(file, Buffer.concat([Buffer.from(prefix), oversizedPartial]));
+
+    const first = await collectUsage({
+      output,
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+    assert.equal(first.coverage.parseErrors, 0);
+    assert.equal(first.coverage.observedTokens, 100);
+    assert.equal(first.coverage.sourceIncomplete, false);
+
+    await rm(file);
+    const afterRemoval = await collectUsage({
+      output,
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+    });
+    const ledger = await readDurableLedger(
+      resolveDurableLedgerPath({ codexHome: root }),
+    );
+    assert.equal(afterRemoval.coverage.observedTokens, 100);
+    assert.equal(afterRemoval.coverage.sourceIncomplete, true);
+    assert.deepEqual(
+      ledger.usageRows.map((row) => row.totalTokens),
+      [100],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("SQLite WAL changes invalidate the source watermark", async () => {
   const root = await createPrivateFixtureRoot("token-ledger-wal-watermark-");
   const database = resolve(root, "state_5.sqlite");
