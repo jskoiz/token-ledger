@@ -491,7 +491,8 @@ test("new rollout files after the cutoff are deferred until the next refresh", a
       false,
     );
     assert.equal(converged.coverage.observedTokens, 350);
-    assert.equal(converged.coverage.filesScanned, 2);
+    assert.equal(converged.coverage.filesScanned, 1);
+    assert.equal(converged.coverage.filesReused, 1);
     assert.ok(sourceWatermarksEqual(converged.sourceWatermark, current.watermark));
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -2928,6 +2929,11 @@ test("bounded scans match the sequential reference across collector fixtures", a
         ...stableSnapshot.metadata.durableLedger,
       };
       delete stableSnapshot.metadata.durableLedger.revision;
+      stableSnapshot.coverage = { ...stableSnapshot.coverage };
+      delete stableSnapshot.coverage.filesScanned;
+      delete stableSnapshot.coverage.bytesScanned;
+      delete stableSnapshot.coverage.filesReused;
+      delete stableSnapshot.coverage.bytesReused;
       return stableSnapshot;
     }
 

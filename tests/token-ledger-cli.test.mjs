@@ -644,7 +644,8 @@ test("successful metadata-backed refresh lifecycle remains hermetic", async () =
     const noArchivedSnapshot = await readPrivateSnapshot(noArchivedCachePath);
     assert.match(noArchivedOutput, /metadata-project/);
     assert.doesNotMatch(noArchivedOutput, /archived-project/);
-    assert.equal(noArchivedSnapshot.coverage.filesScanned, 1);
+    assert.equal(noArchivedSnapshot.coverage.filesScanned, 0);
+    assert.equal(noArchivedSnapshot.coverage.filesReused, 1);
     assert.equal(noArchivedSnapshot.coverage.observedTokens, 1_500);
     assert.equal(noArchivedSnapshot.events.length, 1);
   } finally {

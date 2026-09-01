@@ -2240,8 +2240,16 @@ test("unchanged and appended sources add each logical event once", async () => {
       fixture.file,
       serialize(rolloutRows([200], { offset: 1 })),
     );
-    const appended = await collectUsage(options(fixture));
-    const unchanged = await collectUsage(options(fixture));
+    const appendedProgress = [];
+    const appended = await collectUsage(
+      options(fixture),
+      ({ current, total }) => appendedProgress.push([current, total]),
+    );
+    const unchangedProgress = [];
+    const unchanged = await collectUsage(
+      options(fixture),
+      ({ current, total }) => unchangedProgress.push([current, total]),
+    );
     const ledger = await readDurableLedger(
       resolveDurableLedgerPath({ codexHome: fixture.root }),
     );
@@ -2249,6 +2257,14 @@ test("unchanged and appended sources add each logical event once", async () => {
     assert.equal(first.coverage.observedTokens, 100);
     assert.equal(appended.coverage.observedTokens, 300);
     assert.equal(unchanged.coverage.observedTokens, 300);
+    assert.deepEqual(appendedProgress, [[1, 1]]);
+    assert.deepEqual(unchangedProgress, []);
+    assert.equal(appended.coverage.filesScanned, 1);
+    assert.equal(appended.coverage.filesReused, 0);
+    assert.equal(unchanged.coverage.filesScanned, 0);
+    assert.equal(unchanged.coverage.filesReused, 1);
+    assert.equal(unchanged.coverage.bytesScanned, 0);
+    assert.ok(unchanged.coverage.bytesReused > 0);
     assert.equal(ledger.usageRows.filter((row) => row.identityKind === "exact").length, 2);
     assert.equal(
       ledger.usageRows.reduce((sum, row) => sum + row.totalTokens, 0),

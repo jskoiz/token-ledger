@@ -1111,6 +1111,11 @@ async function refreshSnapshot(options) {
     );
     process.stderr.write("\n");
     const storedSnapshot = snapshot;
+    if (storedSnapshot.coverage.filesReused > 0) {
+      process.stderr.write(
+        `Token Ledger: reused ${storedSnapshot.coverage.filesReused.toLocaleString()} unchanged rollout files from the durable ledger.\n`,
+      );
+    }
     process.stderr.write(
       `Token Ledger: cached ${(writeResult.bytesWritten / 1_000_000).toFixed(1)} MB ${writeResult.encoding} snapshot (${(writeResult.jsonBytes / 1_000_000).toFixed(1)} MB JSON before encoding; ${storedSnapshot.events.length.toLocaleString()} buckets for ${storedSnapshot.coverage.observedModelCalls.toLocaleString()} calls; ${(writeResult.maxBytes / 1_000_000).toFixed(1)} MB limit).\n`,
     );
