@@ -586,6 +586,51 @@ test("schema v2 source positions migrate to bounded event-key digests", async ()
   }
 });
 
+test("schema v2 ledgers remain readable without a write migration", async () => {
+  const fixture = await createFixture([100]);
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
+  let database;
+  try {
+    await collectUsage(options(fixture));
+    database = new DatabaseSync(ledgerPath);
+    const position = database.prepare(`
+      SELECT source_id AS sourceId, event_ordinal AS eventOrdinal
+        FROM source_event_positions
+       LIMIT 1
+    `).get();
+    const legacyEventKey = JSON.stringify([
+      "legacy-schema-v2-event-key",
+      position.sourceId,
+      position.eventOrdinal,
+    ]);
+    database.prepare(`
+      UPDATE source_event_positions
+         SET event_key = ?
+       WHERE source_id = ? AND event_ordinal = ?
+    `).run(legacyEventKey, position.sourceId, position.eventOrdinal);
+    database.exec("PRAGMA user_version = 2");
+    database.close();
+    database = null;
+
+    const ledger = await readDurableLedger(ledgerPath);
+
+    assert.equal(
+      ledger.usageRows.reduce((sum, row) => sum + row.totalTokens, 0),
+      100,
+    );
+    database = new DatabaseSync(ledgerPath, { readOnly: true });
+    assert.equal(database.prepare("PRAGMA user_version").get().user_version, 2);
+    assert.equal(database.prepare(`
+      SELECT event_key AS eventKey
+        FROM source_event_positions
+       WHERE source_id = ? AND event_ordinal = ?
+    `).get(position.sourceId, position.eventOrdinal).eventKey, legacyEventKey);
+  } finally {
+    database?.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("new durable ledgers use incremental vacuum and reclaim a large freelist", async () => {
   const fixture = await createFixture([100]);
   const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
