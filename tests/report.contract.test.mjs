@@ -8,6 +8,7 @@ import { multiDayBounds } from "../bin/token-ledger-trend.mjs";
 import {
   buildTrendReportViewModel,
   isFastMode,
+  resolveEffectiveEnd,
 } from "../bin/token-ledger-report-data.mjs";
 import {
   renderTrendImage,
@@ -240,6 +241,74 @@ test("non-current source statuses stop at the inclusive snapshot capture", () =>
   });
   assert.equal(current.summary.totalTokens, 3_000);
   assert.equal(current.meta.effectiveEndMs, timestampMs(23, 12));
+});
+
+test("invalid source cutoffs fall back to the generated timestamp", () => {
+  const generatedAt = timestamp(23, 9);
+  const expected = timestampMs(23, 9) + 1;
+  for (const [sourceCutoffAt, label] of [
+    [null, "null"],
+    [undefined, "undefined"],
+    ["not-a-date", "invalid string"],
+    [{}, "object"],
+  ]) {
+    assert.equal(
+      resolveEffectiveEnd({
+        snapshot: { generatedAt, provenance: { sourceCutoffAt } },
+        bounds,
+        reportTimeMs: timestampMs(23, 12),
+        sourceStatus: "unchecked-cache",
+      }),
+      expected,
+      label,
+    );
+  }
+
+  assert.equal(
+    resolveEffectiveEnd({
+      snapshot: {
+        generatedAt,
+        provenance: { sourceCutoffAt: timestamp(23, 10) },
+      },
+      bounds,
+      reportTimeMs: timestampMs(23, 12),
+      sourceStatus: "unchecked-cache",
+    }),
+    timestampMs(23, 10) + 1,
+  );
+});
+
+test("invalid generated timestamps fall back to report time", () => {
+  const reportTimeMs = timestampMs(23, 12);
+  for (const [generatedAt, label] of [
+    [null, "null"],
+    [undefined, "undefined"],
+    ["not-a-date", "invalid string"],
+    [Symbol("timestamp"), "symbol"],
+  ]) {
+    assert.equal(
+      resolveEffectiveEnd({
+        snapshot: { generatedAt, provenance: {} },
+        bounds,
+        reportTimeMs,
+        sourceStatus: "unchecked-cache",
+      }),
+      reportTimeMs,
+      label,
+    );
+  }
+
+  for (const generatedAt of [timestamp(23, 9), timestampMs(23, 9)]) {
+    assert.equal(
+      resolveEffectiveEnd({
+        snapshot: { generatedAt, provenance: {} },
+        bounds,
+        reportTimeMs,
+        sourceStatus: "unchecked-cache",
+      }),
+      timestampMs(23, 9) + 1,
+    );
+  }
 });
 
 test("meter observations and line segments stop at the latest observation", () => {

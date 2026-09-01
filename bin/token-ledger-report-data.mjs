@@ -39,7 +39,16 @@ export function isFastMode(serviceTier) {
 }
 
 function finiteTimestamp(value) {
-  const timestamp = new Date(value).getTime();
+  // Snapshot timestamps are serialized as ISO strings. Keep finite numeric
+  // epoch milliseconds for existing callers, but do not let Date coerce
+  // null, booleans, objects, or other non-timestamp values.
+  if (Number.isFinite(value)) {
+    const timestamp = new Date(value).getTime();
+    return Number.isFinite(timestamp) ? timestamp : null;
+  }
+  const text = primitiveString(value);
+  if (text === null) return null;
+  const timestamp = Date.parse(text);
   return Number.isFinite(timestamp) ? timestamp : null;
 }
 
