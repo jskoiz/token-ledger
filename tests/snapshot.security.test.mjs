@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  mkdir,
   mkdtemp,
   readdir,
   readFile,
@@ -93,6 +94,26 @@ test("gzip snapshots round-trip while compressed input and expansion stay bounde
         return true;
       },
     );
+
+    const jsonPath = resolve(root, "oversized-input.json");
+    await writeFile(jsonPath, JSON.stringify(snapshot("x".repeat(2_048))), {
+      mode: 0o600,
+    });
+    await assert.rejects(
+      () => readPrivateSnapshot(jsonPath, { maxJsonBytes: 512 }),
+      (error) => {
+        assert.equal(error.code, "ERR_SNAPSHOT_SIZE_LIMIT");
+        assert.match(error.message, /JSON read limit/);
+        return true;
+      },
+    );
+
+    const directoryPath = resolve(root, "not-a-snapshot");
+    await mkdir(directoryPath);
+    await assert.rejects(
+      () => readPrivateSnapshot(directoryPath),
+      (error) => error.code === "ERR_SNAPSHOT_NOT_REGULAR",
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -100,29 +121,35 @@ test("gzip snapshots round-trip while compressed input and expansion stay bounde
 
 test("an oversized replacement preserves the previous valid private cache", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-snapshot-size-"));
-  const output = resolve(root, "snapshot.json.gz");
   try {
-    await writePrivateSnapshot(output, snapshot("valid cache"));
-    const baseline = await readPrivateSnapshot(output);
-    const oversized = {
-      ...snapshot("too large"),
-      label: "x".repeat(10_000),
-    };
+    for (const fileName of ["snapshot.json", "snapshot.json.gz"]) {
+      const output = resolve(root, fileName);
+      await writePrivateSnapshot(output, snapshot("valid cache"));
+      const baseline = await readPrivateSnapshot(output);
+      const oversized = {
+        ...snapshot("too large"),
+        label: "x".repeat(10_000),
+      };
 
-    await assert.rejects(
-      () => writePrivateSnapshot(output, oversized, {
-        maxBytes: 512,
-        targetBytes: 256,
-        maxJsonBytes: 1_024,
-        targetJsonBytes: 512,
-      }),
-      (error) => {
-        assert.equal(error.code, "ERR_SNAPSHOT_SIZE_LIMIT");
-        return true;
-      },
+      await assert.rejects(
+        () => writePrivateSnapshot(output, oversized, {
+          maxBytes: 512,
+          targetBytes: 256,
+          maxJsonBytes: 1_024,
+          targetJsonBytes: 512,
+        }),
+        (error) => {
+          assert.equal(error.code, "ERR_SNAPSHOT_SIZE_LIMIT");
+          return true;
+        },
+      );
+      assert.deepEqual(await readPrivateSnapshot(output), baseline);
+      assert.equal(await mode(output), 0o600);
+    }
+    assert.deepEqual(
+      (await readdir(root)).sort(),
+      ["snapshot.json", "snapshot.json.gz"],
     );
-    assert.deepEqual(await readPrivateSnapshot(output), baseline);
-    assert.deepEqual(await readdir(root), ["snapshot.json.gz"]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

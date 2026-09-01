@@ -41,18 +41,19 @@ function usage(day, hour, overrides = {}) {
   };
 }
 
-function quota(day, hour, usedPercent, resetsAt) {
+function quota(day, hour, usedPercent, resetsAt, limitName = null) {
   return {
     timestamp: timestamp(day, hour),
     usedPercent,
     windowMinutes: 10_080,
     resetsAt,
+    limitName,
   };
 }
 
 function snapshotOf(events = [], quotaObservations = [], overrides = {}) {
   return {
-    schemaVersion: 9,
+    schemaVersion: 3,
     generatedAt: timestamp(23, 23),
     provenance: { kind: "codex-local-metadata", rateCardAsOf: "2026-08-17" },
     coverage: { parseErrors: 0 },
@@ -192,6 +193,42 @@ test("prior comparison matches the equivalent partial local duration", () => {
   assert.equal(vm.daily.at(-1).totalTokens, 1_000);
   assert.equal(vm.summary.priorEquivalentTokens, 500);
   assert.equal(vm.summary.totalDeltaPercent, 300);
+
+  const withoutPrior = buildReport({
+    snapshot: snapshotOf([usage(23, 10)]),
+    reportTimeMs: timestampMs(23, 12),
+  });
+  assert.equal(withoutPrior.summary.priorEquivalentTokens, null);
+  assert.equal(withoutPrior.summary.totalDeltaPercent, null);
+});
+
+test("non-current source statuses stop at the inclusive snapshot capture", () => {
+  const generatedAt = timestamp(23, 9);
+  const captured = usage(23, 9, { totalTokens: 1_000 });
+  const afterCapture = usage(23, 10, { totalTokens: 2_000 });
+
+  for (const sourceStatus of [
+    "explicit-snapshot",
+    "unchecked-cache",
+    "stale-fallback",
+  ]) {
+    const vm = buildReport({
+      snapshot: snapshotOf([captured, afterCapture], [], { generatedAt }),
+      reportTimeMs: timestampMs(23, 12),
+      sourceStatus,
+    });
+    assert.equal(vm.summary.totalTokens, 1_000, sourceStatus);
+    assert.equal(vm.meta.effectiveEndMs, Date.parse(generatedAt) + 1, sourceStatus);
+    assert.equal(vm.meta.sourceStatus, sourceStatus);
+  }
+
+  const current = buildReport({
+    snapshot: snapshotOf([captured, afterCapture], [], { generatedAt }),
+    reportTimeMs: timestampMs(23, 12),
+    sourceStatus: "verified-current",
+  });
+  assert.equal(current.summary.totalTokens, 3_000);
+  assert.equal(current.meta.effectiveEndMs, timestampMs(23, 12));
 });
 
 test("meter observations and line segments stop at the latest observation", () => {
@@ -244,6 +281,15 @@ test("partial, stale, and quota states keep their honesty markers", () => {
       expected: { partial: false, stale: false, status: "active" },
     },
     {
+      name: "named-only meter is unavailable",
+      snapshot: snapshotOf([], [
+        quota(20, 2, 10, activeReset, "Luna"),
+        quota(21, 2, 15, activeReset, "Luna"),
+      ]),
+      sourceStatus: "verified-current",
+      expected: { partial: false, stale: false, status: "unavailable" },
+    },
+    {
       name: "at-risk meter",
       snapshot: snapshotOf([], [
         quota(20, 2, 40, activeReset),
@@ -287,7 +333,7 @@ test("representative report output is finite SVG and decodes to PNG", async () =
           inputTokens: 4_000,
           outputTokens: 1_000,
           cachedInputTokens: 3_000,
-          project: "representative",
+          project: "x<&",
         }),
       ],
       [quota(20, 2, 10, resetAt(27)), quota(21, 2, 20, resetAt(27))],
@@ -300,6 +346,8 @@ test("representative report output is finite SVG and decodes to PNG", async () =
   });
   assert.match(report, /^<svg\b[^>]*\bwidth="\d+"[^>]*\bviewBox="0 0 \d+ \d+"/);
   assert.match(report, /<svg[\s\S]*<\/svg>$/);
+  assert.match(report, /x&lt;&amp;/);
+  assert.doesNotMatch(report, /x<&/);
   assert.doesNotMatch(report, /NaN|Infinity|undefined/);
 
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-report-contract-"));

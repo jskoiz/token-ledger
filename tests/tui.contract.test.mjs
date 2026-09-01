@@ -15,6 +15,7 @@ function createTerminal({
   encodingError = null,
   resumeError = null,
   writeErrorWhen = null,
+  deferRestoration = false,
 } = {}) {
   const stdin = new EventEmitter();
   const stdout = new EventEmitter();
@@ -26,6 +27,8 @@ function createTerminal({
     encodingCalls: [],
     writes: [],
     kills: [],
+    timeline: [],
+    pendingRestorations: [],
   };
 
   Object.assign(stdin, {
@@ -60,14 +63,22 @@ function createTerminal({
     write(value, callback) {
       const text = String(value);
       state.writes.push(text);
+      state.timeline.push(`write:${text}`);
       const error = writeErrorWhen?.(text, state.writes.length);
       if (error) throw error;
-      callback?.();
+      if (deferRestoration && text.includes(EXIT_ALT_SCREEN) && callback) {
+        state.pendingRestorations.push(callback);
+      } else {
+        callback?.();
+      }
       return true;
     },
   });
   signalTarget.pid = 123;
-  signalTarget.kill = (pid, signal) => state.kills.push({ pid, signal });
+  signalTarget.kill = (pid, signal) => {
+    state.kills.push({ pid, signal });
+    state.timeline.push(`kill:${signal}`);
+  };
 
   return { stdin, stdout, signalTarget, state };
 }
@@ -128,13 +139,15 @@ test("quit and supported signals restore terminal state", async () => {
       expectedPauseCalls: 0,
     },
     ...[
-      ["SIGINT", 130],
+      ["SIGINT", 130, true],
       ["SIGHUP", 129],
       ["SIGTERM", 143],
-    ].map(([signal, exitCode]) => ({
+    ].map(([signal, exitCode, deferRestoration = false]) => ({
       name: signal,
+      options: { deferRestoration },
       trigger: (terminal) => terminal.signalTarget.emit(signal),
       signal,
+      deferRestoration,
       exitCode,
       expectedRawCalls: [true, false],
       expectedPauseCalls: 1,
@@ -145,6 +158,12 @@ test("quit and supported signals restore terminal state", async () => {
     const terminal = createTerminal(testCase.options);
     const session = start(terminal);
     testCase.trigger(terminal);
+    if (testCase.deferRestoration) {
+      assert.equal(terminal.state.kills.length, 0, testCase.name);
+      assert.equal(terminal.signalTarget.listenerCount(testCase.signal), 1);
+      assert.equal(terminal.state.pendingRestorations.length, 1);
+      terminal.state.pendingRestorations.shift()();
+    }
     await session;
 
     assertRestored(terminal, {
@@ -156,6 +175,11 @@ test("quit and supported signals restore terminal state", async () => {
       assert.deepEqual(terminal.state.kills, [
         { pid: 123, signal: testCase.signal },
       ], testCase.name);
+      const restorationIndex = terminal.state.timeline.findIndex(
+        (entry) => entry.startsWith("write:") && entry.includes(EXIT_ALT_SCREEN),
+      );
+      const signalIndex = terminal.state.timeline.indexOf(`kill:${testCase.signal}`);
+      assert.ok(restorationIndex >= 0 && signalIndex > restorationIndex, testCase.name);
     }
   }
 });
@@ -192,6 +216,34 @@ test("setup, render, stream, and output failures restore what was touched", asyn
       render: () => {
         throw new Error("render failed");
       },
+      restored: true,
+    },
+    {
+      name: "input render",
+      error: /input render failed/,
+      render: (() => {
+        let calls = 0;
+        return () => {
+          calls += 1;
+          if (calls > 1) throw new Error("input render failed");
+          return "screen";
+        };
+      })(),
+      trigger: (terminal) => terminal.stdin.emit("data", "j"),
+      restored: true,
+    },
+    {
+      name: "resize render",
+      error: /resize render failed/,
+      render: (() => {
+        let calls = 0;
+        return () => {
+          calls += 1;
+          if (calls > 1) throw new Error("resize render failed");
+          return "screen";
+        };
+      })(),
+      trigger: (terminal) => terminal.stdout.emit("resize"),
       restored: true,
     },
     {

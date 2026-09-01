@@ -66,6 +66,24 @@ test("purchased-credit calculation uses the partition and service multiplier", (
       expected: 2.6875,
     },
     {
+      name: "fast Sol",
+      model: "gpt-5.6-sol",
+      serviceTier: "fast",
+      expected: 51.25,
+    },
+    {
+      name: "fast Terra",
+      model: "gpt-5.6-terra",
+      serviceTier: "fast",
+      expected: 26.875,
+    },
+    {
+      name: "fast Daybreak Red",
+      model: "daybreak-red",
+      serviceTier: "fast",
+      expected: 167.96875,
+    },
+    {
       name: "fast GPT-5.4",
       model: "gpt-5.4",
       serviceTier: "fast",
@@ -87,6 +105,16 @@ test("purchased-credit calculation uses the partition and service multiplier", (
     });
     assert.equal(actual, testCase.expected, testCase.name);
   }
+
+  assert.equal(
+    calculateCodexPurchasedCredits({
+      model: "gpt-daybreak-red-latest",
+      serviceTier: "fast",
+      usage: USAGE,
+    }),
+    null,
+    "unsupported latest fast aliases must not inherit a canonical rate",
+  );
 });
 
 test("API USD calculation keeps input partitions and purchased credits separate", () => {

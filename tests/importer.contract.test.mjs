@@ -346,6 +346,31 @@ test("malformed JSONL and malformed rate limits are ignored while valid usage su
   }
 });
 
+test("bounded scanning preserves escaped type keys and safely handles deep irrelevant rows", async () => {
+  const root = await createHome();
+  try {
+    const timestamp = "2026-08-18T10:00:00.000Z";
+    const path = await writeRollout(root, []);
+    const escapedTypeKey = JSON.stringify(
+      tokenCount("2026-08-18T10:00:01.000Z", 100),
+    ).replace('"type":"event_msg"', '"t\\u0079pe":"event_msg"');
+    const depth = 10_000;
+    const deeplyNestedIrrelevantRow = `{"ignored":${"[".repeat(depth)}${"]".repeat(depth)}}`;
+    await writeFile(
+      path,
+      `${deeplyNestedIrrelevantRow}\n${serialize(turnStart(timestamp, "turn-escaped"))}${escapedTypeKey}\n`,
+    );
+
+    const snapshot = await collectUsageSequential(collectionOptions(root));
+    assert.equal(snapshot.coverage.parseErrors, 0);
+    assert.equal(snapshot.coverage.observedModelCalls, 1);
+    assert.equal(snapshot.coverage.observedTokens, 100);
+    assert.equal(snapshot.events.length, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("--since filters calls and quotas and records the exact collection provenance", async () => {
   const root = await createHome();
   const cutoff = new Date("2026-08-18T12:00:00.000Z");
