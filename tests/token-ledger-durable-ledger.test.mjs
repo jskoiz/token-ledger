@@ -2314,12 +2314,13 @@ test("unchanged rollouts rescan when state-backed metadata changes", async () =>
     state.exec(
       "CREATE TABLE threads (id TEXT PRIMARY KEY, cwd TEXT, updated_at INTEGER)",
     );
+    const metadataTimestamp = Math.floor(Date.now() / 1_000);
     state.prepare("INSERT INTO threads (id, cwd, updated_at) VALUES (?, ?, ?)")
-      .run(THREAD_ID, "/projects/old-project", Date.now());
+      .run(THREAD_ID, "/projects/old-project", metadataTimestamp);
 
     const first = await collectUsage(options(fixture));
     state.prepare("UPDATE threads SET cwd = ?, updated_at = ? WHERE id = ?")
-      .run("/projects/new-project", Date.now() + 1_000, THREAD_ID);
+      .run("/projects/new-project", metadataTimestamp, THREAD_ID);
     const refreshed = await collectUsage(options(fixture));
 
     assert.equal(first.events[0].project, "old-project");
@@ -2328,6 +2329,30 @@ test("unchanged rollouts rescan when state-backed metadata changes", async () =>
     assert.equal(refreshed.coverage.filesReused, 0);
   } finally {
     state.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("snapshot staging rejects durable ledger and SQLite sidecar paths", async () => {
+  const fixture = await createFixture([]);
+  try {
+    const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
+    await collectUsage(options(fixture));
+    const ledgerBefore = await readDurableLedger(ledgerPath);
+    for (const output of [
+      ledgerPath,
+      `${ledgerPath}.writer-lock.sqlite`,
+      `${ledgerPath}-journal`,
+      `${ledgerPath}-wal`,
+      `${ledgerPath}-shm`,
+    ]) {
+      await assert.rejects(
+        stagePrivateSnapshot(output, { events: [] }),
+        (error) => error?.code === "ERR_SNAPSHOT_RESERVED_PATH",
+      );
+    }
+    assert.equal((await readDurableLedger(ledgerPath)).revision, ledgerBefore.revision);
+  } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
