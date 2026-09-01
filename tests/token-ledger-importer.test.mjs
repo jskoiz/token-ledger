@@ -3047,6 +3047,51 @@ test("pruning a queued rollout mid-scan retries the collection and removes the t
   }
 });
 
+test("atomic replacement before a queued open re-inventories the source", async () => {
+  const root = await createPrivateFixtureRoot("token-ledger-importer-");
+  try {
+    const rolloutDirectory = resolve(root, "sessions", "2026", "08", "23");
+    await mkdir(rolloutDirectory, { recursive: true });
+    const ignored = JSON.stringify({
+      type: "event_msg",
+      payload: { type: "agent_message", body: "ignored" },
+    });
+    const largeContent = `${Array(20_000).fill(ignored).join("\n")}\n`;
+    const paths = [];
+    for (let index = 0; index < 5; index += 1) {
+      const suffix = String(index + 1).padStart(12, "0");
+      const path = resolve(
+        rolloutDirectory,
+        `rollout-00000000-0000-4000-8000-${suffix}.jsonl`,
+      );
+      paths.push(path);
+      await writeFile(path, index === 0 ? `${ignored}\n` : largeContent);
+    }
+    const replacement = resolve(root, "queued-replacement.jsonl");
+    let replaced = false;
+    const snapshot = await collectUsage(
+      {
+        output: resolve(root, "snapshot.json"),
+        codexHome: root,
+        includeArchived: false,
+        since: null,
+      },
+      async ({ current }) => {
+        if (current !== 1 || replaced) return;
+        await writeFile(replacement, serialize(rolloutRows([250])));
+        await rename(replacement, paths[4]);
+        replaced = true;
+      },
+    );
+
+    assert.equal(replaced, true);
+    assert.equal(snapshot.coverage.observedTokens, 250);
+    assert.equal(snapshot.coverage.filesScanned, 5);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("deeply nested rollout records fall back to the standard parser", async () => {
   const root = await createPrivateFixtureRoot("token-ledger-importer-");
   try {
