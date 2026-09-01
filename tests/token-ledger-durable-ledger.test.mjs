@@ -663,6 +663,73 @@ test("new durable ledgers use incremental vacuum and reclaim a large freelist", 
   }
 });
 
+test("vacuum failures do not fail an already published refresh", async () => {
+  const fixture = await createFixture([100]);
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
+  let database;
+  const originalExec = DatabaseSync.prototype.exec;
+  let vacuumAttempted = false;
+  try {
+    await collectUsage(options(fixture, {
+      stageSnapshot: (snapshot) => stagePrivateSnapshot(
+        fixture.output,
+        snapshot,
+      ),
+    }));
+    database = new DatabaseSync(ledgerPath);
+    database.exec("CREATE TABLE vacuum_canary (payload BLOB)");
+    database.prepare("INSERT INTO vacuum_canary(payload) VALUES (?)").run(
+      Buffer.alloc(8 * 1024 * 1024, 7),
+    );
+    database.exec("DROP TABLE vacuum_canary");
+    assert.ok(Number(
+      database.prepare("PRAGMA freelist_count").get().freelist_count,
+    ) >= 512);
+    database.close();
+    database = null;
+    await appendFile(
+      fixture.file,
+      serialize(rolloutRows([200], { offset: 1 })),
+    );
+
+    DatabaseSync.prototype.exec = function (sql) {
+      if (/^PRAGMA incremental_vacuum\(\d+\)$/.test(String(sql))) {
+        vacuumAttempted = true;
+        throw Object.assign(new Error("database or disk is full"), {
+          code: "ERR_SQLITE_ERROR",
+          errcode: 13,
+          errstr: "SQLITE_FULL",
+        });
+      }
+      return originalExec.call(this, sql);
+    };
+    const refreshed = await collectUsage(options(fixture, {
+      stageSnapshot: (snapshot) => stagePrivateSnapshot(
+        fixture.output,
+        snapshot,
+      ),
+    }));
+    DatabaseSync.prototype.exec = originalExec;
+    const stored = await readPrivateSnapshot(fixture.output);
+
+    assert.equal(vacuumAttempted, true);
+    assert.equal(totalTokens(refreshed), 300);
+    assert.equal(refreshed.metadata.durableLedger.revision, 2);
+    assert.equal(await readDurableLedgerRevision(ledgerPath), 2);
+    assert.equal(totalTokens(stored), 300);
+    assert.equal(stored.metadata.durableLedger.revision, 2);
+    assert.equal(
+      (await readdir(dirname(fixture.output)))
+        .some((name) => name.startsWith(".token-ledger-")),
+      false,
+    );
+  } finally {
+    DatabaseSync.prototype.exec = originalExec;
+    database?.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("quota normalization accepts only exact provider percentage fields", () => {
   const valid = [
     { windowMinutes: 1, resetsAt: 1, usedPercent: 0 },
