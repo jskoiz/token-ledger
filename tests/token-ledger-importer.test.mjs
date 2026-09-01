@@ -821,6 +821,69 @@ test("truncation after a bounded read does not erase captured usage", async () =
   }
 });
 
+test("short queued reads retry before reconciling a truncated source", async () => {
+  const root = await createPrivateFixtureRoot("token-ledger-short-read-");
+  const rolloutDirectory = resolve(root, "sessions", "2026", "08", "23");
+  const output = resolve(root, "snapshot.json");
+  const paths = [];
+  try {
+    await mkdir(rolloutDirectory, { recursive: true });
+    const ignored = JSON.stringify({
+      type: "event_msg",
+      payload: { type: "agent_message", body: "ignored" },
+    });
+    const largeIgnored = `${Array(20_000).fill(ignored).join("\n")}\n`;
+    for (let index = 0; index < 5; index += 1) {
+      const suffix = String(index + 1).padStart(12, "0");
+      const path = resolve(
+        rolloutDirectory,
+        `rollout-00000000-0000-4000-8000-${suffix}.jsonl`,
+      );
+      paths.push(path);
+      await writeFile(
+        path,
+        index === 0
+          ? `${ignored}\n`
+          : index === 4
+            ? `${serialize(rolloutRows([200, 300]))}${largeIgnored}`
+            : largeIgnored,
+      );
+    }
+
+    const stageSnapshot = (candidate) =>
+      stagePrivateSnapshot(output, candidate);
+    const first = await collectUsage({
+      output,
+      codexHome: root,
+      includeArchived: true,
+      since: null,
+      stageSnapshot,
+    });
+    for (const path of paths) await appendFile(path, `${ignored}\n`);
+    let truncated = false;
+    const second = await collectUsage(
+      {
+        output,
+        codexHome: root,
+        includeArchived: true,
+        since: null,
+        stageSnapshot,
+      },
+      async ({ current }) => {
+        if (current !== 1 || truncated) return;
+        truncated = true;
+        await writeFile(paths[4], serialize(rolloutRows([100])));
+      },
+    );
+
+    assert.equal(first.coverage.observedTokens, 500);
+    assert.equal(truncated, true);
+    assert.equal(second.coverage.observedTokens, 400);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("continuously appended sources publish one stable cutoff", async () => {
   const { root, file } = await createRolloutFixture([100]);
   let progressCalls = 0;
