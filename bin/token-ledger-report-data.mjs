@@ -177,6 +177,7 @@ function modelRowFor(map, model) {
     cacheInputTokens: 0,
     cachedInputTokens: 0,
     uncachedInputTokens: 0,
+    estimated: false,
   };
   map.set(model, row);
   return row;
@@ -455,6 +456,7 @@ export function buildTrendReportViewModel({
   ).getTime();
   let priorEquivalentTokens = 0;
   let priorHasEvents = false;
+  let priorEquivalentEstimated = false;
 
   const models = new Map();
   let totalTokens = 0;
@@ -489,6 +491,8 @@ export function buildTrendReportViewModel({
     if (timestampMs >= priorStartMs && timestampMs < priorEndMs) {
       priorEquivalentTokens += tokens;
       priorHasEvents = true;
+      priorEquivalentEstimated ||=
+        tokens > 0 && event.rangeAllocationEstimated === true;
     }
   }
   for (const event of currentEvents) {
@@ -505,6 +509,7 @@ export function buildTrendReportViewModel({
     const cached = usable
       ? Math.min(input, scaledTokens(event.cachedInputTokens))
       : 0;
+    const estimated = tokens > 0 && event.rangeAllocationEstimated === true;
 
     boundedEvents.push({ timestampMs, tokens, model, fast, event });
     totalTokens += tokens;
@@ -524,6 +529,7 @@ export function buildTrendReportViewModel({
     else modelRow.normalTokens += tokens;
     modelRow.cacheInputTokens += input;
     modelRow.cachedInputTokens += cached;
+    modelRow.estimated ||= estimated;
 
     const dayRow = daily[dayIndexByString.get(localDateString(timestampMs, timeZone)) ?? -1];
     if (dayRow) {
@@ -532,15 +538,18 @@ export function buildTrendReportViewModel({
       dayRow.outputTokens += output;
       dayRow.cachedInputTokens += cached;
       dayRow.modelCalls += 1;
+      dayRow.estimated ||= estimated;
       const dayModel = dayRow.models.get(model) ?? {
         model,
         totalTokens: 0,
         normalTokens: 0,
         fastTokens: 0,
+        estimated: false,
       };
       dayModel.totalTokens += tokens;
       if (fast) dayModel.fastTokens += tokens;
       else dayModel.normalTokens += tokens;
+      dayModel.estimated ||= estimated;
       dayRow.models.set(model, dayModel);
     }
   }
@@ -584,6 +593,7 @@ export function buildTrendReportViewModel({
       project: row.project,
       displayProject: row.displayProject ?? row.project,
       totalTokens: Math.max(0, Number(row.totalTokens) || 0),
+      estimated: row.estimated === true,
     }));
   } else {
     const projectTotals = new Map();
@@ -594,13 +604,20 @@ export function buildTrendReportViewModel({
           .replace(/[\t\r\n]+/g, " ")
           .replace(/\s+/g, " ")
           .trim() || "Unlabelled activity";
-      projectTotals.set(project, (projectTotals.get(project) ?? 0) + tokens);
+      const row = projectTotals.get(project) ?? {
+        totalTokens: 0,
+        estimated: false,
+      };
+      row.totalTokens += tokens;
+      row.estimated ||= event.rangeAllocationEstimated === true;
+      projectTotals.set(project, row);
     }
     allProjectRows = [...projectTotals.entries()].map(
-      ([project, tokens]) => ({
+      ([project, row]) => ({
         project,
         displayProject: project,
-        totalTokens: tokens,
+        totalTokens: row.totalTokens,
+        estimated: row.estimated,
       }),
     );
   }
@@ -622,6 +639,7 @@ export function buildTrendReportViewModel({
     count: remainderRows.length,
     totalTokens: remainderTokens,
     sharePercent: totalTokens > 0 ? (remainderTokens / totalTokens) * 100 : 0,
+    estimated: remainderRows.some((row) => row.estimated),
   };
   const topThreeProjectTokens = topProjects.reduce(
     (sum, row) => sum + row.totalTokens,
@@ -641,6 +659,19 @@ export function buildTrendReportViewModel({
     priorHasEvents && priorEquivalentTokens > 0 && durationMs > 0
       ? (totalTokens / priorEquivalentTokens - 1) * 100
       : null;
+  const estimated = daily.some((row) => row.estimated);
+  const maximumEstimatedResolutionSeconds = boundedEvents.reduce(
+    (maximum, { tokens, event }) => {
+      if (!(tokens > 0) || event.rangeAllocationEstimated !== true) {
+        return maximum;
+      }
+      const resolutionSeconds = Number(event.resolutionSeconds);
+      return Number.isFinite(resolutionSeconds) && resolutionSeconds > 0
+        ? Math.max(maximum, resolutionSeconds)
+        : maximum;
+    },
+    0,
+  );
 
   const snapshotGeneratedAtMs = finiteTimestamp(snapshot.generatedAt);
   const viewModel = {
@@ -661,8 +692,13 @@ export function buildTrendReportViewModel({
     },
     summary: {
       totalTokens,
+      estimated,
       priorEquivalentTokens: priorHasEvents ? priorEquivalentTokens : null,
+      priorEquivalentEstimated:
+        priorHasEvents && priorEquivalentEstimated,
       totalDeltaPercent,
+      totalDeltaEstimated:
+        totalDeltaPercent !== null && (estimated || priorEquivalentEstimated),
       inputTokens,
       outputTokens,
       cachedInputTokens,
@@ -670,6 +706,10 @@ export function buildTrendReportViewModel({
       cacheRatePercent:
         inputTokens > 0 ? (cachedInputTokens / inputTokens) * 100 : null,
       fastTokens,
+      fastEstimated: boundedEvents.some(
+        ({ fast, tokens, event }) =>
+          fast && tokens > 0 && event.rangeAllocationEstimated === true,
+      ),
       fastSharePercent: totalTokens > 0 ? (fastTokens / totalTokens) * 100 : null,
       activeProjects: allProjectRows.length,
       topThreeProjectTokens,
@@ -688,9 +728,9 @@ export function buildTrendReportViewModel({
       componentCoveragePercent:
         totalTokens > 0 ? (detailedTokens / totalTokens) * 100 : 100,
       parseErrors: Math.max(0, Number(snapshot.coverage?.parseErrors) || 0),
-      estimated: daily.some((row) => row.estimated),
+      estimated,
       estimatedBucketCount: daily.filter((row) => row.estimated).length,
-      maximumResolutionSeconds: null,
+      maximumResolutionSeconds: maximumEstimatedResolutionSeconds || null,
     },
     provenance: {
       localOnly: (snapshot.provenance?.kind ?? "codex-local-metadata") ===

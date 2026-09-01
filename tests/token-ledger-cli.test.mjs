@@ -72,6 +72,7 @@ import {
   renderTrendImage,
   writeTrendPng,
 } from "../bin/token-ledger-trend-image.mjs";
+import { buildTrendReportViewModel } from "../bin/token-ledger-report-data.mjs";
 import {
   buildCacheReportData,
   priorPeriodSummary,
@@ -971,6 +972,8 @@ test("fractional compacted call counts survive terminal aggregation", () => {
   });
   assert.equal(rows[0].events, 0.5);
   assert.equal(rows[0].models[0].events, 0.5);
+  assert.equal(rows[0].estimated, true);
+  assert.equal(rows[0].models[0].estimated, true);
 
   const output = renderTerminal({
     options: { plain: true, ascii: true, width: 100 },
@@ -982,6 +985,25 @@ test("fractional compacted call counts survive terminal aggregation", () => {
     allRows: rows,
   });
   assert.match(output, /0\.5 CALLS/);
+});
+
+test("zero-token boundary fragments do not mark project totals estimated", () => {
+  const rows = aggregateProjects(
+    { events: [], threads: [] },
+    [{
+      project: "boundary-only",
+      model: "gpt-5.6-luna",
+      totalTokens: 0,
+      outputTokens: 0,
+      toolCalls: 0,
+      callCount: 0,
+      rangeAllocationEstimated: true,
+    }],
+    { rawProjects: true },
+  );
+
+  assert.equal(rows[0].estimated, false);
+  assert.equal(rows[0].models[0].estimated, false);
 });
 
 test("project labels remove terminal control sequences before rendering", () => {
@@ -3271,22 +3293,21 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
   assert.match(svg, /Sol/);
   // The fixture's second window follows a genuine weekly expiry, so the
   // dashed reset break appears with its callout.
-  assert.match(svg, /RESET \(100%\)/);
+  assert.match(svg, />RESET<\/text>/);
   // Fast mode renders as a hatch overlay inside the model segment, never as
   // its own pseudo-model, and the KPI reports actual fast tokens.
   assert.match(svg, /fast-mode-hatch/);
   assert.match(svg, /url\(#fast-mode-hatch\)/);
-  assert.match(svg, /of total usage/);
+  assert.match(svg, /of usage/);
   assert.doesNotMatch(svg, /1\.50× rate/);
-  // The lower panels and provenance footer are always present.
+  // The lower analysis sections remain, without the redundant provenance footer.
   assert.match(svg, /WHERE IT WENT · TOP PROJECTS/);
   assert.match(svg, /CACHE EFFICIENCY BY DAY/);
   assert.match(svg, /CACHE EFFICIENCY BY MODEL/);
-  assert.match(svg, /DATA SOURCES/);
-  assert.match(svg, /COVERAGE/);
-  assert.match(svg, /BREAKDOWN/);
-  assert.match(svg, /HISTORY/);
-  assert.match(svg, /RATE CARD/);
+  assert.doesNotMatch(
+    svg,
+    />DATA SOURCES<\/text>|>COVERAGE<\/text>|>BREAKDOWN<\/text>|>HISTORY<\/text>|>RATE CARD<\/text>/,
+  );
   assert.ok((svg.match(/<rect /g) ?? []).length >= 4);
   assert.doesNotMatch(svg, /NaN|Infinity|undefined/);
 
@@ -3452,14 +3473,10 @@ test("trend meter stops at its last sample and marks report time", () => {
   const meterEndXs = [...svg.matchAll(
     /<line [^>]*x2="([\d.]+)"[^>]*data-series="weekly-meter"/g,
   )].map((match) => Number(match[1]));
-  const observationXs = [...svg.matchAll(
-    /<circle cx="([\d.]+)"[^>]*r="3.8"/g,
-  )].map((match) => Number(match[1]));
+  const plotRight = 1_280 - 28 - 66;
   assert.ok(meterEndXs.length > 0);
-  assert.ok(observationXs.length > 0);
-  assert.ok(
-    Math.abs(Math.max(...meterEndXs) - Math.max(...observationXs)) < 0.02,
-  );
+  assert.ok(Math.max(...meterEndXs) < plotRight);
+  assert.doesNotMatch(svg, /r="3.8"/);
   assert.match(svg, /Report through Aug 23, 10:08 AM/);
   assert.match(svg, /Meter last observed Aug 23, 7:59 AM/);
   assert.match(svg, />PARTIAL</);
@@ -3537,7 +3554,7 @@ test("trend report limits reset labels in dense windows", () => {
   const resetLines = svg.match(
     /stroke="rgba\(246,183,60,\.5\)"/g,
   ) ?? [];
-  const resetLabels = svg.match(/>RESTART \(100%\)<\/text>/g) ?? [];
+  const resetLabels = svg.match(/>RESTART<\/text>/g) ?? [];
   assert.equal(resetLines.length, cycleStarts.length - 1);
   assert.equal(resetLabels.length, 4);
 });
@@ -4650,6 +4667,116 @@ test("report emits progress while generating the PNG", async () => {
   }
 });
 
+test("standard report preserves split prior-period comparison fragments", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-report-prior-split-"));
+  const snapshotPath = resolve(root, "snapshot.json");
+  const outputPath = resolve(root, "report.png");
+  const expectedPath = resolve(root, "expected.png");
+  const originalWrite = process.stderr.write;
+  const nowMs = Date.parse("2026-08-15T12:00:00.000Z");
+  const snapshot = {
+    schemaVersion: 3,
+    generatedAt: new Date(nowMs).toISOString(),
+    events: [
+      {
+        timestamp: "2026-08-02T00:00:00.000Z",
+        startAt: "2026-08-01T12:00:00.000Z",
+        endAt: "2026-08-02T12:00:00.000Z",
+        project: "prior",
+        model: "gpt-5.6-luna",
+        totalTokens: 1_000,
+        inputTokens: 900,
+        outputTokens: 100,
+        callCount: 2,
+        resolutionSeconds: 86_400,
+      },
+      {
+        timestamp: "2026-08-12T12:00:00.000Z",
+        project: "current",
+        model: "gpt-5.6-luna",
+        totalTokens: 1_000,
+        inputTokens: 900,
+        outputTokens: 100,
+      },
+      {
+        timestamp: "2026-08-15T18:00:00.000Z",
+        project: "after-cutoff",
+        model: "gpt-5.6-sol",
+        totalTokens: Number.MAX_SAFE_INTEGER,
+        inputTokens: Number.MAX_SAFE_INTEGER,
+        outputTokens: 0,
+      },
+    ],
+    threads: [],
+    quotaObservations: [],
+  };
+
+  try {
+    await writeFile(snapshotPath, `${JSON.stringify(snapshot)}\n`);
+    process.stderr.write = () => true;
+    const options = parseArgs([
+      "report",
+      "7d",
+      "--date",
+      "2026-08-15",
+      "--tz",
+      "UTC",
+      "--input",
+      snapshotPath,
+      "--image-output",
+      outputPath,
+      "--no-open",
+    ]);
+    await run(options, { nowMs });
+
+    const bounds = multiDayBounds("2026-08-15", "UTC", 7);
+    const analysis = buildRangeAnalysis(snapshot, bounds, {
+      priorBounds: priorPeriodBounds(bounds, 7),
+    });
+    const currentEvents = filterDayEvents(snapshot, bounds, analysis);
+    const reportEvents = currentEvents.filter(
+      (event) => Date.parse(event.timestamp) < nowMs,
+    );
+    const projectRows = aggregateProjects(
+      snapshot,
+      reportEvents,
+      options,
+      analysis,
+    );
+    const viewModel = buildTrendReportViewModel({
+      snapshot,
+      bounds,
+      days: 7,
+      reportTimeMs: nowMs,
+      sourceStatus: "explicit-snapshot",
+      projectRows,
+      events: reportEvents,
+      priorEvents: analysis.priorEvents,
+    });
+    assert.ok(
+      Math.abs(viewModel.summary.priorEquivalentTokens - 500) < 0.001,
+    );
+    assert.ok(Math.abs(viewModel.summary.totalDeltaPercent - 100) < 0.001);
+    assert.equal(viewModel.summary.priorEquivalentEstimated, true);
+    assert.equal(viewModel.summary.totalDeltaEstimated, true);
+
+    const expectedSvg = renderTrendImage({
+      snapshot,
+      bounds,
+      trend: buildUsageTrend(snapshot, bounds, { analysis }),
+      days: 7,
+      options,
+      viewModel,
+    });
+    assert.match(expectedSvg, />≈\+100\.0%<\/text>/);
+    await writeTrendPng(expectedSvg, expectedPath);
+    assert.deepEqual(await readFile(outputPath), await readFile(expectedPath));
+  } finally {
+    process.stderr.write = originalWrite;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("cache-rate report uses its separate renderer and progress label", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "token-ledger-cache-report-"));
   const snapshotPath = resolve(root, "snapshot.json");
@@ -5725,10 +5852,9 @@ test("trend fast shading recognizes both tiers and reports mixed model rates", (
   );
 
   const svg = renderTrendImage({ snapshot, bounds, days: 7 });
-  assert.match(svg, /2\.43×/);
-  assert.match(svg, /2×–2\.5× by model/);
-  assert.match(svg, /some fast usage unrated/);
-  assert.match(svg, /Darker shade = fast mode/);
+  assert.match(svg, /2\.43× avg/);
+  assert.match(svg, /Some fast usage is unrated/);
+  assert.doesNotMatch(svg, /Fast credit rate ·|Darker shade = fast mode/);
 
   const unsupportedSvg = renderTrendImage({
     snapshot: {

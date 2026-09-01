@@ -81,20 +81,23 @@ equivalent period), input-weighted cache efficiency, the fast-mode share of
 actual tokens, and the active-project count, beside the latest observed
 weekly-limit state. Below that sit a model-mix strip, calendar-day columns of
 local token volume stacked by model, daily cache efficiency with input
-volumes, top projects, a per-model cache table, and a provenance footer.
+volumes, top projects, and a per-model cache table.
 
 ![Token Ledger 7-day report](docs/token-ledger-report-7-day.png)
 
 The weekly-limit line is drawn from sampled OpenAI observations, never
-continuous telemetry: dots mark real readings, solid runs mark spans confirmed
-by repeated equal readings, dashed runs bridge unobserved gaps, and the line
-never extends past the latest reading. When the report is generated partway
+continuous telemetry: solid runs mark spans confirmed by repeated equal
+readings, dashed runs bridge unobserved gaps, and the line never extends past
+the latest reading. When the report is generated partway
 through the final day, that column is marked `PARTIAL` with the actual cutoff
 time, and the prior-period delta compares an equally long partial window.
 Values allocated from compacted history are marked with `≈`; unmarked values
 come from exact event data. Reports built from an explicit or stale snapshot
 say `Snapshot generated …` (with a `STALE` badge on fallback) instead of
-claiming to be current.
+claiming to be current. Compact warning chips appear only when the report has
+unparsed source records, incomplete token-component coverage, external or
+non-current input, estimated history, or a snapshot/current rate-card
+mismatch.
 
 When run from a terminal, the finished PNG opens in the default image viewer
 automatically so the report lands on screen instead of in a file browser.
@@ -129,8 +132,8 @@ Use `trend 14d` for daily columns across two weeks. At 30 days, the terminal
 uses readable multi-day bins: three-day bins at ordinary widths and two-day
 bins on wider terminals. The image view keeps daily columns while they stay
 legible and falls back to the same readable multi-day binning for longer
-windows. The footer's rate-card date describes the attribution card used for
-meter-drain weighting; subscription limits are not billed per token.
+windows. Meter-drain weighting uses the rate card bundled with this release;
+subscription limits are not billed per token.
 
 The CLI automatically checks the local Codex source files before rendering. If
 they are newer than the local cache, it rebuilds the privacy-reduced snapshot.
