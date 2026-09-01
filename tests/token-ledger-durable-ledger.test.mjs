@@ -2610,6 +2610,70 @@ test("unchanged rollouts rescan when state metadata changes in the same second",
   }
 });
 
+test("metadata changes rescan only the rollout for the affected thread", async () => {
+  const fixture = await createFixture([100]);
+  const secondFile = resolve(dirname(fixture.file), ARCHIVED_ROLLOUT_NAME);
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
+  const state = new DatabaseSync(resolve(fixture.root, "state_5.sqlite"));
+  try {
+    await writeFile(
+      secondFile,
+      serialize(rolloutRows([200], { offset: 10 })),
+    );
+    state.exec(
+      "CREATE TABLE threads (id TEXT PRIMARY KEY, cwd TEXT, updated_at INTEGER)",
+    );
+    const metadataTimestamp = Math.floor(Date.now() / 1_000);
+    const insertThread = state.prepare(
+      "INSERT INTO threads (id, cwd, updated_at) VALUES (?, ?, ?)",
+    );
+    insertThread.run(THREAD_ID, "/projects/first-old", metadataTimestamp);
+    insertThread.run(
+      ARCHIVED_THREAD_ID,
+      "/projects/second-old",
+      metadataTimestamp,
+    );
+
+    const first = await collectUsage(options(fixture));
+    const firstSize = (await stat(fixture.file)).size;
+    const secondSize = (await stat(secondFile)).size;
+    const ledger = new DatabaseSync(ledgerPath);
+    ledger.prepare(
+      "DELETE FROM ledger_meta WHERE key = 'thread_metadata_fingerprints'",
+    ).run();
+    ledger.close();
+
+    state.prepare("UPDATE threads SET cwd = ?, updated_at = ? WHERE id = ?")
+      .run("/projects/first-new", metadataTimestamp, THREAD_ID);
+    const migrated = await collectUsage(options(fixture));
+
+    state.prepare("UPDATE threads SET cwd = ?, updated_at = ? WHERE id = ?")
+      .run("/projects/second-new", metadataTimestamp, ARCHIVED_THREAD_ID);
+    const targeted = await collectUsage(options(fixture));
+
+    assert.equal(first.coverage.filesScanned, 2);
+    assert.equal(migrated.coverage.filesScanned, 1);
+    assert.equal(migrated.coverage.filesReused, 1);
+    assert.equal(migrated.coverage.bytesScanned, firstSize);
+    assert.equal(targeted.coverage.filesScanned, 1);
+    assert.equal(targeted.coverage.filesReused, 1);
+    assert.equal(targeted.coverage.bytesScanned, secondSize);
+    assert.equal(totalTokens(migrated), 300);
+    assert.equal(totalTokens(targeted), 300);
+    assert.deepEqual(
+      new Set(migrated.events.map((event) => event.project)),
+      new Set(["first-new", "second-old"]),
+    );
+    assert.deepEqual(
+      new Set(targeted.events.map((event) => event.project)),
+      new Set(["first-new", "second-new"]),
+    );
+  } finally {
+    state.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("snapshot staging rejects durable ledger and SQLite sidecar paths", async () => {
   const fixture = await createFixture([]);
   try {
@@ -2634,7 +2698,7 @@ test("snapshot staging rejects durable ledger and SQLite sidecar paths", async (
   }
 });
 
-test("unchanged rollouts rescan when a session-index title has no timestamp", async () => {
+test("session-index title changes reuse unchanged rollout content", async () => {
   const fixture = await createFixture([100]);
   const sessionIndex = resolve(fixture.root, "session_index.jsonl");
   try {
@@ -2652,8 +2716,9 @@ test("unchanged rollouts rescan when a session-index title has no timestamp", as
 
     assert.equal(first.threads[0].title, "Old title");
     assert.equal(refreshed.threads[0].title, "New title");
-    assert.equal(refreshed.coverage.filesScanned, 1);
-    assert.equal(refreshed.coverage.filesReused, 0);
+    assert.equal(refreshed.coverage.filesScanned, 0);
+    assert.equal(refreshed.coverage.filesReused, 1);
+    assert.equal(refreshed.coverage.bytesScanned, 0);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
