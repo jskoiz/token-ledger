@@ -2307,7 +2307,7 @@ test("unchanged and appended sources add each logical event once", async () => {
   }
 });
 
-test("unchanged rollouts rescan when state-backed metadata changes", async () => {
+test("unchanged rollouts rescan when state metadata changes in the same second", async () => {
   const fixture = await createFixture([100]);
   const state = new DatabaseSync(resolve(fixture.root, "state_5.sqlite"));
   try {
@@ -2352,6 +2352,50 @@ test("snapshot staging rejects durable ledger and SQLite sidecar paths", async (
       );
     }
     assert.equal((await readDurableLedger(ledgerPath)).revision, ledgerBefore.revision);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("unchanged rollouts rescan when a session-index title has no timestamp", async () => {
+  const fixture = await createFixture([100]);
+  const sessionIndex = resolve(fixture.root, "session_index.jsonl");
+  try {
+    await writeFile(
+      sessionIndex,
+      serialize([{ id: THREAD_ID, thread_name: "Old title" }]),
+    );
+    const first = await collectUsage(options(fixture));
+
+    await writeFile(
+      sessionIndex,
+      serialize([{ id: THREAD_ID, thread_name: "New title" }]),
+    );
+    const refreshed = await collectUsage(options(fixture));
+
+    assert.equal(first.threads[0].title, "Old title");
+    assert.equal(refreshed.threads[0].title, "New title");
+    assert.equal(refreshed.coverage.filesScanned, 1);
+    assert.equal(refreshed.coverage.filesReused, 0);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("unchanged rollout paths without UUIDs are rescanned for enrichment", async () => {
+  const fixture = await createFixture([100]);
+  const nonUuidFile = resolve(
+    dirname(fixture.file),
+    "rollout-without-a-thread-id.jsonl",
+  );
+  try {
+    await rename(fixture.file, nonUuidFile);
+    const first = await collectUsage(options(fixture));
+    const unchanged = await collectUsage(options(fixture));
+
+    assert.equal(first.coverage.filesScanned, 1);
+    assert.equal(unchanged.coverage.filesScanned, 1);
+    assert.equal(unchanged.coverage.filesReused, 0);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
