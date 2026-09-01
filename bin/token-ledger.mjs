@@ -1124,17 +1124,23 @@ async function refreshSnapshot(options) {
         "Token Ledger: snapshot is above 70% of its safety limit; older buckets will compact automatically as it grows.\n",
       );
     }
-    const currentInventory = await sourceInventory(
-      options.codexHome,
-      options.includeArchived,
-    );
-    return {
-      snapshot: storedSnapshot,
-      sourceStatus: refreshedSnapshotSourceStatus(
+    let sourceStatus = "unchecked-cache";
+    try {
+      const currentInventory = await sourceInventory(
+        options.codexHome,
+        options.includeArchived,
+      );
+      sourceStatus = refreshedSnapshotSourceStatus(
         storedSnapshot.sourceWatermark,
         currentInventory.watermark,
         sourceWatermarksEqual,
-      ),
+      );
+    } catch (error) {
+      if (!postRefreshStatusAllowsUnchecked(error)) throw error;
+    }
+    return {
+      snapshot: storedSnapshot,
+      sourceStatus,
     };
   } catch (error) {
     if (progressStarted) process.stderr.write("\n");
@@ -1180,6 +1186,10 @@ export function refreshedSnapshotSourceStatus(
   return watermarksEqual(snapshotWatermark, currentWatermark)
     ? "verified-current"
     : "unchecked-cache";
+}
+
+export function postRefreshStatusAllowsUnchecked(error) {
+  return ["ENOENT", "ENOTDIR"].includes(primitiveString(error?.code));
 }
 
 const RECOVERABLE_REFRESH_ERROR_CODES = new Set([

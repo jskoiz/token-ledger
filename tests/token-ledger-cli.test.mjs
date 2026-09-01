@@ -29,6 +29,7 @@ import {
   filterDayEvents,
   loadSnapshot,
   parseArgs,
+  postRefreshStatusAllowsUnchecked,
   redactLocalPaths,
   refreshedSnapshotSourceStatus,
   refreshFailureAllowsStaleFallback,
@@ -2572,6 +2573,21 @@ test("stale refresh fallback only accepts bounded transient failures", () => {
       refreshFailureAllowsStaleFallback(wrappedCorruption),
       false,
       errstr,
+    );
+  }
+});
+
+test("post-refresh status tolerates only source-disappearance races", () => {
+  for (const code of ["ENOENT", "ENOTDIR"]) {
+    assert.equal(
+      postRefreshStatusAllowsUnchecked(Object.assign(new Error(code), { code })),
+      true,
+    );
+  }
+  for (const code of ["EACCES", "EIO", "SQLITE_BUSY"]) {
+    assert.equal(
+      postRefreshStatusAllowsUnchecked(Object.assign(new Error(code), { code })),
+      false,
     );
   }
 });
