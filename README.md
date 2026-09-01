@@ -277,7 +277,6 @@ In the interactive dashboard:
 npm test
 npm run lint
 npm run verify:release
-npm pack --dry-run --json
 ```
 
 `npm run verify:release` packs the allowlisted artifact, installs that tarball

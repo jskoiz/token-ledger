@@ -12,7 +12,7 @@ The update script runs `npm ci`, so dependencies (including the native `sharp`
 image encoder used for PNG reports) are already installed when a session
 starts. Standard commands live in `package.json` and `README.md`; use those
 rather than duplicating them here (`npm test`, `npm run lint`,
-`npm run verify:release`). Lint runs both `eslint` and `oxlint`.
+`npm run verify:release`). Lint runs `eslint`.
 
 Non-obvious gotchas for running/testing the CLI:
 
