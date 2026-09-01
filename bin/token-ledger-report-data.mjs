@@ -20,8 +20,9 @@ import {
   localDateString,
   shiftCalendarDate,
 } from "../lib/token-ledger-calendar.mjs";
+import { SOURCE_STATUSES } from "./token-ledger-source-status.mjs";
 
-export { shiftCalendarDate };
+export { shiftCalendarDate, SOURCE_STATUSES };
 
 const DAY_MS = 86_400_000;
 // Two readings this close in percent confirm a flat reported interval.
@@ -30,13 +31,6 @@ const METER_EQUAL_TOLERANCE = 0.05;
 const METER_EXHAUSTED_TOLERANCE = 0.05;
 const RECONCILE_RELATIVE_TOLERANCE = 1e-6;
 const RECONCILE_ABSOLUTE_TOLERANCE = 1.5;
-
-export const SOURCE_STATUSES = [
-  "verified-current",
-  "explicit-snapshot",
-  "unchecked-cache",
-  "stale-fallback",
-];
 
 // Fast mode is an overlapping usage property, not a separate model. Both
 // recognized service-tier labels count.
@@ -47,6 +41,15 @@ export function isFastMode(serviceTier) {
 function finiteTimestamp(value) {
   const timestamp = new Date(value).getTime();
   return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function primitiveString(value) {
+  try {
+    const text = String.prototype.valueOf.call(value);
+    return text === value ? text : null;
+  } catch {
+    return null;
+  }
 }
 
 function dateStringFromParts(year, month, day) {
@@ -139,14 +142,17 @@ export function resolveEffectiveEnd({
   const startMs = bounds.start.getTime();
   const endMs = bounds.end.getTime();
   const generatedAtMs = finiteTimestamp(snapshot.generatedAt);
+  const sourceCutoffAtMs = finiteTimestamp(
+    snapshot.provenance?.sourceCutoffAt,
+  );
   const wallClockMs = Number.isFinite(reportTimeMs) ? reportTimeMs : endMs;
   // The capture-time cutoff is inclusive: an event stamped exactly at
   // generatedAt was part of the capture.
   const cutoff = sourceStatus === "verified-current"
     ? wallClockMs
-    : generatedAtMs === null
+    : (sourceCutoffAtMs ?? generatedAtMs) === null
       ? wallClockMs
-      : generatedAtMs + 1;
+      : (sourceCutoffAtMs ?? generatedAtMs) + 1;
   return Math.max(startMs, Math.min(endMs, cutoff));
 }
 
@@ -189,9 +195,9 @@ function buildMeter({ snapshot, bounds, effectiveEndMs, sourceStatus, events }) 
   // A named per-model pool is a different meter; if only named observations
   // exist, the account-wide weekly limit is unobserved, not substituted.
   const selected = weeklyQuotaObservations(snapshot);
-  const accountWide = selected.some((observation) => !observation.limitName)
-    ? selected
-    : [];
+  const accountWide = selected.filter(
+    (observation) => observation.scope === "account",
+  );
   const observationsAll = normalizeQuotaTimeline(accountWide).filter(
     (observation) => observation.timestampMs < effectiveEndMs,
   );
@@ -660,6 +666,9 @@ export function buildTrendReportViewModel({
       ? (totalTokens / priorEquivalentTokens - 1) * 100
       : null;
   const estimated = daily.some((row) => row.estimated);
+  const rawLegacySnapshotStatus = snapshot.coverage?.legacySnapshotStatus ??
+    snapshot.metadata?.durableLedger?.legacySnapshotStatus;
+  const legacySnapshotStatus = primitiveString(rawLegacySnapshotStatus);
   const maximumEstimatedResolutionSeconds = boundedEvents.reduce(
     (maximum, { tokens, event }) => {
       if (!(tokens > 0) || event.rangeAllocationEstimated !== true) {
@@ -728,9 +737,19 @@ export function buildTrendReportViewModel({
       componentCoveragePercent:
         totalTokens > 0 ? (detailedTokens / totalTokens) * 100 : 100,
       parseErrors: Math.max(0, Number(snapshot.coverage?.parseErrors) || 0),
+      invalidTokenRecords: Math.max(
+        0,
+        Number(snapshot.coverage?.invalidTokenRecords) || 0,
+      ),
+      invalidQuotaRecords: Math.max(
+        0,
+        Number(snapshot.coverage?.invalidQuotaRecords) || 0,
+      ),
+      sourceIncomplete: snapshot.coverage?.sourceIncomplete === true,
       estimated,
       estimatedBucketCount: daily.filter((row) => row.estimated).length,
       maximumResolutionSeconds: maximumEstimatedResolutionSeconds || null,
+      legacySnapshotStatus,
     },
     provenance: {
       localOnly: (snapshot.provenance?.kind ?? "codex-local-metadata") ===

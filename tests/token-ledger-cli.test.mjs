@@ -1,10 +1,13 @@
 import { spawnSync } from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
-import {
+import fsPromises, {
   appendFile,
+  chmod,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   rm,
   stat,
@@ -12,20 +15,25 @@ import {
   writeFile,
 } from "node:fs/promises";
 import assert from "node:assert/strict";
-import { homedir, tmpdir } from "node:os";
+import { homedir, tmpdir, userInfo } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
   readPrivateSnapshot,
+  stagePrivateSnapshot,
   writePrivateSnapshot,
 } from "../lib/token-ledger-snapshot.mjs";
 import {
   aggregateProjects,
   dayBounds,
   filterDayEvents,
+  loadSnapshot,
   parseArgs,
+  postRefreshStatusAllowsUnchecked,
   redactLocalPaths,
+  refreshedSnapshotSourceStatus,
+  refreshFailureAllowsStaleFallback,
   rolling24hBounds,
   rollingDurationBounds,
   run,
@@ -43,6 +51,13 @@ import {
   sourceWatermarksEqual,
 } from "../lib/token-ledger-importer.mjs";
 import {
+  codexHomeFingerprint,
+  readDurableLedgerRevision,
+  resolveDurableLedgerPath,
+} from "../lib/token-ledger-ledger.mjs";
+
+import {
+  incompleteSourceWarning,
   quotaCycleSummary,
   renderFullscreen,
   renderTerminal,
@@ -97,6 +112,38 @@ import {
   buildActualTokenBins,
   renderTrendPlain,
 } from "../bin/token-ledger-trend-terminal.mjs";
+import {
+  snapshotFreshnessDetail,
+  SOURCE_STATUSES,
+  sourceStatusLabel,
+  sourceStatusLine,
+} from "../bin/token-ledger-source-status.mjs";
+import {
+  ACCOUNT_QUOTA_LIMIT_KEY,
+  QUOTA_IDENTITY_CONTRACT_VERSION,
+} from "../lib/token-ledger-quota-contract.mjs";
+
+const TEST_LEDGER_STATE_ROOT = resolve(
+  userInfo().homedir,
+  ".token-ledger",
+  "test-state",
+  String(process.pid),
+);
+
+test.after(async () => {
+  await rm(TEST_LEDGER_STATE_ROOT, { recursive: true, force: true });
+});
+
+async function createPrivateFixtureRoot(prefix) {
+  return mkdtemp(resolve(tmpdir(), prefix));
+}
+
+const CURRENT_QUOTA_METADATA = Object.freeze({
+  durableLedger: Object.freeze({
+    quotaIdentityContract: QUOTA_IDENTITY_CONTRACT_VERSION,
+  }),
+});
+const NAMED_QUOTA_LIMIT_KEY = "0000000000000000";
 
 const ROLLING_24H_FIXTURE = fileURLToPath(
   new URL("./fixtures/rolling-24h-projects.json", import.meta.url),
@@ -399,7 +446,7 @@ async function setLifecycleSourceNewer(sourcePath, cacheTimeMs) {
 }
 
 test("successful metadata-backed refresh lifecycle remains hermetic", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-refresh-lifecycle-"));
+  const root = await createPrivateFixtureRoot("token-ledger-refresh-lifecycle-");
   const codexHome = resolve(root, "codex-home");
   const cachePath = resolve(root, "cache", "token-ledger-snapshot-v3.json.gz");
   const noArchivedCachePath = resolve(
@@ -520,6 +567,10 @@ test("successful metadata-backed refresh lifecycle remains hermetic", async () =
     const initialCache = await readFile(cachePath);
     const unchangedCacheTimeMs = await ageLifecycleCache(cachePath);
     await lifecycleRun(codexHome, cachePath);
+    assert.equal(
+      (await readPrivateSnapshot(cachePath)).coverage.observedTokens,
+      firstSnapshot.coverage.observedTokens,
+    );
     assert.deepEqual(await readFile(cachePath), initialCache);
 
     await writeLifecycleRollout(
@@ -596,7 +647,8 @@ test("successful metadata-backed refresh lifecycle remains hermetic", async () =
     const noArchivedSnapshot = await readPrivateSnapshot(noArchivedCachePath);
     assert.match(noArchivedOutput, /metadata-project/);
     assert.doesNotMatch(noArchivedOutput, /archived-project/);
-    assert.equal(noArchivedSnapshot.coverage.filesScanned, 1);
+    assert.equal(noArchivedSnapshot.coverage.filesScanned, 0);
+    assert.equal(noArchivedSnapshot.coverage.filesReused, 1);
     assert.equal(noArchivedSnapshot.coverage.observedTokens, 1_500);
     assert.equal(noArchivedSnapshot.events.length, 1);
   } finally {
@@ -640,6 +692,21 @@ function sourceRolloutRows(total, turnId, timestamp) {
       },
     },
   ];
+}
+
+function sourceRolloutRowsWithQuota(total, turnId, timestamp, usedPercent) {
+  const rows = sourceRolloutRows(total, turnId, timestamp);
+  rows.at(-1).payload.rate_limits = {
+    limit_id: "codex",
+    limit_name: "Default display",
+    plan_type: "plus",
+    primary: {
+      window_minutes: 10_080,
+      used_percent: usedPercent,
+      resets_at: Date.parse("2026-08-30T10:00:00.000Z") / 1_000,
+    },
+  };
+  return rows;
 }
 
 function serializeRows(rows) {
@@ -1096,7 +1163,7 @@ test("terminal renderers sanitize use types before grouping and layout", () => {
 });
 
 test("explicit snapshots sanitize labels in static output", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-terminal-text-"));
+  const root = await createPrivateFixtureRoot("token-ledger-terminal-text-");
   const snapshotPath = resolve(root, "explicit-snapshot.json");
   try {
     await writeFile(
@@ -1137,8 +1204,59 @@ test("explicit snapshots sanitize labels in static output", async () => {
 
     assert.match(output, /explicit 🐈/);
     assert.match(output, /SDK\s+100\.0%/);
+    assert.match(output, /PROVENANCE · EXPLICIT SNAPSHOT/);
     assert.deepEqual(nonLineControlCodes(output), []);
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("legacy project output keeps snapshot age separate from provenance", async () => {
+  const root = await createPrivateFixtureRoot("token-ledger-legacy-provenance-");
+  const snapshotPath = resolve(root, "snapshot.json");
+  const fakeYouPlot = resolve(root, "uplot");
+  const previousPath = process.env.PATH;
+  try {
+    await writeFile(fakeYouPlot, "#!/bin/sh\nprintf 'chart output\\n'\n", {
+      mode: 0o755,
+    });
+    await chmod(fakeYouPlot, 0o755);
+    await writeFile(snapshotPath, JSON.stringify({
+      schemaVersion: 3,
+      generatedAt: "2026-08-20T12:00:00.000Z",
+      events: [{
+        timestamp: "2026-08-20T12:00:00.000Z",
+        project: "legacy",
+        threadId: "legacy-thread",
+        model: "gpt-5.5",
+        totalTokens: 1,
+        outputTokens: 0,
+      }],
+      threads: [{ id: "legacy-thread", project: "legacy" }],
+      quotaObservations: [],
+    }));
+    process.env.PATH = root;
+
+    const output = await run(parseArgs([
+      "day",
+      "2026-08-20",
+      "--input",
+      snapshotPath,
+      "--no-refresh",
+      "--static",
+      "--plain",
+      "--youplot",
+      "--tz",
+      "UTC",
+    ]), { nowMs: Date.parse("2026-08-20T12:12:00.000Z") });
+
+    assert.match(output, /Snapshot: fresh · 12m old/);
+    assert.match(output, /PROVENANCE · EXPLICIT SNAPSHOT/);
+    assert.match(output, /chart output/);
+    assert.ok(!output.includes(root));
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -1324,7 +1442,7 @@ test("parseArgs accepts --no-open for trend images and rejects it elsewhere", ()
 });
 
 test("rolling view describes an empty range as the last 24 hours", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-rolling-empty-"));
+  const root = await createPrivateFixtureRoot("token-ledger-rolling-empty-");
   const snapshotPath = resolve(root, "snapshot.json");
   try {
     await writeFile(
@@ -1340,6 +1458,8 @@ test("rolling view describes an empty range as the last 24 hours", async () => {
       "--plain",
     ]));
     assert.match(output, /No model-call events found for the last 24 hours \(/);
+    assert.match(output, /Snapshot: age unknown/);
+    assert.match(output, /PROVENANCE · EXPLICIT SNAPSHOT/);
     assert.match(output, /Source: snapshot\.json/);
     assert.ok(!output.includes(root));
   } finally {
@@ -1390,7 +1510,7 @@ test("redactLocalPaths preserves URL schemes while redacting UNC paths", () => {
 });
 
 test("snapshot errors retain safe labels without absolute paths", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-privacy-"));
+  const root = await createPrivateFixtureRoot("token-ledger-privacy-");
   const missingPath = resolve(root, "missing-snapshot.json");
   const malformedPath = resolve(root, "malformed-snapshot.json");
   const malformedGzipPath = resolve(root, "malformed-snapshot.json.gz");
@@ -1478,7 +1598,7 @@ test("snapshot errors retain safe labels without absolute paths", async () => {
 });
 
 test("CLI reads an explicit gzip-compressed snapshot", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-gzip-input-"));
+  const root = await createPrivateFixtureRoot("token-ledger-gzip-input-");
   const snapshotPath = resolve(root, "snapshot.json.gz");
   try {
     await writePrivateSnapshot(snapshotPath, {
@@ -1521,8 +1641,75 @@ test("CLI reads an explicit gzip-compressed snapshot", async () => {
   }
 });
 
+test("explicit and unchecked old-contract snapshots keep tokens but no meter", async () => {
+  const root = await createPrivateFixtureRoot("token-ledger-old-contract-");
+  const snapshotPath = resolve(root, "snapshot.json.gz");
+  try {
+    await writePrivateSnapshot(snapshotPath, {
+      schemaVersion: 3,
+      generatedAt: "2026-08-20T12:00:00.000Z",
+      provenance: {
+        collection: { since: null, includeArchived: true },
+      },
+      metadata: {
+        durableLedger: {
+          quotaIdentityContract: "codex-limit-id-v1",
+        },
+      },
+      coverage: { observedTokens: 100 },
+      events: [{
+        timestamp: "2026-08-20T12:00:00.000Z",
+        model: "gpt-5.5",
+        totalTokens: 100,
+        inputTokens: 100,
+        outputTokens: 0,
+      }],
+      quotaObservations: [{
+        timestamp: "2026-08-20T12:00:00.000Z",
+        usedPercent: 37,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
+        windowMinutes: 10_080,
+        resetsAt: Date.parse("2026-08-27T12:00:00.000Z") / 1_000,
+      }],
+    });
+
+    const modes = [
+      {
+        sourceStatus: "explicit-snapshot",
+        options: {
+          ...parseArgs(["week", "--no-refresh"]),
+          input: snapshotPath,
+          inputExplicit: true,
+        },
+      },
+      {
+        sourceStatus: "unchecked-cache",
+        options: {
+          ...parseArgs(["week", "--no-refresh"]),
+          input: snapshotPath,
+          inputExplicit: false,
+        },
+      },
+    ];
+    for (const mode of modes) {
+      const loaded = await loadSnapshot(mode.options);
+      assert.equal(loaded.sourceStatus, mode.sourceStatus);
+      assert.equal(loaded.snapshot.events[0].totalTokens, 100);
+      assert.equal(loaded.snapshot.quotaObservations.length, 1);
+      assert.deepEqual(weeklyQuotaObservations(loaded.snapshot), []);
+      assert.equal(
+        quotaCycleSummary(loaded.snapshot, loaded.snapshot.events).available,
+        false,
+      );
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("rejects legacy snapshots before repricing aliases", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-legacy-rate-card-"));
+  const root = await createPrivateFixtureRoot("token-ledger-legacy-rate-card-");
   const snapshotPath = resolve(root, "snapshot.json");
   try {
     await writeFile(snapshotPath, JSON.stringify({
@@ -1558,7 +1745,7 @@ test("rejects legacy snapshots before repricing aliases", async () => {
 });
 
 test("refresh and source failures retain context without absolute paths", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-source-privacy-"));
+  const root = await createPrivateFixtureRoot("token-ledger-source-privacy-");
   const missingCodexHome = resolve(root, "missing-codex-home");
   const staleSnapshotPath = resolve(root, "stale-snapshot.json");
   const codexHome = resolve(root, "codex-home");
@@ -1635,7 +1822,7 @@ test("1d renders deterministic project totals from a rolling 24-hour fixture", a
 });
 
 test("static freshness uses the wall clock after snapshot loading", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-post-load-time-"));
+  const root = await createPrivateFixtureRoot("token-ledger-post-load-time-");
   const snapshotPath = resolve(root, "snapshot.json");
   const beforeLoadMs = Date.parse("2026-08-20T00:00:00.000Z");
   const afterLoadMs = beforeLoadMs + 1_000;
@@ -1786,7 +1973,7 @@ test("source watermarks detect changes independent of cache mtime", () => {
 });
 
 test("refresh applies the normalized cutoff and records its collection scope", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-since-refresh-"));
+  const root = await createPrivateFixtureRoot("token-ledger-since-refresh-");
   const codexHome = resolve(root, "codex-home");
   const sessionDirectory = resolve(codexHome, "sessions", "2026", "08", "20");
   const outputPath = resolve(root, "snapshot.json");
@@ -1888,7 +2075,7 @@ test("refresh applies the normalized cutoff and records its collection scope", a
 });
 
 test("unfiltered reads reject a cache with a filtered collection scope", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-scope-cache-"));
+  const root = await createPrivateFixtureRoot("token-ledger-scope-cache-");
   const snapshotPath = resolve(root, "filtered-snapshot.json");
   try {
     await writePrivateSnapshot(snapshotPath, {
@@ -1980,7 +2167,7 @@ test("automatic loads check source watermarks regardless of cache age", () => {
 });
 
 test("automatic refresh ignores a newer cache mtime when the source watermark changes", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-watermark-load-"));
+  const root = await createPrivateFixtureRoot("token-ledger-watermark-load-");
   const codexHome = resolve(root, "codex-home");
   const sourceDirectory = resolve(codexHome, "sessions", "2026", "08");
   const sourceFile = resolve(
@@ -2051,6 +2238,776 @@ test("automatic refresh ignores a newer cache mtime when the source watermark ch
   }
 });
 
+test("automatic cache validation rejects a different Codex home", async () => {
+  const root = await createPrivateFixtureRoot("token-ledger-home-cache-");
+  const codexHomeA = resolve(root, "codex-home-a");
+  const codexHomeB = resolve(root, "codex-home-b");
+  const snapshotPath = resolve(root, "snapshot.json.gz");
+  try {
+    await mkdir(codexHomeA, { recursive: true });
+    await mkdir(codexHomeB, { recursive: true });
+    const snapshot = await collectUsage({
+      output: snapshotPath,
+      codexHome: codexHomeA,
+      includeArchived: true,
+      since: null,
+    });
+    await writePrivateSnapshot(snapshotPath, snapshot);
+
+    const options = parseArgs([
+      "day",
+      "2026-08-23",
+      "--static",
+      "--plain",
+      "--ascii",
+      "--tz",
+      "UTC",
+    ]);
+    options.codexHome = codexHomeB;
+    options.input = snapshotPath;
+    options.inputExplicit = false;
+
+    await assert.rejects(
+      () => loadSnapshot(options),
+      (error) =>
+        error?.code === "ERR_DURABLE_LEDGER_CODEX_HOME" &&
+        /different Codex data directory/i.test(error.message),
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("automatic cache validation rebuilds a missing or behind ledger", async () => {
+  const root = await createPrivateFixtureRoot("token-ledger-revision-cache-");
+  const codexHome = resolve(root, "codex-home");
+  const snapshotPath = resolve(root, "snapshot.json.gz");
+  let ledgerPath;
+  try {
+    await mkdir(codexHome, { recursive: true });
+    await collectUsage({
+      output: snapshotPath,
+      codexHome,
+      includeArchived: true,
+      since: null,
+    });
+    const cached = await collectUsage({
+      output: snapshotPath,
+      codexHome,
+      includeArchived: true,
+      since: null,
+    });
+    ledgerPath = resolveDurableLedgerPath({ codexHome, output: snapshotPath });
+    await writePrivateSnapshot(snapshotPath, cached);
+    const database = new DatabaseSync(ledgerPath);
+    database.prepare(
+      "UPDATE ledger_meta SET value = '0' WHERE key = 'revision'",
+    ).run();
+    database.close();
+
+    const options = parseArgs([
+      "day",
+      "2026-08-23",
+      "--static",
+      "--plain",
+      "--ascii",
+      "--tz",
+      "UTC",
+    ]);
+    options.codexHome = codexHome;
+    options.input = snapshotPath;
+    options.inputExplicit = false;
+
+    const behind = await loadSnapshot(options);
+    assert.equal(behind.sourceStatus, "verified-current");
+    assert.equal(behind.snapshot.metadata.durableLedger.revision, 1);
+    assert.equal(await readDurableLedgerRevision(ledgerPath), 1);
+
+    await rm(ledgerPath);
+    const missing = await loadSnapshot(options);
+    assert.equal(missing.sourceStatus, "verified-current");
+    assert.equal(missing.snapshot.metadata.durableLedger.revision, 1);
+    assert.equal(await readDurableLedgerRevision(ledgerPath), 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("matching cache refreshes when either quota contract is missing", async () => {
+  const root = await createPrivateFixtureRoot("token-ledger-contract-cache-");
+  const codexHome = resolve(root, "codex-home");
+  const sourceDirectory = resolve(codexHome, "sessions", "2026", "08");
+  const sourceFile = resolve(
+    sourceDirectory,
+    "rollout-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl",
+  );
+  const snapshotPath = resolve(root, "snapshot.json.gz");
+  const ledgerPath = resolveDurableLedgerPath({ codexHome, output: snapshotPath });
+  let database;
+  try {
+    await mkdir(sourceDirectory, { recursive: true });
+    await writeFile(
+      sourceFile,
+      serializeRows(sourceRolloutRowsWithQuota(
+        100,
+        "turn-1",
+        "2026-08-23T10:00:00.000Z",
+        37,
+      )),
+    );
+    const initial = await collectUsage({
+      output: snapshotPath,
+      codexHome,
+      includeArchived: true,
+      since: null,
+    });
+    await writePrivateSnapshot(snapshotPath, initial);
+    assert.equal(initial.metadata.durableLedger.revision, 1);
+    assert.equal(initial.quotaObservations.length, 1);
+
+    database = new DatabaseSync(ledgerPath);
+    database.prepare(
+      "DELETE FROM ledger_meta WHERE key = 'quota_identity_contract'",
+    ).run();
+    database.close();
+    database = null;
+
+    const options = parseArgs([
+      "day",
+      "2026-08-23",
+      "--static",
+      "--plain",
+      "--ascii",
+      "--tz",
+      "UTC",
+    ]);
+    options.codexHome = codexHome;
+    options.input = snapshotPath;
+    options.inputExplicit = false;
+
+    const ledgerRefreshed = await loadSnapshot(options);
+    assert.equal(ledgerRefreshed.sourceStatus, "verified-current");
+    assert.equal(ledgerRefreshed.snapshot.metadata.durableLedger.revision, 2);
+    assert.equal(ledgerRefreshed.snapshot.quotaObservations.length, 1);
+
+    const markerlessCache = {
+      ...ledgerRefreshed.snapshot,
+      metadata: {
+        ...ledgerRefreshed.snapshot.metadata,
+        durableLedger: {
+          ...ledgerRefreshed.snapshot.metadata.durableLedger,
+        },
+      },
+    };
+    delete markerlessCache.metadata.durableLedger.quotaIdentityContract;
+    await writePrivateSnapshot(snapshotPath, markerlessCache);
+    const cacheRefreshed = await loadSnapshot(options);
+    assert.equal(cacheRefreshed.sourceStatus, "verified-current");
+    assert.equal(cacheRefreshed.snapshot.metadata.durableLedger.revision, 3);
+    assert.equal(
+      cacheRefreshed.snapshot.metadata.durableLedger.quotaIdentityContract,
+      QUOTA_IDENTITY_CONTRACT_VERSION,
+    );
+    assert.equal(cacheRefreshed.snapshot.quotaObservations.length, 1);
+
+    database = new DatabaseSync(ledgerPath, { readOnly: true });
+    assert.equal(database.prepare(`
+      SELECT value
+        FROM ledger_meta
+       WHERE key = 'quota_identity_contract'
+    `).get().value, QUOTA_IDENTITY_CONTRACT_VERSION);
+  } finally {
+    database?.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("automatic cache validation propagates unscoped ledger migration failures", async () => {
+  const root = await createPrivateFixtureRoot("token-ledger-migration-cache-");
+  const codexHome = resolve(root, "codex-home");
+  const sourceDirectory = resolve(codexHome, "sessions", "2026", "08");
+  const sourceFile = resolve(
+    sourceDirectory,
+    "rollout-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl",
+  );
+  const snapshotPath = resolve(root, "snapshot.json.gz");
+  const ledgerPath = resolveDurableLedgerPath({ codexHome, output: snapshotPath });
+  let database;
+  try {
+    await mkdir(sourceDirectory, { recursive: true });
+    await writeFile(
+      sourceFile,
+      serializeRows(sourceRolloutRows(
+        100,
+        "turn-1",
+        "2026-08-23T10:00:00.000Z",
+      )),
+    );
+    const initial = await collectUsage({
+      output: snapshotPath,
+      codexHome,
+      includeArchived: true,
+      since: null,
+    });
+    await writePrivateSnapshot(snapshotPath, initial);
+    assert.equal(initial.metadata.durableLedger.revision, 1);
+
+    database = new DatabaseSync(ledgerPath);
+    database.exec(`
+      DROP TABLE migration_runs;
+      CREATE TABLE migration_runs (
+        migration_key TEXT PRIMARY KEY,
+        source_fingerprint TEXT NOT NULL,
+        source_label TEXT NOT NULL,
+        generated_at TEXT,
+        migrated_at TEXT NOT NULL,
+        usage_rows INTEGER NOT NULL,
+        quota_rows INTEGER NOT NULL
+      ) WITHOUT ROWID;
+      INSERT INTO migration_runs (
+        migration_key, source_fingerprint, source_label, generated_at,
+        migrated_at, usage_rows, quota_rows
+      ) VALUES (
+        'snapshot-v3-default', 'legacy-fingerprint', 'legacy-snapshot',
+        '2026-08-20T12:00:00.000Z', '2026-08-20T12:00:00.000Z', 1, 0
+      );
+      PRAGMA user_version = 1;
+    `);
+    database.close();
+    database = null;
+    const ledgerBefore = await readFile(ledgerPath);
+    const snapshotBefore = await readFile(snapshotPath);
+
+    const options = parseArgs([
+      "day",
+      "2026-08-23",
+      "--static",
+      "--plain",
+      "--ascii",
+      "--tz",
+      "UTC",
+    ]);
+    options.codexHome = codexHome;
+    options.input = snapshotPath;
+    options.inputExplicit = false;
+
+    await assert.rejects(
+      () => loadSnapshot(options),
+      (error) => {
+        assert.equal(error?.code, "ERR_DURABLE_LEDGER_MIGRATION_SCOPE");
+        assert.match(error.message, /ledger was left untouched/i);
+        return true;
+      },
+    );
+    assert.deepEqual(await readFile(snapshotPath), snapshotBefore);
+    assert.deepEqual(await readFile(ledgerPath), ledgerBefore);
+    database = new DatabaseSync(ledgerPath, { readOnly: true });
+    assert.equal(database.prepare("PRAGMA user_version").get().user_version, 1);
+    assert.equal(
+      database.prepare("SELECT COUNT(*) AS count FROM migration_runs").get().count,
+      1,
+    );
+  } finally {
+    database?.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("stale refresh fallback only accepts bounded transient failures", () => {
+  for (const code of [
+    "ERR_SNAPSHOT_SIZE_LIMIT",
+    "ERR_SOURCE_CHANGED_DURING_COLLECTION",
+    "SQLITE_BUSY",
+    "SQLITE_LOCKED",
+  ]) {
+    assert.equal(
+      refreshFailureAllowsStaleFallback(Object.assign(new Error(code), { code })),
+      true,
+      code,
+    );
+  }
+
+  const sqliteBusy = Object.assign(new Error("database is busy"), {
+    code: "ERR_SQLITE_ERROR",
+    errcode: 5,
+    errstr: "SQLITE_BUSY",
+  });
+  const wrappedBusy = Object.assign(
+    new Error("Could not refresh local snapshot", { cause: sqliteBusy }),
+    { code: "ERR_SQLITE_ERROR" },
+  );
+  assert.equal(refreshFailureAllowsStaleFallback(wrappedBusy), true);
+
+  for (const code of [
+    "ERR_DURABLE_LEDGER_CODEX_HOME",
+    "ERR_DURABLE_LEDGER_LEGACY_SNAPSHOT",
+    "ERR_DURABLE_LEDGER_MIGRATION_SCOPE",
+    "ERR_DURABLE_LEDGER_SCHEMA",
+    "ERR_SNAPSHOT_NOT_REGULAR",
+    "ERR_BUFFER_TOO_LARGE",
+    "SQLITE_CORRUPT",
+    "SQLITE_NOTADB",
+    "EIO",
+  ]) {
+    assert.equal(
+      refreshFailureAllowsStaleFallback(Object.assign(new Error(code), { code })),
+      false,
+      code,
+    );
+  }
+
+  for (const [errcode, errstr] of [
+    [11, "SQLITE_CORRUPT"],
+    [26, "SQLITE_NOTADB"],
+  ]) {
+    const sqliteCorruption = Object.assign(new Error(errstr), {
+      code: "ERR_SQLITE_ERROR",
+      errcode,
+      errstr,
+    });
+    const wrappedCorruption = Object.assign(
+      new Error("Could not refresh local snapshot", {
+        cause: sqliteCorruption,
+      }),
+      { code: "ERR_SQLITE_ERROR" },
+    );
+    assert.equal(
+      refreshFailureAllowsStaleFallback(wrappedCorruption),
+      false,
+      errstr,
+    );
+  }
+});
+
+test("post-refresh status tolerates only source-disappearance races", () => {
+  for (const code of ["ENOENT", "ENOTDIR"]) {
+    assert.equal(
+      postRefreshStatusAllowsUnchecked(Object.assign(new Error(code), { code })),
+      true,
+    );
+  }
+  for (const code of ["EACCES", "EIO", "SQLITE_BUSY"]) {
+    assert.equal(
+      postRefreshStatusAllowsUnchecked(Object.assign(new Error(code), { code })),
+      false,
+    );
+  }
+});
+
+test("snapshot size fallback stays stale and does not advance ledger revisions", async () => {
+  const root = await createPrivateFixtureRoot("token-ledger-size-fallback-");
+  const codexHome = resolve(root, "codex-home");
+  const sourceDirectory = resolve(codexHome, "sessions", "2026", "08");
+  const sourceFile = resolve(
+    sourceDirectory,
+    "rollout-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl",
+  );
+  const snapshotPath = resolve(root, "snapshot.json.gz");
+  const ledgerPath = resolveDurableLedgerPath({ codexHome, output: snapshotPath });
+  try {
+    await mkdir(sourceDirectory, { recursive: true });
+    await writeFile(
+      sourceFile,
+      serializeRows(sourceRolloutRows(
+        100,
+        "turn-1",
+        "2026-08-23T10:00:00.000Z",
+      )),
+    );
+    const initial = await collectUsage({
+      output: snapshotPath,
+      codexHome,
+      includeArchived: true,
+      since: null,
+    });
+    await writePrivateSnapshot(snapshotPath, initial);
+    assert.equal(initial.metadata.durableLedger.revision, 1);
+    assert.equal(await readDurableLedgerRevision(ledgerPath), 1);
+
+    await appendFile(
+      sourceFile,
+      serializeRows(sourceRolloutRows(
+        200,
+        "turn-2",
+        "2026-08-23T10:01:00.000Z",
+      )),
+    );
+    const options = parseArgs([
+      "day",
+      "2026-08-23",
+      "--static",
+      "--plain",
+      "--ascii",
+      "--tz",
+      "UTC",
+    ]);
+    options.codexHome = codexHome;
+    options.input = snapshotPath;
+    options.inputExplicit = false;
+    options.snapshotWriteOptions = { maxBytes: 1, targetBytes: 1 };
+
+    const firstFallback = await loadSnapshot(options);
+    const secondFallback = await loadSnapshot(options);
+    const stored = await readPrivateSnapshot(snapshotPath);
+
+    for (const fallback of [firstFallback, secondFallback]) {
+      assert.equal(fallback.sourceStatus, "stale-fallback");
+      assert.equal(fallback.snapshot.coverage.observedTokens, 100);
+      assert.equal(fallback.snapshot.metadata.durableLedger.revision, 1);
+    }
+    assert.equal(await readDurableLedgerRevision(ledgerPath), 1);
+    assert.equal(stored.coverage.observedTokens, 100);
+    assert.equal(stored.metadata.durableLedger.revision, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("retry exhaustion serves the cached report after repeated source identity failures", async () => {
+  const root = await createPrivateFixtureRoot("token-ledger-identity-fallback-");
+  const codexHome = resolve(root, "codex-home");
+  const sourceDirectory = resolve(codexHome, "sessions", "2026", "08");
+  const sourceFile = resolve(
+    sourceDirectory,
+    "rollout-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl",
+  );
+  const snapshotPath = resolve(root, "snapshot.json.gz");
+  try {
+    await mkdir(sourceDirectory, { recursive: true });
+    await writeFile(
+      sourceFile,
+      serializeRows(sourceRolloutRows(
+        100,
+        "turn-1",
+        "2026-08-23T10:00:00.000Z",
+      )),
+    );
+    const initial = await collectUsage({
+      output: snapshotPath,
+      codexHome,
+      includeArchived: true,
+      since: null,
+    });
+    await writePrivateSnapshot(snapshotPath, initial);
+    await appendFile(
+      sourceFile,
+      serializeRows(sourceRolloutRows(
+        200,
+        "turn-2",
+        "2026-08-23T10:01:00.000Z",
+      )),
+    );
+
+    const options = parseArgs([
+      "day",
+      "2026-08-23",
+      "--static",
+      "--plain",
+      "--ascii",
+      "--tz",
+      "UTC",
+    ]);
+    options.codexHome = codexHome;
+    options.input = snapshotPath;
+    options.inputExplicit = false;
+    let failures = 0;
+    const originalOpen = fsPromises.open;
+    fsPromises.open = async (...args) => {
+      if (String(args[0]) === sourceFile && failures < 3) {
+        failures += 1;
+        const error = new Error("Rollout identity changed during collection.");
+        error.code = "ERR_SOURCE_IDENTITY_CHANGED";
+        throw error;
+      }
+      return originalOpen(...args);
+    };
+    syncBuiltinESMExports();
+    try {
+      const fallback = await loadSnapshot(options);
+      assert.equal(failures, 3);
+      assert.equal(fallback.sourceStatus, "stale-fallback");
+      assert.equal(
+        fallback.snapshot.coverage.observedTokens,
+        initial.coverage.observedTokens,
+      );
+    } finally {
+      fsPromises.open = originalOpen;
+      syncBuiltinESMExports();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("old quota contracts make every stale-fallback path meterless", async () => {
+  const cases = [
+    {
+      name: "old-ledger-auto",
+      ledgerContract: "codex-limit-id-v1",
+      snapshotContract: QUOTA_IDENTITY_CONTRACT_VERSION,
+      refresh: false,
+    },
+    {
+      name: "old-cache-auto",
+      ledgerContract: QUOTA_IDENTITY_CONTRACT_VERSION,
+      snapshotContract: null,
+      refresh: false,
+    },
+    {
+      name: "old-ledger-explicit-refresh",
+      ledgerContract: "codex-limit-id-v1",
+      snapshotContract: QUOTA_IDENTITY_CONTRACT_VERSION,
+      refresh: true,
+    },
+  ];
+  for (const entry of cases) {
+    const root = await createPrivateFixtureRoot(
+      `token-ledger-contract-fallback-${entry.name}-`,
+    );
+    const codexHome = resolve(root, "codex-home");
+    const sourceDirectory = resolve(codexHome, "sessions", "2026", "08");
+    const sourceFile = resolve(
+      sourceDirectory,
+      "rollout-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl",
+    );
+    const snapshotPath = resolve(root, "snapshot.json.gz");
+    const ledgerPath = resolveDurableLedgerPath({ codexHome, output: snapshotPath });
+    let database;
+    try {
+      await mkdir(sourceDirectory, { recursive: true });
+      await writeFile(
+        sourceFile,
+        serializeRows(sourceRolloutRowsWithQuota(
+          100,
+          "turn-1",
+          "2026-08-23T10:00:00.000Z",
+          37,
+        )),
+      );
+      const initial = await collectUsage({
+        output: snapshotPath,
+        codexHome,
+        includeArchived: true,
+        since: null,
+      });
+      const cached = {
+        ...initial,
+        metadata: {
+          ...initial.metadata,
+          durableLedger: { ...initial.metadata.durableLedger },
+        },
+      };
+      if (entry.snapshotContract === null) {
+        delete cached.metadata.durableLedger.quotaIdentityContract;
+      } else {
+        cached.metadata.durableLedger.quotaIdentityContract =
+          entry.snapshotContract;
+      }
+      await writePrivateSnapshot(snapshotPath, cached);
+
+      database = new DatabaseSync(ledgerPath);
+      database.prepare(`
+        UPDATE ledger_meta
+           SET value = ?
+         WHERE key = 'quota_identity_contract'
+      `).run(entry.ledgerContract);
+      database.close();
+      database = null;
+
+      const loadOptions = parseArgs([
+        "day",
+        "2026-08-23",
+        "--static",
+        "--plain",
+        "--ascii",
+        "--tz",
+        "UTC",
+      ]);
+      loadOptions.codexHome = codexHome;
+      loadOptions.input = snapshotPath;
+      loadOptions.inputExplicit = false;
+      loadOptions.refresh = entry.refresh;
+      loadOptions.snapshotWriteOptions = { maxBytes: 1, targetBytes: 1 };
+
+      const fallback = await loadSnapshot(loadOptions);
+      assert.equal(fallback.sourceStatus, "stale-fallback", entry.name);
+      assert.equal(fallback.snapshot.coverage.observedTokens, 100, entry.name);
+      assert.equal(fallback.snapshot.quotaObservations.length, 0, entry.name);
+      assert.equal(
+        fallback.snapshot.coverage.quotaMeterUnavailableReason,
+        "quota-contract-unverified",
+        entry.name,
+      );
+      assert.deepEqual(
+        weeklyQuotaObservations(fallback.snapshot),
+        [],
+        entry.name,
+      );
+
+      database = new DatabaseSync(ledgerPath, { readOnly: true });
+      assert.equal(database.prepare(`
+        SELECT value
+          FROM ledger_meta
+         WHERE key = 'quota_identity_contract'
+      `).get().value, entry.ledgerContract, entry.name);
+      assert.equal(database.prepare(`
+        SELECT value
+          FROM ledger_meta
+         WHERE key = 'revision'
+      `).get().value, "1", entry.name);
+    } finally {
+      database?.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("snapshot size fallback requires exact scope and Codex-home provenance", async () => {
+  const root = await createPrivateFixtureRoot("token-ledger-fallback-gate-");
+  const requestedCodexHome = resolve(root, "requested-codex-home");
+  const otherCodexHome = resolve(root, "other-codex-home");
+  const generatedAt = "2026-08-23T10:00:00.000Z";
+  try {
+    await mkdir(requestedCodexHome, { recursive: true });
+    await mkdir(otherCodexHome, { recursive: true });
+
+    const assertRejectedFallback = async (name, previous) => {
+      const snapshotPath = resolve(root, `${name}.json.gz`);
+      await writePrivateSnapshot(snapshotPath, previous);
+      const options = parseArgs([
+        "day",
+        "2026-08-23",
+        "--static",
+        "--plain",
+        "--ascii",
+        "--tz",
+        "UTC",
+      ]);
+      options.codexHome = requestedCodexHome;
+      options.input = snapshotPath;
+      options.inputExplicit = false;
+      options.snapshotWriteOptions = { maxBytes: 1, targetBytes: 1 };
+
+      await assert.rejects(
+        () => loadSnapshot(options),
+        (error) => {
+          assert.equal(error?.code, "ERR_SNAPSHOT_SIZE_LIMIT");
+          return true;
+        },
+      );
+      assert.equal(
+        (await readPrivateSnapshot(snapshotPath)).metadata.durableLedger
+          .codexHomeFingerprint,
+        previous.metadata.durableLedger.codexHomeFingerprint,
+      );
+    };
+
+    const scopedSnapshot = {
+      schemaVersion: 3,
+      generatedAt,
+      provenance: {
+        collection: { since: null, includeArchived: true },
+      },
+      metadata: {
+        durableLedger: {
+          codexHomeFingerprint: codexHomeFingerprint(otherCodexHome),
+          revision: 0,
+        },
+      },
+      events: [],
+    };
+    await assertRejectedFallback("different-home", scopedSnapshot);
+    await assertRejectedFallback("unknown-scope", {
+      ...scopedSnapshot,
+      provenance: undefined,
+      metadata: {
+        durableLedger: {
+          codexHomeFingerprint: codexHomeFingerprint(requestedCodexHome),
+          revision: 0,
+        },
+      },
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("post-staging source changes publish the validated candidate once", async () => {
+  const root = await createPrivateFixtureRoot("token-ledger-staged-retry-");
+  const codexHome = resolve(root, "codex-home");
+  const sourceDirectory = resolve(codexHome, "sessions", "2026", "08");
+  const sourceFile = resolve(
+    sourceDirectory,
+    "rollout-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl",
+  );
+  const snapshotPath = resolve(root, "snapshot.json.gz");
+  const ledgerPath = resolveDurableLedgerPath({ codexHome, output: snapshotPath });
+  let mutation = 0;
+  try {
+    await mkdir(sourceDirectory, { recursive: true });
+    await writeFile(
+      sourceFile,
+      serializeRows(sourceRolloutRows(
+        100,
+        "turn-initial",
+        "2026-08-23T10:00:00.000Z",
+      )),
+    );
+    const initial = await collectUsage({
+      output: snapshotPath,
+      codexHome,
+      includeArchived: true,
+      since: null,
+    });
+    await writePrivateSnapshot(snapshotPath, initial);
+    await appendFile(
+      sourceFile,
+      serializeRows(sourceRolloutRows(
+        200,
+        "turn-pending",
+        "2026-08-23T10:01:00.000Z",
+      )),
+    );
+
+    const snapshot = await collectUsage({
+      output: snapshotPath,
+      codexHome,
+      includeArchived: true,
+      since: null,
+      stageSnapshot: (candidate) =>
+        stagePrivateSnapshot(snapshotPath, candidate),
+      faultInjector: async ({ point }) => {
+        if (point !== "after-validation") return;
+        mutation += 1;
+        const rows = Array.from({ length: mutation + 1 }, (_, index) =>
+          sourceRolloutRows(
+            300 + mutation * 100 + index,
+            `turn-mutation-${mutation}-${index}`,
+            new Date(
+              Date.parse("2026-08-23T11:00:00.000Z") +
+                (mutation * 10 + index) * 60_000,
+            ).toISOString(),
+          )
+        ).flat();
+        await writeFile(sourceFile, serializeRows(rows));
+      },
+    });
+
+    const stored = await readPrivateSnapshot(snapshotPath);
+    assert.equal(mutation, 1);
+    assert.equal(snapshot.coverage.observedTokens, 300);
+    assert.equal(stored.coverage.observedTokens, 300);
+    assert.equal(stored.metadata.durableLedger.revision, 2);
+    assert.equal(await readDurableLedgerRevision(ledgerPath), 2);
+    assert.deepEqual(
+      (await readdir(root)).filter((name) => name.endsWith(".tmp")),
+      [],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("snapshot freshness labels the one-hour cache age without exposing paths", () => {
   const now = Date.parse("2026-08-20T00:00:00.000Z");
   assert.deepEqual(
@@ -2075,6 +3032,112 @@ test("snapshot freshness labels the one-hour cache age without exposing paths", 
       ageLabel: "age unknown",
     });
   }
+});
+
+test("source provenance labels cover every cache trust state", () => {
+  assert.deepEqual(SOURCE_STATUSES, [
+    "verified-current",
+    "explicit-snapshot",
+    "unchecked-cache",
+    "stale-fallback",
+  ]);
+  assert.equal(sourceStatusLabel("verified-current"), "VERIFIED CURRENT");
+  assert.equal(sourceStatusLine("stale-fallback"), "PROVENANCE · STALE FALLBACK");
+  assert.equal(sourceStatusLine("unchecked-cache"), "PROVENANCE · UNCHECKED CACHE");
+  assert.equal(sourceStatusLine("explicit-snapshot"), "PROVENANCE · EXPLICIT SNAPSHOT");
+  assert.equal(
+    snapshotFreshnessDetail({ status: "fresh", ageLabel: "12m old" }),
+    "fresh · 12m old",
+  );
+  assert.throws(() => sourceStatusLabel("invented"), /Unknown report source status/);
+});
+
+test("terminal report surfaces incomplete source coverage across text headers", () => {
+  const snapshot = {
+    generatedAt: "2026-08-20T12:00:00.000Z",
+    coverage: { parseErrors: 1 },
+    events: [],
+    threads: [],
+  };
+  const events = [];
+  const rows = aggregateProjects(snapshot, events, { rawProjects: true });
+  const terminal = renderTerminal({
+    options: { plain: true, ascii: true, width: 120 },
+    snapshot,
+    bounds: dayBounds("2026-08-20", "UTC"),
+    events,
+    rows,
+    allRows: rows,
+  });
+  const trend = renderTrendPlain({
+    snapshot,
+    bounds: multiDayBounds("2026-08-20", "UTC", 7),
+    options: { plain: true, width: 120 },
+  });
+  const cache = renderCacheReportImage({
+    snapshot,
+    bounds: multiDayBounds("2026-08-20", "UTC", 7),
+    options: { imageWidth: 900 },
+  });
+  const warning = "SOURCES INCOMPLETE · 1 PARSE ERROR";
+
+  assert.equal(incompleteSourceWarning(snapshot), warning);
+  assert.match(terminal, new RegExp(warning));
+  assert.match(trend, new RegExp(warning));
+  assert.match(cache, new RegExp(warning));
+
+  const cleanSnapshot = {
+    ...snapshot,
+    coverage: {
+      parseErrors: 0,
+      invalidTokenRecords: 0,
+      sourceIncomplete: false,
+    },
+  };
+  const cleanRows = aggregateProjects(cleanSnapshot, events, { rawProjects: true });
+  const cleanTerminal = renderTerminal({
+    options: { plain: true, ascii: true, width: 120 },
+    snapshot: cleanSnapshot,
+    bounds: dayBounds("2026-08-20", "UTC"),
+    events,
+    rows: cleanRows,
+    allRows: cleanRows,
+  });
+  const cleanTrend = renderTrendPlain({
+    snapshot: cleanSnapshot,
+    bounds: multiDayBounds("2026-08-20", "UTC", 7),
+    options: { plain: true, width: 120 },
+  });
+  const cleanCache = renderCacheReportImage({
+    snapshot: cleanSnapshot,
+    bounds: multiDayBounds("2026-08-20", "UTC", 7),
+    options: { imageWidth: 900 },
+  });
+
+  assert.equal(incompleteSourceWarning(cleanSnapshot), null);
+  assert.doesNotMatch(cleanTerminal, /SOURCES INCOMPLETE/);
+  assert.doesNotMatch(cleanTrend, /SOURCES INCOMPLETE/);
+  assert.doesNotMatch(cleanCache, /SOURCES INCOMPLETE/);
+});
+
+test("a refreshed append-only cutoff is not verified current", () => {
+  const equal = (left, right) => left.fingerprint === right.fingerprint;
+  assert.equal(
+    refreshedSnapshotSourceStatus(
+      { fingerprint: "accepted-byte-cutoff" },
+      { fingerprint: "later-append" },
+      equal,
+    ),
+    "unchecked-cache",
+  );
+  assert.equal(
+    refreshedSnapshotSourceStatus(
+      { fingerprint: "same" },
+      { fingerprint: "same" },
+      equal,
+    ),
+    "verified-current",
+  );
 });
 
 test("interactive controls stay aligned with rendered and documented help", async () => {
@@ -2191,7 +3254,8 @@ test("terminal renderer produces the dashboard layout and scaled bars", () => {
   assert.doesNotMatch(output, /2 threads · 2 calls/);
   const compactHeader = output.split("\n")[0];
   assert.match(compactHeader, /TOKEN LEDGER · SAT 01 AUG · DAY · 1\.25K T · 2 C · 2 TH · 1 P/);
-  assert.match(output.split("\n")[1], /^\+/);
+  assert.match(output.split("\n")[1], /PROVENANCE · UNCHECKED CACHE/);
+  assert.match(output.split("\n")[2], /^\+/);
 
   const weekOutput = renderTerminal({
     options: { plain: true, ascii: true, width: 80, range: "week" },
@@ -2217,6 +3281,7 @@ test("terminal renderer produces the dashboard layout and scaled bars", () => {
     options: { plain: true, ascii: true, width: 120, range: "rolling24h" },
     snapshot: rollingSnapshot,
     snapshotFreshness: rollingFreshness,
+    sourceStatus: "stale-fallback",
     bounds: rolling24hBounds(new Date("2026-08-19T22:15:30.000Z"), "Pacific/Honolulu"),
     events,
     rows,
@@ -2227,6 +3292,7 @@ test("terminal renderer produces the dashboard layout and scaled bars", () => {
     /TOKEN LEDGER · LAST 24 HOURS · 24 HOURS · 1\.25K TOKENS · 2 CALLS · 2 THREADS · 1 PROJECTS/,
   );
   assert.match(rollingOutput, /SNAPSHOT · fresh · 15m old/);
+  assert.match(rollingOutput, /PROVENANCE · STALE FALLBACK/);
   assert.doesNotMatch(rollingOutput, /token-ledger-snapshot\.json|\/Users\//);
 
   const fullscreenRollingOutput = renderFullscreen({
@@ -2238,6 +3304,7 @@ test("terminal renderer produces the dashboard layout and scaled bars", () => {
     },
     snapshot: rollingSnapshot,
     snapshotFreshness: rollingFreshness,
+    sourceStatus: "stale-fallback",
     bounds: rolling24hBounds(new Date("2026-08-19T22:15:30.000Z"), "Pacific/Honolulu"),
     events,
     rows,
@@ -2246,6 +3313,7 @@ test("terminal renderer produces the dashboard layout and scaled bars", () => {
     height: 30,
   });
   assert.match(fullscreenRollingOutput, /SNAPSHOT · fresh · 15m old/);
+  assert.match(fullscreenRollingOutput, /PROVENANCE · STALE FALLBACK/);
 
   const narrowOutput = renderTerminal({
     options: { plain: true, ascii: true, width: 64 },
@@ -2363,7 +3431,7 @@ test("filtered collection scope is visible in terminal and PNG renderers", () =>
 });
 
 test("empty ranges with uncollected history are reported as not collected", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-since-empty-"));
+  const root = await createPrivateFixtureRoot("token-ledger-since-empty-");
   const snapshotPath = resolve(root, "scoped-snapshot.json");
   try {
     await writePrivateSnapshot(snapshotPath, {
@@ -2452,6 +3520,8 @@ test("quota context maps the selected range to reset-cycle burn", () => {
   const observation = {
     timestamp: "2026-08-02T00:00:00.000Z",
     usedPercent: 25,
+    scope: "account",
+    limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
     windowMinutes: 10_080,
     resetsAt: Date.parse("2026-08-07T00:00:00.000Z") / 1_000,
   };
@@ -2460,7 +3530,11 @@ test("quota context maps the selected range to reset-cycle burn", () => {
     { timestamp: "2026-08-01T12:00:00.000Z", totalTokens: 200 },
     { timestamp: "2026-08-03T00:00:00.000Z", totalTokens: 1_000 },
   ];
-  const snapshot = { events, quotaObservations: [observation] };
+  const snapshot = {
+    events,
+    metadata: CURRENT_QUOTA_METADATA,
+    quotaObservations: [observation],
+  };
   const quota = quotaCycleSummary(snapshot, [events[0]]);
 
   assert.equal(quota.usedPercent, 25);
@@ -2502,6 +3576,8 @@ test("quota burn recomputes current card credits when every cycle event is rated
   const observation = {
     timestamp: "2026-08-02T00:00:00.000Z",
     usedPercent: 20,
+    scope: "account",
+    limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
     windowMinutes: 10_080,
     resetsAt: Date.parse("2026-08-07T00:00:00.000Z") / 1_000,
   };
@@ -2522,7 +3598,11 @@ test("quota burn recomputes current card credits when every cycle event is rated
     rateCardCredits: 99,
   };
   const quota = quotaCycleSummary(
-    { events: [displayed, other], quotaObservations: [observation] },
+    {
+      events: [displayed, other],
+      metadata: CURRENT_QUOTA_METADATA,
+      quotaObservations: [observation],
+    },
     [displayed],
   );
   assert.equal(quota.shareBasis, "credits");
@@ -2546,6 +3626,7 @@ test("quota burn recomputes current card credits when every cycle event is rated
   const fallback = quotaCycleSummary(
     {
       events: [fallbackDisplayed, fallbackOther],
+      metadata: CURRENT_QUOTA_METADATA,
       quotaObservations: [observation],
     },
     [fallbackDisplayed],
@@ -2559,6 +3640,8 @@ test("quota burn keeps unrated usage out of credit-share mode after saturation",
   const observation = {
     timestamp: "2026-08-02T00:00:00.000Z",
     usedPercent: 20,
+    scope: "account",
+    limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
     windowMinutes: 10_080,
     resetsAt: Date.parse("2026-08-07T00:00:00.000Z") / 1_000,
   };
@@ -2581,6 +3664,7 @@ test("quota burn keeps unrated usage out of credit-share mode after saturation",
   const quota = quotaCycleSummary(
     {
       events: [displayed, otherRated, unrated],
+      metadata: CURRENT_QUOTA_METADATA,
       quotaObservations: [observation],
     },
     [displayed],
@@ -2595,6 +3679,7 @@ test("trend burn keeps rated token and credit scales aligned", () => {
   const huge = Number.MAX_SAFE_INTEGER;
   const bounds = multiDayBounds("2026-08-02", "UTC", 2);
   const snapshot = {
+    metadata: CURRENT_QUOTA_METADATA,
     events: [
       {
         timestamp: "2026-08-01T01:00:00.000Z",
@@ -2625,6 +3710,8 @@ test("trend burn keeps rated token and credit scales aligned", () => {
       {
         timestamp: "2026-08-02T00:00:00.000Z",
         usedPercent: 30,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt: Date.parse("2026-08-08T00:00:00.000Z") / 1_000,
       },
@@ -2641,6 +3728,7 @@ test("trend model attribution preserves shared token proportions", () => {
   const huge = Number.MAX_SAFE_INTEGER;
   const bounds = multiDayBounds("2026-08-02", "UTC", 2);
   const snapshot = {
+    metadata: CURRENT_QUOTA_METADATA,
     events: [
       {
         timestamp: "2026-08-01T01:00:00.000Z",
@@ -2664,6 +3752,8 @@ test("trend model attribution preserves shared token proportions", () => {
     quotaObservations: [{
       timestamp: "2026-08-02T00:00:00.000Z",
       usedPercent: 30,
+      scope: "account",
+      limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
       windowMinutes: 10_080,
       resetsAt: Date.parse("2026-08-08T00:00:00.000Z") / 1_000,
     }],
@@ -2806,6 +3896,7 @@ test("combo trend bins actual tokens and overlays an explicit reset marker", () 
   const bounds = multiDayBounds("2026-08-15", "Pacific/Honolulu", 7);
   const resetOne = Date.parse("2026-08-11T10:00:00.000Z") / 1_000;
   const snapshot = {
+    metadata: CURRENT_QUOTA_METADATA,
     events: [
       {
         timestamp: "2026-08-09T12:00:00.000Z",
@@ -2826,18 +3917,24 @@ test("combo trend bins actual tokens and overlays an explicit reset marker", () 
       {
         timestamp: "2026-08-09T12:00:00.000Z",
         usedPercent: 20,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt: resetOne,
       },
       {
         timestamp: "2026-08-10T12:00:00.000Z",
         usedPercent: 30,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt: resetOne,
       },
       {
         timestamp: "2026-08-12T12:00:00.000Z",
         usedPercent: 5,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt: resetOne + 10_080 * 60,
       },
@@ -3025,17 +4122,22 @@ test("all report renderers consume one immutable range analysis", () => {
   });
   const snapshot = {
     generatedAt: "2026-08-15T12:00:00.000Z",
+    metadata: CURRENT_QUOTA_METADATA,
     events,
     quotaObservations: [
       {
         timestamp: "2026-08-10T12:00:00.000Z",
         usedPercent: 20,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt: resetAt,
       },
       {
         timestamp: "2026-08-14T12:00:00.000Z",
         usedPercent: 35,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt: resetAt,
       },
@@ -3127,9 +4229,12 @@ test("future quota observations do not alter historical range splits", () => {
   const withFutureQuota = buildRangeAnalysis(
     {
       events: [event],
+      metadata: CURRENT_QUOTA_METADATA,
       quotaObservations: [{
         timestamp: "2026-08-23T00:00:00.000Z",
         usedPercent: 20,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt: Date.parse("2026-08-24T00:00:00.000Z") / 1_000,
       }],
@@ -3148,6 +4253,7 @@ test("trend reports display Terra usage and meter attribution", () => {
   const resetsAt = Date.parse("2026-08-16T00:00:00.000Z") / 1_000;
   const snapshot = {
     generatedAt: "2026-08-15T18:00:00.000Z",
+    metadata: CURRENT_QUOTA_METADATA,
     events: [
       {
         timestamp: "2026-08-15T12:00:00.000Z",
@@ -3162,12 +4268,16 @@ test("trend reports display Terra usage and meter attribution", () => {
       {
         timestamp: "2026-08-15T06:00:00.000Z",
         usedPercent: 0,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt,
       },
       {
         timestamp: "2026-08-15T18:00:00.000Z",
         usedPercent: 10,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt,
       },
@@ -3232,6 +4342,7 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
   const bounds = multiDayBounds("2026-08-15", "Pacific/Honolulu", 7);
   const resetOne = Date.parse("2026-08-11T10:00:00.000Z") / 1_000;
   const snapshot = {
+    metadata: CURRENT_QUOTA_METADATA,
     events: [
       {
         timestamp: "2026-08-09T12:00:00.000Z",
@@ -3254,18 +4365,24 @@ test("image trend renderer emits stacked model bars and a quota line", () => {
       {
         timestamp: "2026-08-09T12:00:00.000Z",
         usedPercent: 20,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt: resetOne,
       },
       {
         timestamp: "2026-08-10T12:00:00.000Z",
         usedPercent: 30,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt: resetOne,
       },
       {
         timestamp: "2026-08-12T12:00:00.000Z",
         usedPercent: 5,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt: resetOne + 10_080 * 60,
       },
@@ -3406,7 +4523,7 @@ test("malformed snapshots keep terminal, bucket, and image totals bounded", asyn
   assert.doesNotMatch(terminal, /NaN|Infinity|undefined|null/);
   assert.doesNotMatch(svg, /NaN|Infinity|undefined|null/);
 
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-bounded-png-"));
+  const root = await createPrivateFixtureRoot("token-ledger-bounded-png-");
   try {
     const output = resolve(root, "bounded.png");
     await writeTrendPng(svg, output);
@@ -3428,6 +4545,7 @@ test("trend meter stops at its last sample and marks report time", () => {
   const resetsAt = Date.parse("2026-08-26T10:00:00.000Z") / 1_000;
   const snapshot = {
     generatedAt,
+    metadata: CURRENT_QUOTA_METADATA,
     events: [{
       timestamp: "2026-08-23T08:08:30.000Z",
       model: "gpt-5.6-luna",
@@ -3441,6 +4559,8 @@ test("trend meter stops at its last sample and marks report time", () => {
         timestamp: "2026-08-22T12:00:00.000Z",
         lastSeenAt: "2026-08-22T12:00:00.000Z",
         usedPercent: 70,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt,
       },
@@ -3448,6 +4568,8 @@ test("trend meter stops at its last sample and marks report time", () => {
         timestamp: "2026-08-23T07:59:20.000Z",
         lastSeenAt: observedThrough,
         usedPercent: 80,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt,
       },
@@ -3536,10 +4658,13 @@ test("trend report limits reset labels in dense windows", () => {
   ];
   const snapshot = {
     generatedAt: "2026-08-15T12:00:00.000Z",
+    metadata: CURRENT_QUOTA_METADATA,
     events: [],
     quotaObservations: cycleStarts.map((timestamp, index) => ({
       timestamp,
       usedPercent: 10 + index,
+      scope: "account",
+      limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
       windowMinutes: 10_080,
       resetsAt: Date.parse(timestamp) / 1_000 + 10_080 * 60,
     })),
@@ -3664,6 +4789,7 @@ test("cache report weights cached input, clamps event values, and keeps models s
     bounds,
     days: 7,
     options: { imageWidth: 1_280 },
+    sourceStatus: "stale-fallback",
   });
   assert.match(svg, /Token Ledger · 7-day cache report/);
   assert.match(svg, /56\.0% cached/);
@@ -3675,6 +4801,7 @@ test("cache report weights cached input, clamps event values, and keeps models s
   assert.match(svg, /MEASUREMENT COVERAGE/);
   assert.match(svg, /cached input ÷ measured input/);
   assert.match(svg, /3 measured input-bearing calls/);
+  assert.match(svg, /PROVENANCE · STALE FALLBACK/);
   assert.doesNotMatch(svg, /WHERE IT WENT|WEEKLY METER|NaN/);
 });
 
@@ -3997,8 +5124,12 @@ test("trend bars partition capped model segments", () => {
     bounds,
     days: 7,
     options: { ascii: true, width: 120 },
+    snapshotFreshness: { status: "fresh", ageLabel: "12m old" },
+    sourceStatus: "stale-fallback",
   });
-  const chartRows = terminal.split("\n").slice(4, 15);
+  assert.match(terminal, /SNAPSHOT · fresh · 12m old/);
+  assert.match(terminal, /PROVENANCE · STALE FALLBACK/);
+  const chartRows = terminal.split("\n").slice(6, 17);
   assert.equal(chartRows.filter((line) => line.includes("█")).length, 9);
 
   const image = renderTrendImage({
@@ -4590,7 +5721,7 @@ test("cache report spaces long multi-day labels at minimum width", () => {
 });
 
 test("PNG image output has a real PNG signature", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-png-"));
+  const root = await createPrivateFixtureRoot("token-ledger-png-");
   try {
     const output = resolve(root, "report.png");
     await writeTrendPng(
@@ -4608,7 +5739,7 @@ test("PNG image output has a real PNG signature", async () => {
 });
 
 test("report emits progress while generating the PNG", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-report-"));
+  const root = await createPrivateFixtureRoot("token-ledger-report-");
   const snapshotPath = resolve(root, "snapshot.json");
   const outputPath = resolve(root, "report.png");
   const originalWrite = process.stderr.write;
@@ -4668,7 +5799,7 @@ test("report emits progress while generating the PNG", async () => {
 });
 
 test("standard report preserves split prior-period comparison fragments", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-report-prior-split-"));
+  const root = await createPrivateFixtureRoot("token-ledger-report-prior-split-");
   const snapshotPath = resolve(root, "snapshot.json");
   const outputPath = resolve(root, "report.png");
   const expectedPath = resolve(root, "expected.png");
@@ -4778,7 +5909,7 @@ test("standard report preserves split prior-period comparison fragments", async 
 });
 
 test("cache-rate report uses its separate renderer and progress label", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-cache-report-"));
+  const root = await createPrivateFixtureRoot("token-ledger-cache-report-");
   const snapshotPath = resolve(root, "snapshot.json");
   const outputPath = resolve(root, "cache-report.png");
   const originalWrite = process.stderr.write;
@@ -4836,7 +5967,7 @@ test("cache-rate report uses its separate renderer and progress label", async ()
 });
 
 test("cache-rate report ignores unused project metadata for an empty range", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-cache-empty-"));
+  const root = await createPrivateFixtureRoot("token-ledger-cache-empty-");
   const snapshotPath = resolve(root, "snapshot.json");
   const outputPath = resolve(root, "cache-report.png");
   const originalWrite = process.stderr.write;
@@ -4888,7 +6019,7 @@ test("cache-rate report ignores unused project metadata for an empty range", asy
 });
 
 test("standard image views retain the empty-range diagnostic", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-standard-empty-"));
+  const root = await createPrivateFixtureRoot("token-ledger-standard-empty-");
   const snapshotPath = resolve(root, "snapshot.json");
   try {
     await writeFile(
@@ -4936,7 +6067,7 @@ test("standard image views retain the empty-range diagnostic", async () => {
 });
 
 test("cache-rate report uses a distinct default filename", async () => {
-  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-cache-default-"));
+  const root = await createPrivateFixtureRoot("token-ledger-cache-default-");
   const snapshotPath = resolve(root, "snapshot.json");
   const outputPath = resolve(root, "token-ledger-cache-report-7d.png");
   try {
@@ -5236,28 +6367,32 @@ test("named limit buckets are not stitched into the account meter", () => {
   const accountEpoch = Date.parse("2026-08-16T00:00:00.000Z") / 1_000;
   const namedEpoch = Date.parse("2026-08-18T00:00:00.000Z") / 1_000;
   const snapshot = {
+    metadata: CURRENT_QUOTA_METADATA,
     quotaObservations: [
       {
         timestamp: "2026-08-12T00:00:00.000Z",
         usedPercent: 10,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt: accountEpoch,
-        limitKey: "aaa",
       },
       {
         timestamp: "2026-08-12T01:00:00.000Z",
         usedPercent: 50,
+        scope: "named",
         windowMinutes: 10_080,
         resetsAt: namedEpoch,
-        limitKey: "bbb",
+        limitKey: NAMED_QUOTA_LIMIT_KEY,
         limitName: "GPT-5.3-Codex-Spark",
       },
       {
         timestamp: "2026-08-12T02:00:00.000Z",
         usedPercent: 20,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt: accountEpoch,
-        limitKey: "aaa",
       },
     ],
   };
@@ -5276,16 +6411,16 @@ test("account-scoped weekly observations remain the selected account meter", () 
       usedPercent: 10,
       windowMinutes: 10_080,
       resetsAt: resetAt,
-      limitKey: "account",
       scope: "account",
+      limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
     },
     {
       timestamp: "2026-08-19T00:00:00.000Z",
       usedPercent: 20,
       windowMinutes: 10_080,
       resetsAt: resetAt,
-      limitKey: "account",
       scope: "account",
+      limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
     },
   ];
   const named = {
@@ -5293,17 +6428,23 @@ test("account-scoped weekly observations remain the selected account meter", () 
     usedPercent: 90,
     windowMinutes: 10_080,
     resetsAt: resetAt,
-    limitKey: "named",
+    limitKey: NAMED_QUOTA_LIMIT_KEY,
     limitName: "Luna",
     scope: "named",
   };
   assert.deepEqual(
-    weeklyQuotaObservations({ quotaObservations: [...account, named] })
+    weeklyQuotaObservations({
+      metadata: CURRENT_QUOTA_METADATA,
+      quotaObservations: [...account, named],
+    })
       .map((observation) => observation.usedPercent),
     [10, 20],
   );
   assert.deepEqual(
-    weeklyQuotaObservations({ quotaObservations: account })
+    weeklyQuotaObservations({
+      metadata: CURRENT_QUOTA_METADATA,
+      quotaObservations: account,
+    })
       .map((observation) => observation.usedPercent),
     [10, 20],
   );
@@ -5319,7 +6460,7 @@ test("named-only weekly pools do not form an account meter", () => {
       usedPercent: 20,
       windowMinutes: 10_080,
       resetsAt: resetA,
-      limitKey: "named-a",
+      limitKey: NAMED_QUOTA_LIMIT_KEY,
       limitName: "Luna",
       scope: "named",
     },
@@ -5328,7 +6469,7 @@ test("named-only weekly pools do not form an account meter", () => {
       usedPercent: 40,
       windowMinutes: 10_080,
       resetsAt: resetA,
-      limitKey: "named-a",
+      limitKey: NAMED_QUOTA_LIMIT_KEY,
       limitName: "Luna",
       scope: "named",
     },
@@ -5337,7 +6478,7 @@ test("named-only weekly pools do not form an account meter", () => {
       usedPercent: 60,
       windowMinutes: 10_080,
       resetsAt: resetA,
-      limitKey: "named-a",
+      limitKey: NAMED_QUOTA_LIMIT_KEY,
       limitName: "Luna",
       scope: "named",
     },
@@ -5346,13 +6487,14 @@ test("named-only weekly pools do not form an account meter", () => {
       usedPercent: 50,
       windowMinutes: 10_080,
       resetsAt: resetB,
-      limitKey: "named-b",
+      limitKey: NAMED_QUOTA_LIMIT_KEY,
       limitName: "Sol",
       scope: "named",
     },
   ];
   const snapshot = {
     generatedAt: "2026-08-20T12:00:00.000Z",
+    metadata: CURRENT_QUOTA_METADATA,
     events: [{
       timestamp: "2026-08-19T12:00:00.000Z",
       model: "gpt-5.6-luna",
@@ -5362,8 +6504,8 @@ test("named-only weekly pools do not form an account meter", () => {
     quotaObservations,
   };
   assert.deepEqual(weeklyQuotaObservations(snapshot), []);
-  // The same named-only shape without the explicit field is a legacy snapshot;
-  // it must not revive the old largest-pool fallback.
+  // A current-contract row without explicit scope is malformed and must not
+  // revive the old largest-pool fallback.
   assert.deepEqual(
     weeklyQuotaObservations({
       ...snapshot,
@@ -5412,6 +6554,7 @@ test("burn day bins place observed drops on days in meter percent units", () => 
   const bounds = multiDayBounds("2026-08-15", "UTC", 7);
   const resetsAt = Date.parse("2026-08-16T00:00:00.000Z") / 1_000;
   const snapshot = {
+    metadata: CURRENT_QUOTA_METADATA,
     events: [
       {
         // Bogus stored credits must lose to recomputation under the current
@@ -5438,18 +6581,24 @@ test("burn day bins place observed drops on days in meter percent units", () => 
       {
         timestamp: "2026-08-12T06:00:00.000Z",
         usedPercent: 0,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt,
       },
       {
         timestamp: "2026-08-12T18:00:00.000Z",
         usedPercent: 20,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt,
       },
       {
         timestamp: "2026-08-15T00:00:00.000Z",
         usedPercent: 40,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt,
       },
@@ -5783,8 +6932,16 @@ test("cost renderer labels units, coverage, and unrated usage explicitly", () =>
       outputTokens: 0,
     },
   ];
-  const api = renderCostTerminal({ events, bounds, basis: "api-usd" });
+  const api = renderCostTerminal({
+    events,
+    bounds,
+    basis: "api-usd",
+    snapshotFreshness: { status: "fresh", ageLabel: "12m old" },
+    sourceStatus: "stale-fallback",
+  });
   assert.match(api, /^Hypothetical API-equivalent cost \(USD\)/);
+  assert.match(api, /Snapshot: fresh · 12m old/);
+  assert.match(api, /PROVENANCE · STALE FALLBACK/);
   assert.match(api, /Total rated amount: \$0\.42/);
   assert.match(api, /Rated token coverage: 66\.9%/);
   assert.match(api, /Unrated tokens: 50\.0K/);
@@ -5897,6 +7054,7 @@ test("fast-mode turns use model-specific credit weights in burn allocation", () 
   const bounds = multiDayBounds("2026-08-15", "UTC", 7);
   const resetsAt = Date.parse("2026-08-16T00:00:00.000Z") / 1_000;
   const snapshot = {
+    metadata: CURRENT_QUOTA_METADATA,
     events: [
       {
         // Sol and GPT-5.5 share identical rate-card prices and identical
@@ -5922,12 +7080,16 @@ test("fast-mode turns use model-specific credit weights in burn allocation", () 
       {
         timestamp: "2026-08-12T06:00:00.000Z",
         usedPercent: 0,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt,
       },
       {
         timestamp: "2026-08-12T18:00:00.000Z",
         usedPercent: 25,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt,
       },
@@ -5954,6 +7116,7 @@ test("canonical Daybreak fast tiers retain rate-card burn weights", () => {
     outputTokens: 0,
   });
   const snapshot = {
+    metadata: CURRENT_QUOTA_METADATA,
     events: [
       event("daybreak-red", "priority"),
       event("daybreak-blue", "fast"),
@@ -5963,12 +7126,16 @@ test("canonical Daybreak fast tiers retain rate-card burn weights", () => {
       {
         timestamp: "2026-08-12T06:00:00.000Z",
         usedPercent: 0,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt,
       },
       {
         timestamp: "2026-08-12T18:00:00.000Z",
         usedPercent: 25,
+        scope: "account",
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
         windowMinutes: 10_080,
         resetsAt,
       },

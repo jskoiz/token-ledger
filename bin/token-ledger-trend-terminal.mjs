@@ -17,6 +17,11 @@ import {
 } from "../lib/token-ledger-calendar.mjs";
 import { isFastServiceTier } from "../lib/token-ledger-rates.mjs";
 import { sanitizeTerminalText } from "../lib/token-ledger-terminal-text.mjs";
+import {
+  snapshotFreshnessDetail,
+  sourceStatusLine,
+} from "./token-ledger-source-status.mjs";
+import { incompleteSourceWarning } from "./token-ledger-terminal.mjs";
 
 export { chooseBinSize } from "./token-ledger-image-layout.mjs";
 import { historyScopeLabel } from "../lib/token-ledger-collection.mjs";
@@ -506,6 +511,8 @@ export function renderTrendCombo({
   days = bounds.rangeDays ?? 7,
   options = {},
   analysis = null,
+  snapshotFreshness = null,
+  sourceStatus = "unchecked-cache",
 }) {
   const trend = providedTrend ?? analysis?.trend ?? buildUsageTrend(snapshot, bounds, { analysis });
   const enabled = colorsEnabled(options);
@@ -602,6 +609,7 @@ export function renderTrendCombo({
 
   const axisRows = [0, Math.floor(baseline / 2), baseline];
   const history = historyScopeLabel(snapshot);
+  const sourceWarning = incompleteSourceWarning(snapshot);
   const lines = [
     `┌${"─".repeat(frameWidth - 2)}┐`,
     frameLine(
@@ -624,8 +632,23 @@ export function renderTrendCombo({
       ),
       frameWidth,
     ),
+    frameLine(
+      colorize(
+        `SNAPSHOT · ${snapshotFreshnessDetail(snapshotFreshness)}`,
+        SECONDARY_STYLE,
+        enabled,
+      ),
+      frameWidth,
+    ),
+    frameLine(
+      colorize(sourceStatusLine(sourceStatus), SECONDARY_STYLE, enabled),
+      frameWidth,
+    ),
     ...(history
       ? [frameLine(colorize(history, SECONDARY_STYLE, enabled), frameWidth)]
+      : []),
+    ...(sourceWarning
+      ? [frameLine(colorize(sourceWarning, SECONDARY_STYLE, enabled), frameWidth)]
       : []),
     `├${"─".repeat(frameWidth - 2)}┤`,
   ];

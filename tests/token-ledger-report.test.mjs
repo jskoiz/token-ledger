@@ -16,9 +16,14 @@ import {
   writeTrendPng,
 } from "../bin/token-ledger-trend-image.mjs";
 import { CODEX_CREDIT_RATE_CARD_AS_OF } from "../lib/token-ledger-rates.mjs";
+import {
+  ACCOUNT_QUOTA_LIMIT_KEY,
+  QUOTA_IDENTITY_CONTRACT_VERSION,
+} from "../lib/token-ledger-quota-contract.mjs";
 
 const TZ = "Pacific/Honolulu"; // UTC-10, no DST
 const WEEK_SECONDS = 10_080 * 60;
+const NAMED_QUOTA_LIMIT_KEY = "0000000000000000";
 
 function bounds7() {
   return multiDayBounds("2026-08-23", TZ, 7);
@@ -62,6 +67,8 @@ function quota(day, hour, usedPercent, resetsAt, extra = {}) {
     usedPercent,
     windowMinutes: 10_080,
     resetsAt,
+    scope: "account",
+    limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
     ...extra,
   };
 }
@@ -75,6 +82,11 @@ function snapshotOf(events, quotaObservations = [], overrides = {}) {
       rateCardAsOf: CODEX_CREDIT_RATE_CARD_AS_OF,
     },
     coverage: { parseErrors: 0 },
+    metadata: {
+      durableLedger: {
+        quotaIdentityContract: QUOTA_IDENTITY_CONTRACT_VERSION,
+      },
+    },
     events,
     threads: [],
     quotaObservations,
@@ -365,16 +377,76 @@ test("missing and named-only quota pools yield the unavailable state", () => {
     [event(20, 8, {})],
     [
       quota(20, 2, 40, Math.floor(Date.UTC(2026, 7, 26, 6) / 1_000), {
-        limitKey: "pool-1",
+        limitKey: NAMED_QUOTA_LIMIT_KEY,
         limitName: "gpt-5-pool",
+        scope: "named",
       }),
       quota(21, 2, 50, Math.floor(Date.UTC(2026, 7, 26, 6) / 1_000), {
-        limitKey: "pool-1",
+        limitKey: NAMED_QUOTA_LIMIT_KEY,
         limitName: "gpt-5-pool",
+        scope: "named",
       }),
     ],
   ));
   assert.equal(namedOnly.meter.status, "unavailable");
+});
+
+test("quota scope, not optional display labels, selects the account meter", () => {
+  const resetsAt = Math.floor(Date.UTC(2026, 7, 26, 6) / 1_000);
+  const account = build(snapshotOf(
+    [event(20, 8, {})],
+    [
+      quota(20, 2, 40, resetsAt, {
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
+        limitName: "Default display",
+        scope: "account",
+      }),
+      quota(21, 2, 50, resetsAt, {
+        limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
+        limitName: "Default display",
+        scope: "account",
+      }),
+    ],
+  ));
+  assert.notEqual(account.meter.status, "unavailable");
+  assert.equal(account.meter.remainingPercent, 50);
+
+  const named = build(snapshotOf(
+    [event(20, 8, {})],
+    [
+      quota(20, 2, 40, resetsAt, {
+        limitKey: NAMED_QUOTA_LIMIT_KEY,
+        limitName: null,
+        scope: "named",
+      }),
+      quota(21, 2, 50, resetsAt, {
+        limitKey: NAMED_QUOTA_LIMIT_KEY,
+        limitName: null,
+        scope: "named",
+      }),
+    ],
+  ));
+  assert.equal(named.meter.status, "unavailable");
+
+  const forgedAccount = build(snapshotOf(
+    [event(20, 8, {})],
+    [quota(20, 2, 40, resetsAt, {
+      limitKey: NAMED_QUOTA_LIMIT_KEY,
+      limitName: "Forged account",
+      scope: "account",
+    })],
+  ));
+  assert.equal(forgedAccount.meter.status, "unavailable");
+
+  const missingIdentity = build(snapshotOf(
+    [event(20, 8, {})],
+    [quota(20, 2, 40, resetsAt, {
+      limitKey: undefined,
+      limitName: "Missing identity",
+      scope: "account",
+    })],
+  ));
+  assert.equal(missingIdentity.meter.status, "unavailable");
 });
 
 test("meter geometry samples observations without extrapolating", () => {
@@ -452,6 +524,23 @@ test("effective end honors source status", () => {
   assert.equal(
     resolveEffectiveEnd({ snapshot, bounds, reportTimeMs: ms(25, 12), sourceStatus: "verified-current" }),
     bounds.end.getTime(),
+  );
+});
+
+test("an accepted source cutoff bounds an unverified report interval", () => {
+  const bounds = bounds7();
+  const snapshot = snapshotOf([], [], {
+    generatedAt: iso(23, 11),
+    provenance: { sourceCutoffAt: iso(23, 9) },
+  });
+  assert.equal(
+    resolveEffectiveEnd({
+      snapshot,
+      bounds,
+      reportTimeMs: ms(23, 12),
+      sourceStatus: "unchecked-cache",
+    }),
+    ms(23, 9) + 1,
   );
 });
 
@@ -563,7 +652,11 @@ function degradedSnapshot() {
     },
     coverage: {
       parseErrors: 2,
+      invalidTokenRecords: 3,
+      invalidQuotaRecords: 4,
+      sourceIncomplete: true,
       maximumUsageResolutionSeconds: 86_400,
+      legacySnapshotStatus: "codex-home-unverified",
     },
   });
 }
@@ -632,14 +725,25 @@ test("the report SVG contains every required section", () => {
 
 test("material integrity warnings are conditional and preserve estimated labels", () => {
   const healthy = renderRich();
+  const degradedSnapshotValue = degradedSnapshot();
+  const degradedVm = build(degradedSnapshotValue, {
+    sourceStatus: "stale-fallback",
+  });
   const degraded = renderDegraded(1_280);
+  assert.equal(degradedVm.coverage.invalidTokenRecords, 3);
+  assert.equal(degradedVm.coverage.invalidQuotaRecords, 4);
+  assert.equal(degradedVm.coverage.sourceIncomplete, true);
   assert.doesNotMatch(healthy, /data-role="integrity-warning"/);
   for (const [kind, label] of [
     ["parse-errors", "2 UNPARSED SOURCE RECORDS"],
+    ["invalid-token-records", "3 INVALID TOKEN RECORDS EXCLUDED"],
+    ["invalid-quota-records", "4 INVALID QUOTA RECORDS EXCLUDED"],
+    ["source-incomplete", "INCOMPLETE SOURCE PROVENANCE"],
     ["component-coverage", "50% COMPONENT COVERAGE"],
     ["external-source", "EXTERNAL SNAPSHOT INPUT"],
-    ["source-status", "STALE SNAPSHOT"],
+    ["source-status", "STALE FALLBACK"],
     ["estimated-history", "≈ ESTIMATED HISTORY · 1 day SOURCE BINS"],
+    ["legacy-history", "LEGACY HISTORY SKIPPED · HOME UNVERIFIED"],
     [
       "rate-card-mismatch",
       `RATE CARD 2026-08-17 → ${CODEX_CREDIT_RATE_CARD_AS_OF}`,
@@ -691,6 +795,8 @@ test("estimated warning preserves supported sub-hour source-bin resolutions", ()
 test("partial and stale markers appear only in their states", () => {
   const complete = renderRich({ sourceStatus: "verified-current" });
   const stale = renderRich({ sourceStatus: "stale-fallback" });
+  assert.match(complete, /PROVENANCE · VERIFIED CURRENT/);
+  assert.match(stale, /PROVENANCE · STALE FALLBACK/);
   assert.doesNotMatch(complete, /STALE/);
   assert.match(complete, /Report through/);
   assert.match(stale, /STALE/);
@@ -750,7 +856,7 @@ test("degraded warning chips fit and encode at 900, 1280, and 2400 pixels", asyn
       const warningGroups = [...svg.matchAll(
         /<g data-role="integrity-warning"[^>]*>([\s\S]*?)<\/g>/g,
       )];
-      assert.equal(warningGroups.length, 6);
+      assert.equal(warningGroups.length, 10);
       for (const [, markup] of warningGroups) {
         const rect = markup.match(/<rect x="([\d.]+)"[^>]*width="([\d.]+)"/);
         assert.ok(rect, "warning chip has a measurable backing rect");

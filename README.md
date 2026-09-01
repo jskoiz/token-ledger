@@ -135,17 +135,21 @@ legible and falls back to the same readable multi-day binning for longer
 windows. Meter-drain weighting uses the rate card bundled with this release;
 subscription limits are not billed per token.
 
-The CLI automatically checks the local Codex source files before rendering. If
-they are newer than the local cache, it rebuilds the privacy-reduced snapshot.
-The first refresh may scan historical rollout files; later runs use the cache
-for one hour before checking source freshness again. Use `--refresh` when you
-need to force an immediate rebuild.
+The CLI checks the local Codex source manifest on every automatic load. If it
+differs from the cached watermark, the CLI rebuilds the privacy-reduced
+snapshot; otherwise it reuses the cache immediately. The first refresh may
+scan historical rollout files. The one-hour threshold affects only the
+displayed freshness label, not source validation. Use `--refresh` to force a
+rebuild even when the manifest is unchanged.
 
 The `1d` project dashboard shows a compact snapshot-age line such as
 `SNAPSHOT · fresh · 12m old`. `fresh` means the snapshot is within the
 one-hour cache window, `stale` means it is older, and `age unknown` means the
 snapshot has no usable capture-time metadata. The indicator does not print a
-local path or trigger another source scan.
+local path or trigger another source scan. Every terminal and image report
+also shows a separate provenance status: `VERIFIED CURRENT`, `STALE FALLBACK`,
+`UNCHECKED CACHE`, or `EXPLICIT SNAPSHOT`. Snapshot age describes capture time;
+it never implies that the local source was checked successfully.
 
 Useful overrides:
 
@@ -171,11 +175,81 @@ legacy renderer and is not required for the default dashboard.
 
 The CLI reads from `CODEX_HOME` when set, otherwise `~/.codex`. It uses local
 Codex rollout JSONL files, the session index, and local state metadata. It
-writes its privacy-reduced cache to:
+writes a replaceable, privacy-reduced report snapshot to:
 
 ```text
-~/.token-ledger/token-ledger-snapshot.json
+~/.token-ledger/token-ledger-snapshot-v3.json.gz
 ```
+
+It also maintains the durable local ledger separately at:
+
+```text
+~/.token-ledger/token-ledger-ledger.sqlite
+```
+
+The ledger is the append-and-deduplicate source of truth for committed token
+events, quota samples, source state, and useful thread metadata. The snapshot
+is a generated export and can be replaced or rebuilt without deleting ledger
+history. Refreshes scan both `sessions` and `archived_sessions`; a source that
+is removed is recorded as missing or tombstoned, and its committed observations
+remain available. A file replacement or truncation is recorded as a mutable
+source change and does not re-add earlier observations.
+
+Exact observations are retained for 3,650 days. Older observations are
+compacted into UTC daily buckets with additive totals and source membership;
+the supported report window is never silently compacted away. Existing v3
+snapshots are migrated once, when readable, into explicitly marked
+`migrated_compacted` rows. Those rows preserve totals and ranges but do not
+invent exact event or turn identities, and remain marked as estimated in
+coverage. A missing legacy snapshot is also recorded as checked so a later
+refresh cannot unexpectedly migrate a different file into the same ledger.
+An existing snapshot with malformed usage/thread history, or one that is
+unreadable, oversized, non-regular, or non-v3, instead stops with
+`ERR_DURABLE_LEDGER_LEGACY_SNAPSHOT` before the ledger
+revision advances. Its bytes and the one-shot migration opportunity are
+preserved so the snapshot can be privately backed up, repaired or replaced,
+and retried.
+
+Legacy quota samples are imported only when the snapshot explicitly carries
+the current quota-identity contract. Older or markerless snapshots may have
+keyed unnamed limits by a display label or an anonymous placeholder, so their
+quota samples are skipped while safe usage and thread history still migrate.
+Current-contract quota claims that fail identity or measurement validation are
+also skipped independently instead of blocking otherwise valid usage history.
+The generated snapshot reports this separately as `legacyQuotaStatus` and
+`legacyQuotaRowsSkipped`.
+
+Compacted rows are retained for 7,300 days (20 years) before retirement.
+Source, quota, tool, and state-only thread metadata are pruned only after they
+are outside the applicable retention horizon; the supported report window is
+never silently dropped.
+Compacted usage buckets retain their deduplicated source-association scope, so
+`--no-archived` can exclude archived-only history without including it through
+an aggregate that also contains active usage.
+
+Legacy snapshot history is imported only when its collection scope and hashed
+Codex-home identity are both provable. If either check fails, exact rollout
+collection continues without that legacy history and reports show a compact
+`LEGACY HISTORY SKIPPED` warning. The reason is also recorded as
+`coverage.legacySnapshotStatus` in the generated snapshot.
+
+Codex quota records do not contain a ChatGPT account identifier. Token Ledger
+therefore treats one `CODEX_HOME` and its durable ledger as one account boundary
+and keys pools only by the canonical provider limit id; omitted or blank ids
+mean the default `codex` pool. If different ChatGPT accounts share a
+`CODEX_HOME`, their equal provider ids cannot be separated. Use distinct Codex
+homes under separate OS user profiles when account isolation matters.
+
+Raw provider limit ids are normalized and then hash-derived into stored pool
+keys; the raw ids are not written to the ledger or generated snapshot.
+Sanitized optional display labels are not identity, but may remain in the
+ledger, generated snapshot, terminal report, and image report.
+
+The application state directory is private (`0700`), and its ledger, lock, and
+SQLite transient files are private (`0600`). The durable database location is
+fixed at `~/.token-ledger/token-ledger-ledger.sqlite`; custom snapshot outputs
+never relocate it. An explicit `--input` reads only that deliberate snapshot
+input and does not use the durable ledger as a hidden data source.
 
 The collector does not export message bodies, reasoning text, tool arguments or
 results, credentials, file contents, or full local paths. Display titles may
@@ -183,6 +257,10 @@ contain user-written text. CLI errors and empty-state source labels show only a
 safe filename label, not an absolute input or source path. When a PNG or report
 is written, the explicit output path is reported so you can find the file. The
 CLI makes no network requests.
+
+For schema health signals, crash-safety guidance, cache/ledger
+coherence, and the repeatable scaling benchmark, see
+[Durable ledger operations](docs/durable-ledger-operations.md).
 
 ## Keyboard controls
 

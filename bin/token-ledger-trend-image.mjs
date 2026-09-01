@@ -24,6 +24,10 @@ import {
   buildTrendReportViewModel,
   zonedMidnight,
 } from "./token-ledger-report-data.mjs";
+import {
+  sourceStatusLabel,
+  sourceStatusLine,
+} from "./token-ledger-source-status.mjs";
 
 export {
   compact,
@@ -456,35 +460,31 @@ export function renderTrendImage({
     const throughLine = verified
       ? `Report through ${shortDateTimeLabel(meta.reportThroughMs, timeZone)}`
       : `Snapshot generated ${generatedLabel}`;
-    if (stale) {
-      const badge = chip(contentRight, 32, "STALE", {
-        fill: "rgba(246,183,60,.16)",
-        stroke: COLORS.line,
-        color: COLORS.line,
+    const provenanceBadge = chip(
+      contentRight,
+      32,
+      sourceStatusLine(meta.sourceStatus),
+      {
+        fill: verified
+          ? "rgba(255,255,255,.06)"
+          : "rgba(246,183,60,.16)",
+        stroke: verified ? COLORS.separator : COLORS.line,
+        color: verified ? COLORS.secondary : COLORS.line,
         anchor: "end",
-      });
-      elements.push(badge.markup);
-      elements.push(svgText({
-        x: contentRight - badge.width - 8,
-        y: 33,
-        value: throughLine,
-        fill: COLORS.secondary,
-        size: 12.5,
-        anchor: "end",
-      }));
-    } else {
-      elements.push(svgText({
-        x: contentRight,
-        y: 33,
-        value: throughLine,
-        fill: COLORS.secondary,
-        size: 12.5,
-        anchor: "end",
-      }));
-    }
+      },
+    );
+    elements.push(provenanceBadge.markup);
     elements.push(svgText({
       x: contentRight,
       y: 51,
+      value: throughLine,
+      fill: COLORS.secondary,
+      size: 12.5,
+      anchor: "end",
+    }));
+    elements.push(svgText({
+      x: contentRight,
+      y: 69,
       value: meter.lastObservedAtMs !== null
         ? `Meter last observed ${shortDateTimeLabel(meter.lastObservedAtMs, timeZone)}`
         : "No weekly meter observation",
@@ -492,7 +492,7 @@ export function renderTrendImage({
       size: 12.5,
       anchor: "end",
     }));
-    return subtitleInline ? 68 : 80;
+    return 82;
   }
 
   // Material trust conditions stay compact and disappear entirely for a
@@ -506,6 +506,24 @@ export function renderTrendImage({
         label: `${vm.coverage.parseErrors.toLocaleString("en-US")} UNPARSED SOURCE ${vm.coverage.parseErrors === 1 ? "RECORD" : "RECORDS"}`,
       });
     }
+    if (vm.coverage.invalidTokenRecords > 0) {
+      warnings.push({
+        kind: "invalid-token-records",
+        label: `${vm.coverage.invalidTokenRecords.toLocaleString("en-US")} INVALID TOKEN ${vm.coverage.invalidTokenRecords === 1 ? "RECORD" : "RECORDS"} EXCLUDED`,
+      });
+    }
+    if (vm.coverage.invalidQuotaRecords > 0) {
+      warnings.push({
+        kind: "invalid-quota-records",
+        label: `${vm.coverage.invalidQuotaRecords.toLocaleString("en-US")} INVALID QUOTA ${vm.coverage.invalidQuotaRecords === 1 ? "RECORD" : "RECORDS"} EXCLUDED`,
+      });
+    }
+    if (vm.coverage.sourceIncomplete) {
+      warnings.push({
+        kind: "source-incomplete",
+        label: "INCOMPLETE SOURCE PROVENANCE",
+      });
+    }
     if (!componentsComplete) {
       warnings.push({
         kind: "component-coverage",
@@ -516,11 +534,7 @@ export function renderTrendImage({
       warnings.push({ kind: "external-source", label: "EXTERNAL SNAPSHOT INPUT" });
     }
     if (!verified) {
-      const label = meta.sourceStatus === "stale-fallback"
-        ? "STALE SNAPSHOT"
-        : meta.sourceStatus === "explicit-snapshot"
-          ? "EXPLICIT SNAPSHOT"
-          : "UNCHECKED CACHE";
+      const label = sourceStatusLabel(meta.sourceStatus);
       warnings.push({ kind: "source-status", label });
     }
     if (vm.coverage.estimated) {
@@ -530,6 +544,17 @@ export function renderTrendImage({
       warnings.push({
         kind: "estimated-history",
         label: `≈ ESTIMATED HISTORY${resolution}`,
+      });
+    }
+    const legacyStatusLabel = new Map([
+      ["collection-scope-unverified", "SCOPE UNVERIFIED"],
+      ["codex-home-unverified", "HOME UNVERIFIED"],
+      ["codex-home-mismatch", "HOME MISMATCH"],
+    ]).get(vm.coverage.legacySnapshotStatus);
+    if (legacyStatusLabel) {
+      warnings.push({
+        kind: "legacy-history",
+        label: `LEGACY HISTORY SKIPPED · ${legacyStatusLabel}`,
       });
     }
     if (rateCardMismatch) {

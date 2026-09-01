@@ -16,6 +16,10 @@ import {
   todayInTimeZone,
 } from "../lib/token-ledger-calendar.mjs";
 import { buildRangeAnalysis as buildIndexedRangeAnalysis } from "../lib/token-ledger-range-analysis.mjs";
+import {
+  quotaIdentityMatchesContract,
+  snapshotHasCurrentQuotaIdentityContract,
+} from "../lib/token-ledger-quota-contract.mjs";
 
 const WEEK_MINUTES = 10_080;
 const RESET_JITTER_SECONDS = 5 * 60;
@@ -111,6 +115,7 @@ export function trendModelLabel(value) {
 }
 
 export function weeklyQuotaObservations(snapshot = {}) {
+  if (!snapshotHasCurrentQuotaIdentityContract(snapshot)) return [];
   let observations = (snapshot.quotaObservations ?? [])
     .map((observation) => {
       const timestampMs = finiteTimestamp(observation.timestamp);
@@ -139,43 +144,13 @@ export function weeklyQuotaObservations(snapshot = {}) {
       usedPercent: clampPercent(observation.usedPercent),
     }));
 
-  // Keep exactly one meter: the account-wide weekly limit. Legacy snapshots
-  // tag it with scope: "account"; current snapshots carry a limitKey per
-  // limit bucket, where the account-wide bucket has no limitName. Named
-  // buckets (per-model limit pools) are separate meters and must not be
-  // stitched into this line.
-  const accountScoped = observations.filter(
-    (observation) => observation.scope === "account",
+  // Keep exactly one meter: only explicit provider-derived account scope is
+  // authoritative. A missing display label does not prove account scope.
+  observations = observations.filter(
+    (observation) =>
+      observation.scope === "account" &&
+      quotaIdentityMatchesContract(observation),
   );
-  if (accountScoped.length) {
-    observations = accountScoped;
-  } else if (
-    observations.some(
-      (observation) => observation.scope === "named",
-    )
-  ) {
-    // Explicitly named-only input has no account-wide meter to report.
-    observations = [];
-  } else if (observations.some((observation) => observation.limitKey)) {
-    const groups = new Map();
-    for (const observation of observations) {
-      const key = observation.limitKey ?? "anonymous";
-      const group = groups.get(key) ?? [];
-      group.push(observation);
-      groups.set(key, group);
-    }
-    const accountWide = [...groups.values()].filter((group) =>
-      group.every((observation) => !observation.limitName),
-    );
-    observations = accountWide.length
-      ? accountWide.sort((left, right) => right.length - left.length)[0]
-      : [];
-  } else {
-    const accountWide = observations.filter(
-      (observation) => !observation.limitName,
-    );
-    if (accountWide.length) observations = accountWide;
-  }
 
   observations.sort(
     (left, right) =>
