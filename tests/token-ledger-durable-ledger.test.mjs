@@ -20,7 +20,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir, userInfo } from "node:os";
 import { dirname, resolve } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, StatementSync } from "node:sqlite";
 import test from "node:test";
 
 import { loadSnapshot } from "../bin/token-ledger.mjs";
@@ -42,6 +42,7 @@ import {
 import {
   QUOTA_IDENTITY_CONTRACT_VERSION,
 } from "../lib/token-ledger-quota-contract.mjs";
+import { apiUsdForUsage } from "../lib/token-ledger-rates.mjs";
 import {
   readPrivateSnapshot,
   stagePrivateSnapshot,
@@ -528,11 +529,46 @@ test("schema v2 source positions migrate to bounded event-key digests", async ()
       UPDATE source_event_positions
          SET event_key = ?
     `).run(eventKey);
+    const insertPosition = database.prepare(`
+      INSERT INTO source_event_positions (
+        source_id, event_ordinal, observation_id, event_key,
+        first_seen_at, last_seen_at
+      )
+      SELECT source_id, ?, observation_id, ?, first_seen_at, last_seen_at
+        FROM source_event_positions
+       WHERE source_id = ? AND event_ordinal = ?
+    `);
+    for (let index = 1; index <= 1_024; index += 1) {
+      insertPosition.run(
+        Number(position.eventOrdinal) + index,
+        `${eventKey}:${index}`,
+        position.sourceId,
+        position.eventOrdinal,
+      );
+    }
     database.exec("PRAGMA user_version = 2");
     database.close();
     database = null;
 
-    const snapshot = await collectUsage(options(fixture));
+    const originalAll = StatementSync.prototype.all;
+    const migrationBatchSizes = [];
+    StatementSync.prototype.all = function (...args) {
+      const rows = originalAll.apply(this, args);
+      if (
+        this.sourceSQL.includes("FROM source_event_positions") &&
+        this.sourceSQL.includes("event_ordinal AS eventOrdinal") &&
+        this.sourceSQL.includes("LIMIT ?")
+      ) {
+        migrationBatchSizes.push(rows.length);
+      }
+      return rows;
+    };
+    let snapshot;
+    try {
+      snapshot = await collectUsage(options(fixture));
+    } finally {
+      StatementSync.prototype.all = originalAll;
+    }
     database = new DatabaseSync(ledgerPath, { readOnly: true });
     const migratedPosition = database.prepare(`
       SELECT event_key AS eventKey
@@ -543,6 +579,7 @@ test("schema v2 source positions migrate to bounded event-key digests", async ()
     assert.equal(database.prepare("PRAGMA user_version").get().user_version, 3);
     assert.equal(migratedPosition.eventKey, stableHash(eventKey));
     assert.match(migratedPosition.eventKey, /^[0-9a-f]{64}$/);
+    assert.deepEqual(migrationBatchSizes, [512, 512, 1]);
   } finally {
     database?.close();
     await rm(fixture.root, { recursive: true, force: true });
@@ -5086,6 +5123,71 @@ test("partial legacy overlap does not retain credits for rescanned usage", async
 
     assert.equal(snapshot.coverage.observedTokens, 200);
     assert.ok(credits < 7);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("streamed migrated residuals preserve long-context allocation origin", async () => {
+  const fixture = await createFixture([]);
+  const timestamp = "2026-08-20T10:00:00.000Z";
+  const legacy = {
+    schemaVersion: 3,
+    generatedAt: "2026-08-20T12:00:00.000Z",
+    events: [{
+      timestamp: "2026-08-20T09:00:00.000Z",
+      startAt: "2026-08-20T09:00:00.000Z",
+      endAt: "2026-08-20T12:00:00.000Z",
+      project: "Unknown project",
+      model: "gpt-5.6-sol",
+      rateCardModel: "gpt-5.6-sol",
+      effort: "medium",
+      source: "unknown",
+      useType: "unknown",
+      inputTokens: 300_000,
+      cachedInputTokens: 10,
+      outputTokens: 10,
+      reasoningTokens: 4,
+      totalTokens: 300_010,
+      toolCalls: 0,
+      callCount: 1,
+      detailedCallCount: 1,
+      inputCallCount: 1,
+      breakdownAvailable: true,
+      threadIds: [THREAD_ID],
+    }],
+  };
+  try {
+    await writeFile(fixture.file, serialize([
+      ...turnStart(timestamp, "turn-1", "gpt-5.6-sol"),
+      tokenCount("2026-08-20T10:00:01.000Z", 100_010),
+    ]));
+    await writePrivateSnapshot(
+      fixture.output,
+      legacySnapshotForFixture(fixture, legacy),
+    );
+
+    await collectUsage(options(fixture));
+    const streamedUsage = [];
+    await updateDurableLedger({
+      options: {},
+      codexHome: fixture.root,
+      inventory: { files: [], lifecycleFiles: [] },
+      includeArchived: true,
+      onMaterializedRow: ({ kind, row }) => {
+        if (kind === "usage") streamedUsage.push(row);
+      },
+    });
+    const residual = streamedUsage.find(
+      (event) => event.identityKind === "migrated_compacted",
+    );
+    assert.ok(residual);
+    const api = apiUsdForUsage(residual);
+
+    assert.equal(residual.inputTokens, 200_000);
+    assert.equal(residual.rangeAllocationOrigin.inputTokens, 300_000);
+    assert.equal(api.amount, null);
+    assert.deepEqual(api.reasons, ["compacted-long-context-ambiguous"]);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
