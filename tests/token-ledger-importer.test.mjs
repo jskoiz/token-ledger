@@ -6,6 +6,7 @@ import {
   chmod,
   link,
   mkdtemp,
+  open,
   readFile,
   readdir,
   rename,
@@ -879,6 +880,66 @@ test("short queued reads retry before reconciling a truncated source", async () 
     assert.equal(first.coverage.observedTokens, 500);
     assert.equal(truncated, true);
     assert.equal(second.coverage.observedTokens, 400);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("in-place rewrites during bounded reads retry before reconciliation", async () => {
+  const root = await createPrivateFixtureRoot("token-ledger-stream-rewrite-");
+  const rolloutDirectory = resolve(root, "sessions", "2026", "08", "23");
+  const output = resolve(root, "snapshot.json");
+  const paths = [];
+  let rewritten = false;
+  try {
+    await mkdir(rolloutDirectory, { recursive: true });
+    const ignored = JSON.stringify({
+      type: "event_msg",
+      payload: { type: "agent_message", body: "ignored" },
+    });
+    const largeIgnored = `${Array(100_000).fill(ignored).join("\n")}\n`;
+    const oldPrefix = serialize(rolloutRows([200]));
+    const newPrefix = serialize(rolloutRows([300]));
+    assert.equal(Buffer.byteLength(oldPrefix), Buffer.byteLength(newPrefix));
+    for (let index = 0; index < 5; index += 1) {
+      const suffix = String(index + 1).padStart(12, "0");
+      const path = resolve(
+        rolloutDirectory,
+        `rollout-00000000-0000-4000-8000-${suffix}.jsonl`,
+      );
+      paths.push(path);
+      await writeFile(
+        path,
+        index === 0
+          ? `${ignored}\n`
+          : index === 1
+            ? `${oldPrefix}${largeIgnored}${serialize(rolloutRows([300], 1))}`
+            : largeIgnored,
+      );
+    }
+
+    const snapshot = await collectUsage(
+      {
+        output,
+        codexHome: root,
+        includeArchived: true,
+        since: null,
+        stageSnapshot: (candidate) => stagePrivateSnapshot(output, candidate),
+      },
+      async ({ current }) => {
+        if (current !== 1 || rewritten) return;
+        rewritten = true;
+        const handle = await open(paths[1], "r+");
+        try {
+          await handle.write(Buffer.from(newPrefix), 0, newPrefix.length, 0);
+        } finally {
+          await handle.close();
+        }
+      },
+    );
+
+    assert.equal(rewritten, true);
+    assert.equal(snapshot.coverage.observedTokens, 600);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
