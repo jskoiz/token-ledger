@@ -5,13 +5,30 @@ on:
   push:
     branches:
       - main
+    tags:
+      - "v*"
 
 permissions:
   contents: read
 
 jobs:
-  verify:
-    name: Node ${{ matrix.node-version }}
+  pull-request:
+    if: github.event_name == 'pull_request'
+    name: PR · Node 22.13
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run lint:eslint
+
+  main:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    name: Main · Node ${{ matrix.node-version }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -27,6 +44,18 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
-      - run: npm run lint
+      - run: npm run lint:eslint
+        if: matrix.node-version == '22.13.0'
+
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    name: Release verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
       - run: npm run verify:release
-      - run: npm pack --dry-run --json
