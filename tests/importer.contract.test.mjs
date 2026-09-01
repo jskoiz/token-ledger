@@ -187,6 +187,50 @@ test("collects a rollout into a private-shaped snapshot and exposes source water
   }
 });
 
+test("reuses an unchanged rollout with a partial trailing record", async () => {
+  const root = await createHome("token-ledger-partial-tail-contract-");
+  const timestamp = "2026-08-18T10:00:00.000Z";
+  try {
+    const complete = serialize([
+      ...turnStart(timestamp, "turn-1"),
+      tokenCount("2026-08-18T10:00:01.000Z", 100),
+    ]);
+    const appendedTurn = turnStart(
+      "2026-08-18T10:01:00.000Z",
+      "turn-2",
+    );
+    const appendedLine = JSON.stringify(appendedTurn[0]);
+    const partialLength = Math.floor(appendedLine.length / 2);
+    const path = await writeRollout(root, []);
+    await writeFile(path, `${complete}${appendedLine.slice(0, partialLength)}`);
+
+    const first = await collectUsage(collectionOptions(root));
+    const unchanged = await collectUsage(collectionOptions(root));
+
+    assert.equal(first.coverage.observedTokens, 100);
+    assert.equal(first.coverage.parseErrors, 0);
+    assert.equal(unchanged.coverage.observedTokens, 100);
+    assert.equal(unchanged.coverage.parseErrors, 0);
+    assert.equal(unchanged.coverage.filesScanned, 0);
+    assert.equal(unchanged.coverage.filesReused, 1);
+    assert.equal(unchanged.coverage.bytesScanned, 0);
+    assert.ok(unchanged.coverage.bytesReused > 0);
+
+    await appendFile(
+      path,
+      `${appendedLine.slice(partialLength)}\n${JSON.stringify(appendedTurn[1])}\n${serialize([
+        tokenCount("2026-08-18T10:01:01.000Z", 200),
+      ])}`,
+    );
+
+    const appended = await collectUsage(collectionOptions(root));
+    assert.equal(appended.coverage.observedTokens, 300);
+    assert.equal(appended.coverage.parseErrors, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("replaces a rollout during collection and publishes only the complete retry", async () => {
   const root = await createHome();
   const directory = resolve(root, "sessions", "2026", "08", "18");
