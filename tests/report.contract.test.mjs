@@ -334,6 +334,25 @@ test("meter observations and line segments stop at the latest observation", () =
   assert.ok(vm.meter.segments.every((segment) => segment.toMs <= latestObservedMs));
 });
 
+test("report meter preserves the account selection for mixed quota pools", () => {
+  const activeReset = resetAt(27);
+  const accountObservations = [
+    quota(20, 2, 40, activeReset),
+    quota(21, 2, 50, activeReset),
+  ];
+  const accountMeter = buildReport({
+    snapshot: snapshotOf([usage(20, 8)], accountObservations),
+  }).meter;
+  const mixedMeter = buildReport({
+    snapshot: snapshotOf(
+      [usage(20, 8)],
+      [...accountObservations, quota(21, 3, 95, activeReset, "Luna")],
+    ),
+  }).meter;
+
+  assert.deepEqual(mixedMeter, accountMeter);
+});
+
 test("partial, stale, and quota states keep their honesty markers", () => {
   const activeReset = resetAt(27);
   const cases = [

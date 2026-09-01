@@ -201,13 +201,10 @@ function modelRowFor(map, model) {
 function buildMeter({ snapshot, bounds, effectiveEndMs, sourceStatus, events }) {
   const startMs = bounds.start.getTime();
   const stale = sourceStatus === "stale-fallback";
-  // A named per-model pool is a different meter; if only named observations
-  // exist, the account-wide weekly limit is unobserved, not substituted.
+  // weeklyQuotaObservations owns quota identity and account-scope selection;
+  // this layer only applies the report-range cutoff to its selected meter.
   const selected = weeklyQuotaObservations(snapshot);
-  const accountWide = selected.filter(
-    (observation) => observation.scope === "account",
-  );
-  const observationsAll = normalizeQuotaTimeline(accountWide).filter(
+  const observationsAll = normalizeQuotaTimeline(selected).filter(
     (observation) => observation.timestampMs < effectiveEndMs,
   );
 
