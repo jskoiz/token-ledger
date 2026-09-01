@@ -39,7 +39,16 @@ export function isFastMode(serviceTier) {
 }
 
 function finiteTimestamp(value) {
-  const timestamp = new Date(value).getTime();
+  // Snapshot timestamps are serialized as ISO strings. Keep finite numeric
+  // epoch milliseconds for existing callers, but do not let Date coerce
+  // null, booleans, objects, or other non-timestamp values.
+  if (Number.isFinite(value)) {
+    const timestamp = new Date(value).getTime();
+    return Number.isFinite(timestamp) ? timestamp : null;
+  }
+  const text = primitiveString(value);
+  if (text === null) return null;
+  const timestamp = Date.parse(text);
   return Number.isFinite(timestamp) ? timestamp : null;
 }
 
@@ -192,13 +201,10 @@ function modelRowFor(map, model) {
 function buildMeter({ snapshot, bounds, effectiveEndMs, sourceStatus, events }) {
   const startMs = bounds.start.getTime();
   const stale = sourceStatus === "stale-fallback";
-  // A named per-model pool is a different meter; if only named observations
-  // exist, the account-wide weekly limit is unobserved, not substituted.
+  // weeklyQuotaObservations owns quota identity and account-scope selection;
+  // this layer only applies the report-range cutoff to its selected meter.
   const selected = weeklyQuotaObservations(snapshot);
-  const accountWide = selected.filter(
-    (observation) => observation.scope === "account",
-  );
-  const observationsAll = normalizeQuotaTimeline(accountWide).filter(
+  const observationsAll = normalizeQuotaTimeline(selected).filter(
     (observation) => observation.timestampMs < effectiveEndMs,
   );
 

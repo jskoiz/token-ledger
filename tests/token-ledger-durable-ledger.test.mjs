@@ -20,7 +20,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir, userInfo } from "node:os";
 import { dirname, resolve } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, StatementSync } from "node:sqlite";
 import test from "node:test";
 
 import { loadSnapshot } from "../bin/token-ledger.mjs";
@@ -42,6 +42,7 @@ import {
 import {
   QUOTA_IDENTITY_CONTRACT_VERSION,
 } from "../lib/token-ledger-quota-contract.mjs";
+import { apiUsdForUsage } from "../lib/token-ledger-rates.mjs";
 import {
   readPrivateSnapshot,
   stagePrivateSnapshot,
@@ -451,6 +452,282 @@ test("ledger statement preparation is constant across event volume", async () =>
     many.ledger.usageRows.reduce((sum, row) => sum + row.totalTokens, 0),
     3_200,
   );
+});
+
+test("durable materialization can stream usage and tool rows without arrays", async () => {
+  const fixture = await createFixture([100, 200]);
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
+  try {
+    await appendFile(fixture.file, serialize([
+      shellCall("2026-08-20T10:02:00.000Z", "stream-call-one"),
+      shellCall("2026-08-20T10:03:00.000Z", "stream-call-two"),
+    ]));
+    await collectUsage(options(fixture));
+    const before = await readDurableLedger(ledgerPath);
+    const streamedUsage = [];
+    const streamedTools = [];
+    const committed = await updateDurableLedger({
+      options: {},
+      codexHome: fixture.root,
+      inventory: { files: [], lifecycleFiles: [] },
+      includeArchived: true,
+      onMaterializedRow: ({ kind, row }) => {
+        if (kind === "usage") {
+          streamedUsage.push([
+            row.observationId,
+            row.identityKind,
+            row.totalTokens,
+          ]);
+        } else if (kind === "tool") {
+          streamedTools.push([
+            row.callKey,
+            row.usageOwned,
+          ]);
+        }
+      },
+    });
+
+    assert.equal(committed.usageRows.length, 0);
+    assert.equal(committed.toolRows.length, 0);
+    assert.deepEqual(
+      streamedUsage,
+      before.usageRows.map((row) => [
+        row.observationId,
+        row.identityKind,
+        row.totalTokens,
+      ]),
+    );
+    assert.deepEqual(
+      streamedTools,
+      before.toolRows.map((row) => [row.callKey, row.usageOwned]),
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("schema v2 source positions migrate to bounded event-key digests", async () => {
+  const fixture = await createFixture([100]);
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
+  let database;
+  try {
+    await collectUsage(options(fixture));
+    database = new DatabaseSync(ledgerPath);
+    const eventKey = String(database.prepare(`
+      SELECT event_key AS eventKey
+        FROM usage_observations
+       WHERE identity_kind = 'exact'
+       LIMIT 1
+    `).get().eventKey);
+    const position = database.prepare(`
+      SELECT source_id AS sourceId, event_ordinal AS eventOrdinal
+        FROM source_event_positions
+       LIMIT 1
+    `).get();
+    assert.ok(position?.sourceId);
+    database.prepare(`
+      UPDATE source_event_positions
+         SET event_key = ?
+    `).run(eventKey);
+    const insertPosition = database.prepare(`
+      INSERT INTO source_event_positions (
+        source_id, event_ordinal, observation_id, event_key,
+        first_seen_at, last_seen_at
+      )
+      SELECT source_id, ?, observation_id, ?, first_seen_at, last_seen_at
+        FROM source_event_positions
+       WHERE source_id = ? AND event_ordinal = ?
+    `);
+    for (let index = 1; index <= 1_024; index += 1) {
+      insertPosition.run(
+        Number(position.eventOrdinal) + index,
+        `${eventKey}:${index}`,
+        position.sourceId,
+        position.eventOrdinal,
+      );
+    }
+    database.exec("PRAGMA user_version = 2");
+    database.close();
+    database = null;
+
+    const originalAll = StatementSync.prototype.all;
+    const migrationBatchSizes = [];
+    StatementSync.prototype.all = function (...args) {
+      const rows = originalAll.apply(this, args);
+      if (
+        this.sourceSQL.includes("FROM source_event_positions") &&
+        this.sourceSQL.includes("event_ordinal AS eventOrdinal") &&
+        this.sourceSQL.includes("LIMIT ?")
+      ) {
+        migrationBatchSizes.push(rows.length);
+      }
+      return rows;
+    };
+    let snapshot;
+    try {
+      snapshot = await collectUsage(options(fixture));
+    } finally {
+      StatementSync.prototype.all = originalAll;
+    }
+    database = new DatabaseSync(ledgerPath, { readOnly: true });
+    const migratedPosition = database.prepare(`
+      SELECT event_key AS eventKey
+        FROM source_event_positions
+       WHERE source_id = ? AND event_ordinal = ?
+    `).get(position.sourceId, position.eventOrdinal);
+    assert.equal(snapshot.events.reduce((sum, row) => sum + row.totalTokens, 0), 100);
+    assert.equal(database.prepare("PRAGMA user_version").get().user_version, 3);
+    assert.equal(migratedPosition.eventKey, stableHash(eventKey));
+    assert.match(migratedPosition.eventKey, /^[0-9a-f]{64}$/);
+    assert.deepEqual(migrationBatchSizes, [512, 512, 1]);
+  } finally {
+    database?.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("schema v2 ledgers remain readable without a write migration", async () => {
+  const fixture = await createFixture([100]);
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
+  let database;
+  try {
+    await collectUsage(options(fixture));
+    database = new DatabaseSync(ledgerPath);
+    const position = database.prepare(`
+      SELECT source_id AS sourceId, event_ordinal AS eventOrdinal
+        FROM source_event_positions
+       LIMIT 1
+    `).get();
+    const legacyEventKey = JSON.stringify([
+      "legacy-schema-v2-event-key",
+      position.sourceId,
+      position.eventOrdinal,
+    ]);
+    database.prepare(`
+      UPDATE source_event_positions
+         SET event_key = ?
+       WHERE source_id = ? AND event_ordinal = ?
+    `).run(legacyEventKey, position.sourceId, position.eventOrdinal);
+    database.exec("PRAGMA user_version = 2");
+    database.close();
+    database = null;
+
+    const ledger = await readDurableLedger(ledgerPath);
+
+    assert.equal(
+      ledger.usageRows.reduce((sum, row) => sum + row.totalTokens, 0),
+      100,
+    );
+    database = new DatabaseSync(ledgerPath, { readOnly: true });
+    assert.equal(database.prepare("PRAGMA user_version").get().user_version, 2);
+    assert.equal(database.prepare(`
+      SELECT event_key AS eventKey
+        FROM source_event_positions
+       WHERE source_id = ? AND event_ordinal = ?
+    `).get(position.sourceId, position.eventOrdinal).eventKey, legacyEventKey);
+  } finally {
+    database?.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("new durable ledgers use incremental vacuum and reclaim a large freelist", async () => {
+  const fixture = await createFixture([100]);
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
+  let database;
+  try {
+    await collectUsage(options(fixture));
+    database = new DatabaseSync(ledgerPath);
+    assert.equal(database.prepare("PRAGMA auto_vacuum").get().auto_vacuum, 2);
+    database.exec("CREATE TABLE vacuum_canary (payload BLOB)");
+    database.prepare("INSERT INTO vacuum_canary(payload) VALUES (?)").run(
+      Buffer.alloc(8 * 1024 * 1024, 7),
+    );
+    database.exec("DROP TABLE vacuum_canary");
+    const freeBefore = Number(
+      database.prepare("PRAGMA freelist_count").get().freelist_count,
+    );
+    assert.ok(freeBefore >= 512);
+    database.close();
+    database = null;
+
+    await collectUsage(options(fixture));
+    database = new DatabaseSync(ledgerPath, { readOnly: true });
+    const freeAfter = Number(
+      database.prepare("PRAGMA freelist_count").get().freelist_count,
+    );
+    assert.ok(freeAfter < freeBefore);
+  } finally {
+    database?.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("vacuum failures do not fail an already published refresh", async () => {
+  const fixture = await createFixture([100]);
+  const ledgerPath = resolveDurableLedgerPath({ codexHome: fixture.root });
+  let database;
+  const originalExec = DatabaseSync.prototype.exec;
+  let vacuumAttempted = false;
+  try {
+    await collectUsage(options(fixture, {
+      stageSnapshot: (snapshot) => stagePrivateSnapshot(
+        fixture.output,
+        snapshot,
+      ),
+    }));
+    database = new DatabaseSync(ledgerPath);
+    database.exec("CREATE TABLE vacuum_canary (payload BLOB)");
+    database.prepare("INSERT INTO vacuum_canary(payload) VALUES (?)").run(
+      Buffer.alloc(8 * 1024 * 1024, 7),
+    );
+    database.exec("DROP TABLE vacuum_canary");
+    assert.ok(Number(
+      database.prepare("PRAGMA freelist_count").get().freelist_count,
+    ) >= 512);
+    database.close();
+    database = null;
+    await appendFile(
+      fixture.file,
+      serialize(rolloutRows([200], { offset: 1 })),
+    );
+
+    DatabaseSync.prototype.exec = function (sql) {
+      if (/^PRAGMA incremental_vacuum\(\d+\)$/.test(String(sql))) {
+        vacuumAttempted = true;
+        throw Object.assign(new Error("database or disk is full"), {
+          code: "ERR_SQLITE_ERROR",
+          errcode: 13,
+          errstr: "SQLITE_FULL",
+        });
+      }
+      return originalExec.call(this, sql);
+    };
+    const refreshed = await collectUsage(options(fixture, {
+      stageSnapshot: (snapshot) => stagePrivateSnapshot(
+        fixture.output,
+        snapshot,
+      ),
+    }));
+    DatabaseSync.prototype.exec = originalExec;
+    const stored = await readPrivateSnapshot(fixture.output);
+
+    assert.equal(vacuumAttempted, true);
+    assert.equal(totalTokens(refreshed), 300);
+    assert.equal(refreshed.metadata.durableLedger.revision, 2);
+    assert.equal(await readDurableLedgerRevision(ledgerPath), 2);
+    assert.equal(totalTokens(stored), 300);
+    assert.equal(stored.metadata.durableLedger.revision, 2);
+    assert.equal(
+      (await readdir(dirname(fixture.output)))
+        .some((name) => name.startsWith(".token-ledger-")),
+      false,
+    );
+  } finally {
+    DatabaseSync.prototype.exec = originalExec;
+    database?.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
 });
 
 test("quota normalization accepts only exact provider percentage fields", () => {
@@ -2307,7 +2584,7 @@ test("unchanged and appended sources add each logical event once", async () => {
   }
 });
 
-test("unchanged rollouts rescan when state-backed metadata changes", async () => {
+test("unchanged rollouts rescan when state metadata changes in the same second", async () => {
   const fixture = await createFixture([100]);
   const state = new DatabaseSync(resolve(fixture.root, "state_5.sqlite"));
   try {
@@ -2352,6 +2629,54 @@ test("snapshot staging rejects durable ledger and SQLite sidecar paths", async (
       );
     }
     assert.equal((await readDurableLedger(ledgerPath)).revision, ledgerBefore.revision);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("unchanged rollouts rescan when a session-index title has no timestamp", async () => {
+  const fixture = await createFixture([100]);
+  const sessionIndex = resolve(fixture.root, "session_index.jsonl");
+  try {
+    await writeFile(
+      sessionIndex,
+      serialize([{ id: THREAD_ID, thread_name: "Old title" }]),
+    );
+    const first = await collectUsage(options(fixture));
+
+    await writeFile(
+      sessionIndex,
+      serialize([{ id: THREAD_ID, thread_name: "New title" }]),
+    );
+    const refreshed = await collectUsage(options(fixture));
+
+    assert.equal(first.threads[0].title, "Old title");
+    assert.equal(refreshed.threads[0].title, "New title");
+    assert.equal(refreshed.coverage.filesScanned, 1);
+    assert.equal(refreshed.coverage.filesReused, 0);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("metadata changes rescan rollout paths without UUIDs", async () => {
+  const fixture = await createFixture([100]);
+  const nonUuidFile = resolve(
+    dirname(fixture.file),
+    "rollout-without-a-thread-id.jsonl",
+  );
+  try {
+    await rename(fixture.file, nonUuidFile);
+    const first = await collectUsage(options(fixture));
+    await writeFile(
+      resolve(fixture.root, "session_index.jsonl"),
+      serialize([{ id: THREAD_ID, thread_name: "Metadata changed" }]),
+    );
+    const refreshed = await collectUsage(options(fixture));
+
+    assert.equal(first.coverage.filesScanned, 1);
+    assert.equal(refreshed.coverage.filesScanned, 1);
+    assert.equal(refreshed.coverage.filesReused, 0);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -2490,6 +2815,7 @@ test("split after salted allocation keeps memberships and positions aligned", as
 
     database = new DatabaseSync(ledgerPath, { readOnly: true });
     const saltedId = `exact-${stableHash(JSON.stringify([eventKeyB, 1]))}`;
+    const eventKeyBDigest = stableHash(eventKeyB);
     const exactB = database.prepare(`
       SELECT observation_id AS observationId, event_key AS eventKey,
              identity_kind AS identityKind
@@ -2505,12 +2831,12 @@ test("split after salted allocation keeps memberships and positions aligned", as
       SELECT COUNT(*) AS count
         FROM source_event_positions
        WHERE event_key = ? AND observation_id = ?
-    `).get(eventKeyB, saltedId);
+    `).get(eventKeyBDigest, saltedId);
     const foreignPositions = database.prepare(`
       SELECT COUNT(*) AS count
         FROM source_event_positions
        WHERE event_key = ? AND observation_id = ?
-    `).get(eventKeyB, unsaltedId);
+    `).get(eventKeyBDigest, unsaltedId);
     const bSources = database.prepare(`
       SELECT COUNT(*) AS count
         FROM usage_sources
@@ -4161,7 +4487,7 @@ test("write-open rejects newer durable ledger schemas without rewriting them", a
     database = new DatabaseSync(ledgerPath);
     database.exec(`
       CREATE TABLE future_only (value TEXT);
-      PRAGMA user_version = 3;
+      PRAGMA user_version = 4;
     `);
     database.close();
     database = null;
@@ -4172,7 +4498,7 @@ test("write-open rejects newer durable ledger schemas without rewriting them", a
     );
 
     database = new DatabaseSync(ledgerPath, { readOnly: true });
-    assert.equal(database.prepare("PRAGMA user_version").get().user_version, 3);
+    assert.equal(database.prepare("PRAGMA user_version").get().user_version, 4);
     assert.equal(
       database.prepare(`
         SELECT COUNT(*) AS count
@@ -4909,6 +5235,71 @@ test("partial legacy overlap does not retain credits for rescanned usage", async
 
     assert.equal(snapshot.coverage.observedTokens, 200);
     assert.ok(credits < 7);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("streamed migrated residuals preserve long-context allocation origin", async () => {
+  const fixture = await createFixture([]);
+  const timestamp = "2026-08-20T10:00:00.000Z";
+  const legacy = {
+    schemaVersion: 3,
+    generatedAt: "2026-08-20T12:00:00.000Z",
+    events: [{
+      timestamp: "2026-08-20T09:00:00.000Z",
+      startAt: "2026-08-20T09:00:00.000Z",
+      endAt: "2026-08-20T12:00:00.000Z",
+      project: "Unknown project",
+      model: "gpt-5.6-sol",
+      rateCardModel: "gpt-5.6-sol",
+      effort: "medium",
+      source: "unknown",
+      useType: "unknown",
+      inputTokens: 300_000,
+      cachedInputTokens: 10,
+      outputTokens: 10,
+      reasoningTokens: 4,
+      totalTokens: 300_010,
+      toolCalls: 0,
+      callCount: 1,
+      detailedCallCount: 1,
+      inputCallCount: 1,
+      breakdownAvailable: true,
+      threadIds: [THREAD_ID],
+    }],
+  };
+  try {
+    await writeFile(fixture.file, serialize([
+      ...turnStart(timestamp, "turn-1", "gpt-5.6-sol"),
+      tokenCount("2026-08-20T10:00:01.000Z", 100_010),
+    ]));
+    await writePrivateSnapshot(
+      fixture.output,
+      legacySnapshotForFixture(fixture, legacy),
+    );
+
+    await collectUsage(options(fixture));
+    const streamedUsage = [];
+    await updateDurableLedger({
+      options: {},
+      codexHome: fixture.root,
+      inventory: { files: [], lifecycleFiles: [] },
+      includeArchived: true,
+      onMaterializedRow: ({ kind, row }) => {
+        if (kind === "usage") streamedUsage.push(row);
+      },
+    });
+    const residual = streamedUsage.find(
+      (event) => event.identityKind === "migrated_compacted",
+    );
+    assert.ok(residual);
+    const api = apiUsdForUsage(residual);
+
+    assert.equal(residual.inputTokens, 200_000);
+    assert.equal(residual.rangeAllocationOrigin.inputTokens, 300_000);
+    assert.equal(api.amount, null);
+    assert.deepEqual(api.reasons, ["compacted-long-context-ambiguous"]);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -6039,7 +6430,7 @@ test("schema v1 upgrades transactionally and scrubs persisted private metadata",
     await collectUsage(options(fixture));
 
     database = new DatabaseSync(ledgerPath, { readOnly: true });
-    assert.equal(database.prepare("PRAGMA user_version").get().user_version, 2);
+    assert.equal(database.prepare("PRAGMA user_version").get().user_version, 3);
     const migrationColumns = new Set(database.prepare(
       "PRAGMA table_info(migration_runs)",
     ).all().map((column) => column.name));
@@ -6187,7 +6578,7 @@ test("scoped v1 migration records upgrade without changing exact totals", async 
     assert.equal(ledger.migration.collectionSince, null);
     assert.equal(ledger.migration.scopeKnown, false);
     database = new DatabaseSync(ledgerPath, { readOnly: true });
-    assert.equal(database.prepare("PRAGMA user_version").get().user_version, 2);
+    assert.equal(database.prepare("PRAGMA user_version").get().user_version, 3);
   } finally {
     database?.close();
     await rm(fixture.root, { recursive: true, force: true });

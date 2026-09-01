@@ -88,6 +88,24 @@ inside one SQLite transaction. The upgrade removes stored working directories,
 Git remotes, and raw source values, then compacts the database so those bytes do
 not remain in free pages. New v2 writes store no raw versions of those values.
 
+Schema v3 keeps the durable source-position index bounded: `event_key` in
+`source_event_positions` is now a 64-character SHA-256 digest, while the full
+event key remains in the observation or compaction-membership row that owns it.
+Existing v2 ledgers rewrite those position values once on first write. New
+ledgers use SQLite incremental auto-vacuum, and successful writes reclaim a
+large freelist when it crosses both an absolute and percentage threshold;
+small or busy databases defer maintenance to a later write.
+
+During importer commits, durable usage and tool rows are materialized through a
+synchronous SQLite cursor into the disk-backed usage spool. The public
+`readDurableLedger()` result remains array-shaped for callers, but the refresh
+hot path retains only the current row and one compacted row's membership
+iterator at a time. Legacy migrated buckets are the bounded exception because
+their residuals must remain available while current observations are compared.
+Quota and thread metadata continue to use their existing collection paths; a
+future change can stream those independently if their retention grows enough
+to justify it.
+
 The quota-identity contract upgrades separately. Opening a markerless ledger or
 the prior `codex-limit-id-v1` contract for a write transaction discards all
 pre-contract exact and migrated quota rows with their memberships, then records

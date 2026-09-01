@@ -3,8 +3,10 @@ import {
   appendFile,
   mkdir,
   mkdtemp,
+  open,
   rename,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -183,6 +185,128 @@ test("collects a rollout into a private-shaped snapshot and exposes source water
     assert.equal(sourceWatermarksEqual(current.watermark, changed.watermark), false);
     assert.notEqual(current.watermark.fingerprint, changed.watermark.fingerprint);
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("reuses an unchanged rollout with a partial trailing record", async () => {
+  const root = await createHome("token-ledger-partial-tail-contract-");
+  const timestamp = "2026-08-18T10:00:00.000Z";
+  try {
+    const complete = serialize([
+      ...turnStart(timestamp, "turn-1"),
+      tokenCount("2026-08-18T10:00:01.000Z", 100),
+    ]);
+    const appendedTurn = turnStart(
+      "2026-08-18T10:01:00.000Z",
+      "turn-2",
+    );
+    const appendedLine = JSON.stringify(appendedTurn[0]);
+    const partialLength = Math.floor(appendedLine.length / 2);
+    const path = await writeRollout(root, []);
+    await writeFile(path, `${complete}${appendedLine.slice(0, partialLength)}`);
+
+    const first = await collectUsage(collectionOptions(root));
+    const unchanged = await collectUsage(collectionOptions(root));
+
+    assert.equal(first.coverage.observedTokens, 100);
+    assert.equal(first.coverage.parseErrors, 0);
+    assert.equal(unchanged.coverage.observedTokens, 100);
+    assert.equal(unchanged.coverage.parseErrors, 0);
+    assert.equal(unchanged.coverage.filesScanned, 0);
+    assert.equal(unchanged.coverage.filesReused, 1);
+    assert.equal(unchanged.coverage.bytesScanned, 0);
+    assert.ok(unchanged.coverage.bytesReused > 0);
+
+    await appendFile(
+      path,
+      `${appendedLine.slice(partialLength)}\n${JSON.stringify(appendedTurn[1])}\n${serialize([
+        tokenCount("2026-08-18T10:01:01.000Z", 200),
+      ])}`,
+    );
+
+    const appended = await collectUsage(collectionOptions(root));
+    assert.equal(appended.coverage.observedTokens, 300);
+    assert.equal(appended.coverage.parseErrors, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("stable bounded scans reuse the streaming prefix fingerprint", async () => {
+  const root = await createHome("token-ledger-stable-prefix-contract-");
+  const file = await writeRollout(root, [
+    ...turnStart("2026-08-18T10:00:00.000Z", "turn-1"),
+    tokenCount("2026-08-18T10:00:01.000Z", 100),
+  ]);
+  const probe = await open(file, "r");
+  const fileHandlePrototype = Object.getPrototypeOf(probe);
+  const originalRead = fileHandlePrototype.read;
+  await probe.close();
+  const reads = [];
+  fileHandlePrototype.read = async function (...args) {
+    reads.push({ byteLength: Number(args[2]), position: Number(args[3]) });
+    return originalRead.apply(this, args);
+  };
+
+  try {
+    const snapshot = await collectUsageSequential(collectionOptions(root));
+    const fileBytes = (await stat(file)).size;
+
+    assert.equal(snapshot.coverage.observedTokens, 100);
+    assert.equal(snapshot.coverage.filesScanned, 1);
+    assert.deepEqual(
+      reads.filter(({ byteLength, position }) =>
+        byteLength === fileBytes && position === 0
+      ),
+      [
+        { byteLength: fileBytes, position: 0 },
+        { byteLength: fileBytes, position: 0 },
+      ],
+    );
+  } finally {
+    fileHandlePrototype.read = originalRead;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("suspicious in-place rewrites retry after a bounded scan", async () => {
+  const root = await createHome("token-ledger-rewrite-contract-");
+  const file = await writeRollout(root, [
+    ...turnStart("2026-08-18T10:00:00.000Z", "turn-1"),
+    tokenCount("2026-08-18T10:00:01.000Z", 100),
+  ]);
+  const replacement = `${serialize([
+    ...turnStart("2026-08-18T10:00:00.000Z", "turn-1"),
+    tokenCount("2026-08-18T10:00:01.000Z", 300),
+  ])}x`;
+  const probe = await open(file, "r");
+  const fileHandlePrototype = Object.getPrototypeOf(probe);
+  const originalRead = fileHandlePrototype.read;
+  const originalCreateReadStream = fileHandlePrototype.createReadStream;
+  await probe.close();
+  const scannedHandles = new WeakSet();
+  let rewritten = false;
+  fileHandlePrototype.createReadStream = function (...args) {
+    scannedHandles.add(this);
+    return originalCreateReadStream.apply(this, args);
+  };
+  fileHandlePrototype.read = async function (...args) {
+    const result = await originalRead.apply(this, args);
+    if (scannedHandles.has(this) && !rewritten) {
+      rewritten = true;
+      await writeFile(file, replacement);
+    }
+    return result;
+  };
+
+  try {
+    const snapshot = await collectUsageSequential(collectionOptions(root));
+    assert.equal(rewritten, true);
+    assert.equal(snapshot.coverage.observedTokens, 300);
+  } finally {
+    fileHandlePrototype.read = originalRead;
+    fileHandlePrototype.createReadStream = originalCreateReadStream;
     await rm(root, { recursive: true, force: true });
   }
 });
