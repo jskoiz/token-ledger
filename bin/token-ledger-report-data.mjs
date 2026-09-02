@@ -638,11 +638,11 @@ export function buildTrendReportViewModel({
       right.totalTokens - left.totalTokens ||
       left.project.localeCompare(right.project),
   );
-  const topProjects = allProjectRows.slice(0, 3).map((row) => ({
+  const topProjects = allProjectRows.slice(0, 4).map((row) => ({
     ...row,
     sharePercent: totalTokens > 0 ? (row.totalTokens / totalTokens) * 100 : 0,
   }));
-  const remainderRows = allProjectRows.slice(3);
+  const remainderRows = allProjectRows.slice(4);
   const remainderTokens = remainderRows.reduce(
     (sum, row) => sum + row.totalTokens,
     0,
@@ -653,7 +653,7 @@ export function buildTrendReportViewModel({
     sharePercent: totalTokens > 0 ? (remainderTokens / totalTokens) * 100 : 0,
     estimated: remainderRows.some((row) => row.estimated),
   };
-  const topThreeProjectTokens = topProjects.reduce(
+  const topFourProjectTokens = topProjects.reduce(
     (sum, row) => sum + row.totalTokens,
     0,
   );
@@ -727,9 +727,9 @@ export function buildTrendReportViewModel({
       ),
       fastSharePercent: totalTokens > 0 ? (fastTokens / totalTokens) * 100 : null,
       activeProjects: allProjectRows.length,
-      topThreeProjectTokens,
-      topThreeProjectSharePercent:
-        totalTokens > 0 ? (topThreeProjectTokens / totalTokens) * 100 : null,
+      topFourProjectTokens,
+      topFourProjectSharePercent:
+        totalTokens > 0 ? (topFourProjectTokens / totalTokens) * 100 : null,
     },
     models: modelRows,
     daily,

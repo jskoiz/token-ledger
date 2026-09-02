@@ -77,6 +77,7 @@ const COLORS = {
 
 const FAST_MODE_LABEL_COLOR = "#a78bfa";
 const MIN_BAR_WIDTH = 26;
+const PROJECT_PANEL_ROW_COUNT = 5;
 
 function pct(value) {
   if (!Number.isFinite(value)) return "—";
@@ -577,9 +578,9 @@ export function renderTrendImage({
       label: "PROJECTS",
       value: String(summary.activeProjects),
       unit: "active",
-      sub: summary.topThreeProjectSharePercent !== null
+      sub: summary.topFourProjectSharePercent !== null
         ? {
-            text: `Top ${Math.min(3, vm.projects.length)} = ${approximateLabel(pct(summary.topThreeProjectSharePercent), summary.estimated)}`,
+            text: `Top ${Math.min(4, vm.projects.length)} = ${approximateLabel(pct(summary.topFourProjectSharePercent), summary.estimated)}`,
             color: COLORS.secondary,
           }
         : { text: "no project activity", color: COLORS.muted },
@@ -1695,15 +1696,13 @@ export function renderTrendImage({
         muted: true,
       });
     }
-    if (!rows.length) {
-      elements.push(svgText({
-        x: x + 16,
-        y: y + 60,
-        value: "No project activity in range",
-        fill: COLORS.muted,
-        size: 12.5,
-      }));
-      return;
+    while (rows.length < PROJECT_PANEL_ROW_COUNT) {
+      rows.push({
+        rank: String(rows.length + 1).padStart(2, "0"),
+        name: rows.length === 0 ? "No project activity in range" : "—",
+        empty: true,
+        muted: true,
+      });
     }
 
     const rowTop = y + 44;
@@ -1717,6 +1716,7 @@ export function renderTrendImage({
     const nameWidth = barX - nameX - 12;
     rows.forEach((row, index) => {
       const centerY = rowTop + index * rowGap + 8;
+      elements.push(`<g data-role="project-row" data-kind="${row.empty ? "placeholder" : "data"}">`);
       elements.push(svgText({
         x: rankX,
         y: centerY + 4,
@@ -1733,42 +1733,45 @@ export function renderTrendImage({
         size: 13.5,
         weight: row.muted ? 400 : 700,
       }));
-      elements.push(svgRect(barX, centerY - 4, barWidth, 9, {
-        rx: 2,
-        fill: COLORS.projectTrack,
-      }));
-      const fillWidth = (Math.max(0, Math.min(100, row.share)) / 100) * barWidth;
-      if (fillWidth > 0) {
-        elements.push(svgRect(barX, centerY - 4, fillWidth, 9, {
+      if (!row.empty) {
+        elements.push(svgRect(barX, centerY - 4, barWidth, 9, {
           rx: 2,
-          fill: row.muted ? COLORS.remainderBar : COLORS.leftAxis,
+          fill: COLORS.projectTrack,
+        }));
+        const fillWidth = (Math.max(0, Math.min(100, row.share)) / 100) * barWidth;
+        if (fillWidth > 0) {
+          elements.push(svgRect(barX, centerY - 4, fillWidth, 9, {
+            rx: 2,
+            fill: row.muted ? COLORS.remainderBar : COLORS.leftAxis,
+          }));
+        }
+        elements.push(svgText({
+          x: tokensRight,
+          y: centerY + 4,
+          value: approximateLabel(compact(row.tokens), row.estimated),
+          fill: row.muted ? COLORS.secondary : COLORS.ink,
+          size: 13.5,
+          weight: 700,
+          anchor: "end",
+        }));
+        elements.push(svgText({
+          x: pctRight,
+          y: centerY + 4,
+          value: approximateLabel(pct(row.share), summary.estimated),
+          fill: COLORS.muted,
+          size: 12,
+          anchor: "end",
         }));
       }
-      elements.push(svgText({
-        x: tokensRight,
-        y: centerY + 4,
-        value: approximateLabel(compact(row.tokens), row.estimated),
-        fill: row.muted ? COLORS.secondary : COLORS.ink,
-        size: 13.5,
-        weight: 700,
-        anchor: "end",
-      }));
-      elements.push(svgText({
-        x: pctRight,
-        y: centerY + 4,
-        value: approximateLabel(pct(row.share), summary.estimated),
-        fill: COLORS.muted,
-        size: 12,
-        anchor: "end",
-      }));
+      elements.push("</g>");
     });
 
-    if (summary.topThreeProjectSharePercent !== null && vm.projects.length) {
+    if (summary.topFourProjectSharePercent !== null && vm.projects.length) {
       const stripY = y + panelHeight - 32;
       elements.push(svgText({
         x: x + 16,
         y: stripY + 15,
-        value: `Top ${Math.min(3, vm.projects.length)} projects = ${approximateLabel(pct(summary.topThreeProjectSharePercent), summary.estimated)} of tokens`,
+        value: `Top ${Math.min(4, vm.projects.length)} projects = ${approximateLabel(pct(summary.topFourProjectSharePercent), summary.estimated)} of tokens`,
         fill: COLORS.leftAxis,
         size: 11.5,
       }));
@@ -1925,8 +1928,7 @@ export function renderTrendImage({
 
   function buildLowerSection(top) {
     const gap = 14;
-    const projectRowCount = Math.min(4, vm.projects.length) +
-      (vm.projectRemainder.count > 0 ? 1 : 0);
+    const projectRowCount = PROJECT_PANEL_ROW_COUNT;
     const modelRowCount = Math.min(5, vm.models.filter((r) => r.totalTokens > 0).length || 1);
     const cacheHeight = 258;
     const projectsHeight = Math.max(150, 44 + projectRowCount * 33 + 46);

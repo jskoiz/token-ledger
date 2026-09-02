@@ -145,6 +145,55 @@ test("report totals reconcile across daily, model, project, and token components
   assert.equal(vm.models.reduce((sum, row) => sum + row.cacheInputTokens, 0), vm.summary.inputTokens);
 });
 
+test("project ranking fills five rows with four projects and a remainder", () => {
+  const events = [
+    usage(17, 8, { project: "alpha", totalTokens: 6_000 }),
+    usage(18, 8, { project: "beta", totalTokens: 5_000 }),
+    usage(19, 8, { project: "gamma", totalTokens: 4_000 }),
+    usage(20, 8, { project: "delta", totalTokens: 3_000 }),
+    usage(21, 8, { project: "epsilon", totalTokens: 2_000 }),
+    usage(22, 8, { project: "zeta", totalTokens: 1_000 }),
+  ];
+  const vm = buildReport({ snapshot: snapshotOf(events) });
+
+  assert.deepEqual(
+    vm.projects.map((row) => row.displayProject),
+    ["alpha", "beta", "gamma", "delta"],
+  );
+  assert.equal(vm.projectRemainder.count, 2);
+  assert.equal(vm.projectRemainder.totalTokens, 3_000);
+  assert.equal(vm.summary.topFourProjectTokens, 18_000);
+  assert.equal(
+    vm.summary.topFourProjectSharePercent,
+    (18_000 / 21_000) * 100,
+  );
+
+  const report = renderTrendImage({
+    snapshot: snapshotOf(events),
+    bounds,
+    days: 7,
+    options: { imageWidth: 1_280 },
+    reportTimeMs: timestampMs(23, 12),
+    sourceStatus: "verified-current",
+  });
+  assert.match(report, />delta<\/text>/);
+  assert.match(report, />2 other projects<\/text>/);
+  assert.match(report, />Top 4 projects = 85\.7% of tokens<\/text>/);
+  assert.equal(report.match(/data-role="project-row"/g)?.length, 5);
+  assert.doesNotMatch(report, /data-kind="placeholder"/);
+
+  const sparseReport = renderTrendImage({
+    snapshot: snapshotOf(events.slice(0, 2)),
+    bounds,
+    days: 7,
+    options: { imageWidth: 1_280 },
+    reportTimeMs: timestampMs(23, 12),
+    sourceStatus: "verified-current",
+  });
+  assert.equal(sparseReport.match(/data-role="project-row"/g)?.length, 5);
+  assert.equal(sparseReport.match(/data-kind="placeholder"/g)?.length, 3);
+});
+
 test("cache efficiency is input-weighted and fast mode remains a total subset", () => {
   assert.equal(isFastMode("priority"), true);
   assert.equal(isFastMode("fast"), true);
