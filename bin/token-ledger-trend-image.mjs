@@ -439,7 +439,7 @@ export function renderTrendImage({
     // Fast-mode tokens keep the model color and add this hatch so they stay
     // visible in grayscale without inventing extra bar height.
     '<pattern id="fast-mode-hatch" patternUnits="userSpaceOnUse" width="7" height="7" patternTransform="rotate(45)">',
-    '<line x1="0" y1="0" x2="0" y2="7" stroke="rgba(255,255,255,.75)" stroke-width="2"/>',
+    '<line x1="0" y1="0" x2="0" y2="7" stroke="rgba(14,20,32,.48)" stroke-width="1.6"/>',
     "</pattern>",
     "</defs>",
   ].join("\n");

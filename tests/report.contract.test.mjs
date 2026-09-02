@@ -441,6 +441,25 @@ test("report image omits provenance and integrity notification badges", () => {
   assert.doesNotMatch(report, /LEGACY HISTORY SKIPPED/);
 });
 
+test("fast-mode hatching uses muted dark ink", () => {
+  const report = renderTrendImage({
+    snapshot: snapshotOf([
+      usage(23, 10, { serviceTier: "priority", totalTokens: 10_000 }),
+    ]),
+    bounds,
+    days: 7,
+    options: { imageWidth: 1_280 },
+    reportTimeMs: timestampMs(23, 12),
+    sourceStatus: "verified-current",
+  });
+
+  assert.match(
+    report,
+    /id="fast-mode-hatch"[\s\S]*stroke="rgba\(14,20,32,\.48\)" stroke-width="1\.6"/,
+  );
+  assert.doesNotMatch(report, /stroke="rgba\(255,255,255,\.75\)"/);
+});
+
 test("bar total labels move clear of restart marker lines", () => {
   const report = renderTrendImage({
     snapshot: snapshotOf(
