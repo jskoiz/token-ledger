@@ -114,6 +114,58 @@ function durationLabel(ms) {
   return `${Math.max(1, Math.round(hours))} ${Math.max(1, Math.round(hours)) === 1 ? "hour" : "hours"}`;
 }
 
+function barTotalLabelPlacement({
+  centerX,
+  labelWidth,
+  slotLeft,
+  slotRight,
+  resetXs,
+}) {
+  const resetPadding = 5;
+  const resetGap = 8;
+  const boundsFor = (x, anchor) => {
+    if (anchor === "end") return { left: x - labelWidth, right: x };
+    if (anchor === "start") return { left: x, right: x + labelWidth };
+    return { left: x - labelWidth / 2, right: x + labelWidth / 2 };
+  };
+  const isClear = ({ left, right }) =>
+    left >= slotLeft &&
+    right <= slotRight &&
+    !resetXs.some((resetX) =>
+      resetX >= left - resetPadding && resetX <= right + resetPadding
+    );
+  const centered = {
+    x: centerX,
+    anchor: "middle",
+    placement: "centered",
+  };
+  if (isClear(boundsFor(centered.x, centered.anchor))) return centered;
+
+  const candidates = [];
+  for (const resetX of resetXs) {
+    for (const candidate of [
+      { x: resetX - resetGap, anchor: "end", placement: "reset-left" },
+      { x: resetX + resetGap, anchor: "start", placement: "reset-right" },
+    ]) {
+      const bounds = boundsFor(candidate.x, candidate.anchor);
+      if (!isClear(bounds)) continue;
+      candidates.push({
+        ...candidate,
+        distance: Math.abs((bounds.left + bounds.right) / 2 - centerX),
+      });
+    }
+  }
+  candidates.sort((left, right) => left.distance - right.distance);
+  if (candidates.length) {
+    return {
+      x: candidates[0].x,
+      anchor: candidates[0].anchor,
+      placement: candidates[0].placement,
+    };
+  }
+  return { ...centered, placement: "centered-over-reset" };
+}
+
 function fastRateSummary(snapshot, bounds, effectiveEndMs, events = null) {
   let standardCardCredits = 0;
   let fastCardCredits = 0;
@@ -1044,6 +1096,9 @@ export function renderTrendImage({
       plotLeft +
       Math.max(0, Math.min(1, spanMs > 0 ? (timestampMs - meta.startMs) / spanMs : 0)) *
         plotWidth;
+    const resetXs = meterVisible
+      ? meter.resets.map((reset) => xForTs(reset.timestampMs))
+      : [];
     const yForRemaining = (value) =>
       plotTop + (1 - Math.max(0, Math.min(100, value)) / 100) * plotHeight;
     const pixelSegments = meterVisible
@@ -1197,24 +1252,45 @@ export function renderTrendImage({
       const total = binTotalOf(bin);
       if (total > 0 && isLabeledColumn(binIndex)) {
         const estimatedPrefix = (percentMode ? bin.approximate : bin.estimated) ? "≈" : "";
+        const labelValue = percentMode
+          ? `${estimatedPrefix}${pct(total)}`
+          : `${estimatedPrefix}${compact(total)}`;
+        const labelWidth = textWidth(labelValue, 15, 700);
+        const placement = barTotalLabelPlacement({
+          centerX,
+          labelWidth,
+          slotLeft: centerX - slotWidth / 2 + 4,
+          slotRight: centerX + slotWidth / 2 - 4,
+          resetXs,
+        });
         let labelTop = y;
+        const labelLeft = placement.anchor === "end"
+          ? placement.x - labelWidth
+          : placement.anchor === "start"
+            ? placement.x
+            : placement.x - labelWidth / 2;
+        const labelRight = labelLeft + labelWidth;
         const clearance = lineTopWithin(
-          centerX - barWidth / 2 - 8,
-          centerX + barWidth / 2 + 8,
+          labelLeft - 5,
+          labelRight + 5,
           labelTop - 28,
           labelTop + 8,
         );
         if (clearance !== null) labelTop = Math.min(labelTop, clearance);
-        segmentLabels.push(svgText({
-          x: centerX,
-          y: Math.max(plotTop + 12, labelTop - 9),
-          value: percentMode
-            ? `${estimatedPrefix}${pct(total)}`
-            : `${estimatedPrefix}${compact(total)}`,
-          size: 15,
-          weight: 700,
-          anchor: "middle",
-        }));
+        const lineSafeLabelY = Math.max(plotTop + 12, labelTop - 9);
+        const labelY = placement.placement.startsWith("reset-")
+          ? Math.max(plotTop + 40, lineSafeLabelY)
+          : lineSafeLabelY;
+        segmentLabels.push(
+          `<g data-role="bar-total-label" data-placement="${placement.placement}"${placement.placement.startsWith("reset-") ? ' data-clearance="reset-marker"' : ""}>${svgText({
+            x: placement.x,
+            y: labelY,
+            value: labelValue,
+            size: 15,
+            weight: 700,
+            anchor: placement.anchor,
+          })}</g>`,
+        );
       }
       // Day labels.
       if (isLabeledColumn(binIndex)) {

@@ -441,6 +441,31 @@ test("report image omits provenance and integrity notification badges", () => {
   assert.doesNotMatch(report, /LEGACY HISTORY SKIPPED/);
 });
 
+test("bar total labels move clear of restart marker lines", () => {
+  const report = renderTrendImage({
+    snapshot: snapshotOf(
+      [usage(20, 12, { totalTokens: 3_000_000_000 })],
+      [
+        quota(19, 8, 70, resetAt(26, 22)),
+        quota(19, 9, 71, resetAt(26, 22)),
+        quota(20, 12, 5, resetAt(27, 22)),
+        quota(20, 13, 6, resetAt(27, 22)),
+      ],
+    ),
+    bounds,
+    days: 7,
+    options: { imageWidth: 1_280 },
+    reportTimeMs: timestampMs(23, 12),
+    sourceStatus: "verified-current",
+  });
+
+  assert.match(
+    report,
+    /data-role="bar-total-label" data-placement="reset-(?:left|right)" data-clearance="reset-marker"/,
+  );
+  assert.doesNotMatch(report, /data-placement="centered-over-reset"/);
+});
+
 test("representative report output is finite SVG and decodes to PNG", async () => {
   const report = renderTrendImage({
     snapshot: snapshotOf(
