@@ -260,6 +260,14 @@ function truncateToWidth(text, maxWidth, size, weight = 400) {
   return `${kept.trimEnd()}…`;
 }
 
+function fitTextSize(text, maxWidth, preferredSize, minimumSize, weight = 400) {
+  let size = preferredSize;
+  while (size > minimumSize && textWidth(text, size, weight) > maxWidth) {
+    size = Math.max(minimumSize, size - 0.25);
+  }
+  return size;
+}
+
 function svgLine(x1, y1, x2, y2, attrs = {}) {
   const pieces = [
     `x1="${Number(x1).toFixed(2)}"`,
@@ -601,30 +609,53 @@ export function renderTrendImage({
       spacing: "1.08",
     }));
     const valueBaseline = y + 62;
+    const innerWidth = cardWidth - 32;
+    const valueSize = 30;
+    const unitSize = 12.5;
+    const inlineUnitGap = 11;
+    const valueWidth = textWidth(card.value, valueSize, 800);
+    const unitInline = !card.unit ||
+      valueWidth + inlineUnitGap + textWidth(card.unit, unitSize) <= innerWidth;
     elements.push(svgText({
       x: x + 16,
       y: valueBaseline,
       value: card.value,
-      size: 30,
+      size: valueSize,
       weight: 800,
       spacing: "-0.6",
     }));
     if (card.unit) {
+      const placement = unitInline ? "inline" : "stacked";
+      elements.push(`<g data-role="kpi-unit" data-placement="${placement}">`);
       elements.push(svgText({
-        x: x + 16 + textWidth(card.value, 30, 800) + 11,
-        y: valueBaseline,
+        x: unitInline ? x + 16 + valueWidth + inlineUnitGap : x + 16,
+        y: unitInline ? valueBaseline : y + 81,
         value: card.unit,
         fill: COLORS.muted,
-        size: 12.5,
+        size: unitInline ? unitSize : 11.5,
       }));
+      elements.push("</g>");
     }
     if (card.sub) {
+      const subWidth = innerWidth;
+      const subSize = fitTextSize(
+        card.sub.text,
+        subWidth,
+        12.5,
+        11.5,
+        card.sub.weight ?? 400,
+      );
       elements.push(svgText({
         x: x + 16,
-        y: y + 88,
-        value: truncateToWidth(card.sub.text, cardWidth - 32, 12.5, card.sub.weight ?? 400),
+        y: unitInline ? y + 88 : y + 102,
+        value: truncateToWidth(
+          card.sub.text,
+          subWidth,
+          subSize,
+          card.sub.weight ?? 400,
+        ),
         fill: card.sub.color,
-        size: 12.5,
+        size: subSize,
         weight: card.sub.weight ?? 400,
       }));
     }
@@ -1705,7 +1736,7 @@ export function renderTrendImage({
       });
     }
 
-    const rowTop = y + 44;
+    const rowTop = y + 52;
     const rowGap = 33;
     const rankX = x + 16;
     const nameX = rankX + 26;
@@ -1716,7 +1747,7 @@ export function renderTrendImage({
     const nameWidth = barX - nameX - 12;
     rows.forEach((row, index) => {
       const centerY = rowTop + index * rowGap + 8;
-      elements.push(`<g data-role="project-row" data-kind="${row.empty ? "placeholder" : "data"}">`);
+      elements.push(`<g data-role="project-row" data-kind="${row.empty ? "placeholder" : "data"}" data-baseline="${centerY + 4}">`);
       elements.push(svgText({
         x: rankX,
         y: centerY + 4,
@@ -1850,6 +1881,7 @@ export function renderTrendImage({
     const barWidth = Math.max(44, inputRight - 66 - barX);
     rows.forEach((row, index) => {
       const centerY = rowTop + index * rowGap;
+      elements.push(`<g data-role="model-cache-row" data-baseline="${centerY}">`);
       if (!row.combined) {
         elements.push(`<circle cx="${x + 19}" cy="${centerY - 4}" r="4" fill="${styleForModel(row.model)}"/>`);
       }
@@ -1915,6 +1947,7 @@ export function renderTrendImage({
         anchor: "end",
         mono: true,
       }));
+      elements.push("</g>");
     });
 
     elements.push(svgText({

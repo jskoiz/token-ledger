@@ -147,12 +147,36 @@ test("report totals reconcile across daily, model, project, and token components
 
 test("project ranking fills five rows with four projects and a remainder", () => {
   const events = [
-    usage(17, 8, { project: "alpha", totalTokens: 6_000 }),
-    usage(18, 8, { project: "beta", totalTokens: 5_000 }),
-    usage(19, 8, { project: "gamma", totalTokens: 4_000 }),
-    usage(20, 8, { project: "delta", totalTokens: 3_000 }),
-    usage(21, 8, { project: "epsilon", totalTokens: 2_000 }),
-    usage(22, 8, { project: "zeta", totalTokens: 1_000 }),
+    usage(17, 8, {
+      project: "alpha",
+      model: "gpt-5.6-luna",
+      totalTokens: 6_000,
+    }),
+    usage(18, 8, {
+      project: "beta",
+      model: "gpt-5.6-sol",
+      totalTokens: 5_000,
+    }),
+    usage(19, 8, {
+      project: "gamma",
+      model: "gpt-5.5",
+      totalTokens: 4_000,
+    }),
+    usage(20, 8, {
+      project: "delta",
+      model: "gpt-5.4",
+      totalTokens: 3_000,
+    }),
+    usage(21, 8, {
+      project: "epsilon",
+      model: "gpt-daybreak-blue-latest",
+      totalTokens: 2_000,
+    }),
+    usage(22, 8, {
+      project: "zeta",
+      model: "gpt-5.6-luna",
+      totalTokens: 1_000,
+    }),
   ];
   const vm = buildReport({ snapshot: snapshotOf(events) });
 
@@ -181,6 +205,13 @@ test("project ranking fills five rows with four projects and a remainder", () =>
   assert.match(report, />Top 4 projects = 85\.7% of tokens<\/text>/);
   assert.equal(report.match(/data-role="project-row"/g)?.length, 5);
   assert.doesNotMatch(report, /data-kind="placeholder"/);
+  const projectBaselines = [...report.matchAll(
+    /data-role="project-row"[^>]*data-baseline="([^"]+)"/g,
+  )].map((match) => Number(match[1]));
+  const modelBaselines = [...report.matchAll(
+    /data-role="model-cache-row"[^>]*data-baseline="([^"]+)"/g,
+  )].map((match) => Number(match[1]));
+  assert.deepEqual(projectBaselines, modelBaselines);
 
   const sparseReport = renderTrendImage({
     snapshot: snapshotOf(events.slice(0, 2)),
@@ -192,6 +223,31 @@ test("project ranking fills five rows with four projects and a remainder", () =>
   });
   assert.equal(sparseReport.match(/data-role="project-row"/g)?.length, 5);
   assert.equal(sparseReport.match(/data-kind="placeholder"/g)?.length, 3);
+});
+
+test("compact KPI typography keeps long cache labels inside their card", () => {
+  const report = renderTrendImage({
+    snapshot: snapshotOf([
+      usage(23, 10, {
+        totalTokens: 9_500_000_000,
+        inputTokens: 9_500_000_000,
+        outputTokens: 0,
+        cachedInputTokens: 9_250_000_000,
+      }),
+    ]),
+    bounds,
+    days: 7,
+    options: { imageWidth: 1_280 },
+    reportTimeMs: timestampMs(23, 12),
+    sourceStatus: "verified-current",
+  });
+
+  assert.match(
+    report,
+    /data-role="kpi-unit" data-placement="stacked">[\s\S]*?>input-weighted<\/text>/,
+  );
+  assert.match(report, />9\.25B of 9\.50B input cached<\/text>/);
+  assert.doesNotMatch(report, /input cach…/);
 });
 
 test("cache efficiency is input-weighted and fast mode remains a total subset", () => {
