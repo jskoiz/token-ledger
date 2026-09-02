@@ -224,6 +224,12 @@ function crashCollection(fixture, point, { stageSnapshot = false } = {}) {
         ...process.env,
         NODE_TEST_CONTEXT: "child-process",
         TOKEN_LEDGER_TEST_STATE_NAMESPACE: String(process.pid),
+        ...(process.env.TOKEN_LEDGER_TEST_STATE_ROOT
+          ? {
+              TOKEN_LEDGER_TEST_STATE_ROOT:
+                process.env.TOKEN_LEDGER_TEST_STATE_ROOT,
+            }
+          : {}),
         TOKEN_LEDGER_CRASH_OPTIONS: JSON.stringify(options(fixture)),
         TOKEN_LEDGER_CRASH_POINT: point,
         TOKEN_LEDGER_STAGE_SNAPSHOT: stageSnapshot ? "1" : "0",
