@@ -24,11 +24,6 @@ import {
   buildTrendReportViewModel,
   zonedMidnight,
 } from "./token-ledger-report-data.mjs";
-import {
-  sourceStatusLabel,
-  sourceStatusLine,
-} from "./token-ledger-source-status.mjs";
-
 export {
   compact,
   escapeXml,
@@ -117,26 +112,6 @@ function durationLabel(ms) {
   if (hours >= 36) return `${Math.round(ms / 86_400_000)} days`;
   if (hours >= 21) return "1 day";
   return `${Math.max(1, Math.round(hours))} ${Math.max(1, Math.round(hours)) === 1 ? "hour" : "hours"}`;
-}
-
-// Source-bin resolution is evidence about aggregation precision, so preserve
-// it exactly instead of applying the intentionally coarse meter-duration
-// labels above. Stored resolutions are whole seconds, with adaptive bins
-// normally landing on whole minutes, hours, or days.
-function sourceResolutionLabel(value) {
-  const seconds = Number(value);
-  if (!Number.isFinite(seconds) || seconds <= 0) return "—";
-  const units = [
-    [86_400, "day"],
-    [3_600, "hour"],
-    [60, "minute"],
-  ];
-  for (const [unitSeconds, unit] of units) {
-    if (seconds % unitSeconds !== 0) continue;
-    const count = seconds / unitSeconds;
-    return `${count} ${unit}${count === 1 ? "" : "s"}`;
-  }
-  return `${seconds} second${seconds === 1 ? "" : "s"}`;
 }
 
 function fastRateSummary(snapshot, bounds, effectiveEndMs, events = null) {
@@ -400,12 +375,6 @@ export function renderTrendImage({
     meta.effectiveEndMs,
     reportEvents ?? analysis?.currentEvents,
   );
-  const componentsComplete = vm.coverage.componentCoveragePercent >= 99.95;
-  const rateCardMismatch = Boolean(
-    vm.provenance.snapshotRateCardAsOf &&
-      vm.provenance.snapshotRateCardAsOf !== vm.provenance.rateCardAsOf,
-  );
-
   // Drain mode swaps the main chart to observed meter-drain columns; every
   // other panel keeps actual-token semantics.
   const drainTrend = options.drain
@@ -460,23 +429,9 @@ export function renderTrendImage({
     const throughLine = verified
       ? `Report through ${shortDateTimeLabel(meta.reportThroughMs, timeZone)}`
       : `Snapshot generated ${generatedLabel}`;
-    const provenanceBadge = chip(
-      contentRight,
-      32,
-      sourceStatusLine(meta.sourceStatus),
-      {
-        fill: verified
-          ? "rgba(255,255,255,.06)"
-          : "rgba(246,183,60,.16)",
-        stroke: verified ? COLORS.separator : COLORS.line,
-        color: verified ? COLORS.secondary : COLORS.line,
-        anchor: "end",
-      },
-    );
-    elements.push(provenanceBadge.markup);
     elements.push(svgText({
       x: contentRight,
-      y: 51,
+      y: 34,
       value: throughLine,
       fill: COLORS.secondary,
       size: 12.5,
@@ -484,7 +439,7 @@ export function renderTrendImage({
     }));
     elements.push(svgText({
       x: contentRight,
-      y: 69,
+      y: 54,
       value: meter.lastObservedAtMs !== null
         ? `Meter last observed ${shortDateTimeLabel(meter.lastObservedAtMs, timeZone)}`
         : "No weekly meter observation",
@@ -493,105 +448,6 @@ export function renderTrendImage({
       anchor: "end",
     }));
     return 82;
-  }
-
-  // Material trust conditions stay compact and disappear entirely for a
-  // healthy local/current/exact report. Each chip contains the actual scope or
-  // count so the warning remains useful even when the PNG is viewed alone.
-  function buildIntegrityWarnings(top) {
-    const warnings = [];
-    if (vm.coverage.parseErrors > 0) {
-      warnings.push({
-        kind: "parse-errors",
-        label: `${vm.coverage.parseErrors.toLocaleString("en-US")} UNPARSED SOURCE ${vm.coverage.parseErrors === 1 ? "RECORD" : "RECORDS"}`,
-      });
-    }
-    if (vm.coverage.invalidTokenRecords > 0) {
-      warnings.push({
-        kind: "invalid-token-records",
-        label: `${vm.coverage.invalidTokenRecords.toLocaleString("en-US")} INVALID TOKEN ${vm.coverage.invalidTokenRecords === 1 ? "RECORD" : "RECORDS"} EXCLUDED`,
-      });
-    }
-    if (vm.coverage.invalidQuotaRecords > 0) {
-      warnings.push({
-        kind: "invalid-quota-records",
-        label: `${vm.coverage.invalidQuotaRecords.toLocaleString("en-US")} INVALID QUOTA ${vm.coverage.invalidQuotaRecords === 1 ? "RECORD" : "RECORDS"} EXCLUDED`,
-      });
-    }
-    if (vm.coverage.sourceIncomplete) {
-      warnings.push({
-        kind: "source-incomplete",
-        label: "INCOMPLETE SOURCE PROVENANCE",
-      });
-    }
-    if (!componentsComplete) {
-      warnings.push({
-        kind: "component-coverage",
-        label: `${meterPct(vm.coverage.componentCoveragePercent)} COMPONENT COVERAGE`,
-      });
-    }
-    if (!vm.provenance.localOnly) {
-      warnings.push({ kind: "external-source", label: "EXTERNAL SNAPSHOT INPUT" });
-    }
-    if (!verified) {
-      const label = sourceStatusLabel(meta.sourceStatus);
-      warnings.push({ kind: "source-status", label });
-    }
-    if (vm.coverage.estimated) {
-      const resolution = vm.coverage.maximumResolutionSeconds
-        ? ` · ${sourceResolutionLabel(vm.coverage.maximumResolutionSeconds)} SOURCE BINS`
-        : "";
-      warnings.push({
-        kind: "estimated-history",
-        label: `≈ ESTIMATED HISTORY${resolution}`,
-      });
-    }
-    const legacyStatusLabel = new Map([
-      ["collection-scope-unverified", "SCOPE UNVERIFIED"],
-      ["codex-home-unverified", "HOME UNVERIFIED"],
-      ["codex-home-mismatch", "HOME MISMATCH"],
-    ]).get(vm.coverage.legacySnapshotStatus);
-    if (legacyStatusLabel) {
-      warnings.push({
-        kind: "legacy-history",
-        label: `LEGACY HISTORY SKIPPED · ${legacyStatusLabel}`,
-      });
-    }
-    if (rateCardMismatch) {
-      warnings.push({
-        kind: "rate-card-mismatch",
-        label: `RATE CARD ${vm.provenance.snapshotRateCardAsOf} → ${vm.provenance.rateCardAsOf}`,
-      });
-    }
-    if (!warnings.length) return top;
-
-    const gap = 8;
-    const rowHeight = 28;
-    let x = outer;
-    let baseline = top + 14;
-    for (const warning of warnings) {
-      const item = chip(x, baseline, warning.label, {
-        fill: "rgba(240,163,94,.10)",
-        stroke: "rgba(240,163,94,.55)",
-        color: COLORS.warn,
-        size: 10.5,
-      });
-      if (x > outer && x + item.width > contentRight) {
-        x = outer;
-        baseline += rowHeight;
-      }
-      const placed = chip(x, baseline, warning.label, {
-        fill: "rgba(240,163,94,.10)",
-        stroke: "rgba(240,163,94,.55)",
-        color: COLORS.warn,
-        size: 10.5,
-      });
-      elements.push(
-        `<g data-role="integrity-warning" data-kind="${warning.kind}">${placed.markup}</g>`,
-      );
-      x += placed.width + gap;
-    }
-    return baseline + 9;
   }
 
   // -------------------------------------------------------------- KPI cards
@@ -2039,18 +1895,14 @@ export function renderTrendImage({
   // ---------------------------------------------------------------- compose
   const body = [];
   const headerBottom = buildHeaderSection();
-  const warningTop = headerBottom + 10;
-  const warningBottom = buildIntegrityWarnings(warningTop);
-  const kpiBottom = buildKpiSection(
-    warningBottom + (warningBottom > warningTop ? 8 : 0),
-  );
+  const kpiBottom = buildKpiSection(headerBottom + 10);
   const mixBottom = buildModelMixSection(kpiBottom + 10);
   const chartBottom = buildDailyChartSection(mixBottom + 10);
   const lowerBottom = buildLowerSection(chartBottom + 14);
   const height = Math.ceil(lowerBottom + 16);
 
   const description =
-    "Dark report card: conditional integrity warnings; total usage, input-weighted cache efficiency, fast-mode share, and active-project KPI cards beside the sampled weekly-limit state; a model-mix strip; stacked daily token columns by model with hatched fast-mode overlays and the sampled weekly meter drawn as solid confirmed intervals and dashed unobserved gaps; plus daily cache efficiency, top projects, and per-model cache tables.";
+    "Dark report card: total usage, input-weighted cache efficiency, fast-mode share, and active-project KPI cards beside the sampled weekly-limit state; a model-mix strip; stacked daily token columns by model with hatched fast-mode overlays and the sampled weekly meter drawn as solid confirmed intervals and dashed unobserved gaps; plus daily cache efficiency, top projects, and per-model cache tables.";
   body.push(
     `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="trend-title trend-description">`,
     `<title id="trend-title">${escapeXml(`Token Ledger · ${meta.rangeDays}-day trend`)}</title>`,

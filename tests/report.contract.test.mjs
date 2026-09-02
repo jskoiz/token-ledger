@@ -423,6 +423,24 @@ test("partial, stale, and quota states keep their honesty markers", () => {
   }
 });
 
+test("report image omits provenance and integrity notification badges", () => {
+  const report = renderTrendImage({
+    snapshot: snapshotOf([usage(23, 10)]),
+    bounds,
+    days: 7,
+    options: { imageWidth: 1_280 },
+    reportTimeMs: timestampMs(24, 5),
+    sourceStatus: "unchecked-cache",
+  });
+
+  assert.doesNotMatch(report, /data-role="integrity-warning"/);
+  assert.doesNotMatch(report, /PROVENANCE ·/);
+  assert.doesNotMatch(report, /UNCHECKED CACHE/);
+  assert.doesNotMatch(report, /COMPONENT COVERAGE/);
+  assert.doesNotMatch(report, /ESTIMATED HISTORY/);
+  assert.doesNotMatch(report, /LEGACY HISTORY SKIPPED/);
+});
+
 test("representative report output is finite SVG and decodes to PNG", async () => {
   const report = renderTrendImage({
     snapshot: snapshotOf(
