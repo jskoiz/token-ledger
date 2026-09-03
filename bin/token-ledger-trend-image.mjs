@@ -645,9 +645,11 @@ export function renderTrendImage({
         11.5,
         card.sub.weight ?? 400,
       );
+      const subBaseline = unitInline ? y + 88 : y + 96;
+      elements.push(`<g data-role="kpi-sub" data-placement="${unitInline ? "inline" : "stacked"}" data-baseline="${subBaseline}">`);
       elements.push(svgText({
         x: x + 16,
-        y: unitInline ? y + 88 : y + 102,
+        y: subBaseline,
         value: truncateToWidth(
           card.sub.text,
           subWidth,
@@ -658,15 +660,19 @@ export function renderTrendImage({
         size: subSize,
         weight: card.sub.weight ?? 400,
       }));
+      elements.push("</g>");
     }
     if (card.caption) {
+      const captionBaseline = unitInline ? y + 107 : y + 112;
+      elements.push(`<g data-role="kpi-caption" data-placement="${unitInline ? "inline" : "stacked"}" data-baseline="${captionBaseline}">`);
       elements.push(svgText({
         x: x + 16,
-        y: y + 107,
+        y: captionBaseline,
         value: truncateToWidth(card.caption, cardWidth - 32, 12),
         fill: COLORS.muted,
         size: 12,
       }));
+      elements.push("</g>");
     }
     if (card.bar) {
       const barY = y + cardHeight - 22;
