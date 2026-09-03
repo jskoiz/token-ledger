@@ -2725,6 +2725,18 @@ test("session-index title changes reuse unchanged rollout content", async () => 
     assert.equal(refreshed.coverage.filesScanned, 0);
     assert.equal(refreshed.coverage.filesReused, 1);
     assert.equal(refreshed.coverage.bytesScanned, 0);
+
+    const refreshedLedger = await readDurableLedger(
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
+    );
+    assert.equal(
+      refreshedLedger.threadRows.find((row) => row.id === THREAD_ID)?.title,
+      "New title",
+    );
+
+    await rm(sessionIndex);
+    const afterIndexRotation = await collectUsage(options(fixture));
+    assert.equal(afterIndexRotation.threads[0].title, "New title");
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }

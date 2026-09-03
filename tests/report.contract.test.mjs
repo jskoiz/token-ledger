@@ -250,6 +250,35 @@ test("compact KPI typography keeps long cache labels inside their card", () => {
   assert.doesNotMatch(report, /input cach…/);
 });
 
+test("stacked KPI units keep subtitles and captions separated", () => {
+  const report = renderTrendImage({
+    snapshot: snapshotOf([
+      usage(16, 10, { totalTokens: 1_000 }),
+      usage(23, 10, {
+        totalTokens: 999_999_000_000_000,
+        inputTokens: 999_999_000_000_000,
+        outputTokens: 0,
+        cachedInputTokens: 999_999_000_000_000,
+      }),
+    ]),
+    bounds,
+    days: 7,
+    options: { imageWidth: 1_280 },
+    reportTimeMs: timestampMs(23, 12),
+    sourceStatus: "verified-current",
+  });
+
+  const stackedSub = report.match(
+    /data-role="kpi-sub" data-placement="stacked" data-baseline="([^"]+)"/,
+  );
+  const stackedCaption = report.match(
+    /data-role="kpi-caption" data-placement="stacked" data-baseline="([^"]+)"/,
+  );
+  assert.ok(stackedSub);
+  assert.ok(stackedCaption);
+  assert.ok(Number(stackedCaption[1]) - Number(stackedSub[1]) >= 12);
+});
+
 test("cache efficiency is input-weighted and fast mode remains a total subset", () => {
   assert.equal(isFastMode("priority"), true);
   assert.equal(isFastMode("fast"), true);
