@@ -289,6 +289,26 @@ test("cache efficiency is input-weighted and fast mode remains a total subset", 
   }
 });
 
+test("model cache panel names a single overflow model", () => {
+  const report = renderTrendImage({
+    snapshot: snapshotOf([
+      usage(17, 8, { model: "gpt-5.6-luna", totalTokens: 6_000 }),
+      usage(18, 8, { model: "gpt-5.6-sol", totalTokens: 5_000 }),
+      usage(19, 8, { model: "gpt-5.5", totalTokens: 4_000 }),
+      usage(20, 8, { model: "gpt-auto-review", totalTokens: 3_000 }),
+      usage(21, 8, { model: "gpt-5.4", totalTokens: 1_000 }),
+    ]),
+    bounds,
+    days: 7,
+    options: { imageWidth: 1_280 },
+    reportTimeMs: timestampMs(23, 12),
+    sourceStatus: "verified-current",
+  });
+
+  assert.match(report, />GPT-5\.4<\/text>/);
+  assert.doesNotMatch(report, />1 other models<\/text>/);
+});
+
 test("prior comparison matches the equivalent partial local duration", () => {
   const vm = buildReport({
     reportTimeMs: timestampMs(23, 12),

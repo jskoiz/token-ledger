@@ -1831,6 +1831,12 @@ export function renderTrendImage({
           estimated: false,
         },
       );
+      // A single overflow row is still one identifiable model. Naming it
+      // directly avoids making its cache rate look like an unexplained
+      // aggregate; reserve the aggregate label for real multi-model overflow.
+      merged.model = overflow.length === 1
+        ? overflow[0].model
+        : `${overflow.length} other models`;
       merged.uncachedInputTokens = Math.max(
         0,
         merged.cacheInputTokens - merged.cachedInputTokens,
@@ -1838,7 +1844,7 @@ export function renderTrendImage({
       merged.cacheRatePercent = merged.cacheInputTokens > 0
         ? (merged.cachedInputTokens / merged.cacheInputTokens) * 100
         : null;
-      merged.combined = true;
+      merged.combined = overflow.length > 1;
       rows.push(merged);
     }
     if (!rows.length) {
