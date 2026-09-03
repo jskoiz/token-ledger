@@ -145,6 +145,111 @@ test("report totals reconcile across daily, model, project, and token components
   assert.equal(vm.models.reduce((sum, row) => sum + row.cacheInputTokens, 0), vm.summary.inputTokens);
 });
 
+test("project ranking fills five rows with four projects and a remainder", () => {
+  const events = [
+    usage(17, 8, {
+      project: "alpha",
+      model: "gpt-5.6-luna",
+      totalTokens: 6_000,
+    }),
+    usage(18, 8, {
+      project: "beta",
+      model: "gpt-5.6-sol",
+      totalTokens: 5_000,
+    }),
+    usage(19, 8, {
+      project: "gamma",
+      model: "gpt-5.5",
+      totalTokens: 4_000,
+    }),
+    usage(20, 8, {
+      project: "delta",
+      model: "gpt-5.4",
+      totalTokens: 3_000,
+    }),
+    usage(21, 8, {
+      project: "epsilon",
+      model: "gpt-daybreak-blue-latest",
+      totalTokens: 2_000,
+    }),
+    usage(22, 8, {
+      project: "zeta",
+      model: "gpt-5.6-luna",
+      totalTokens: 1_000,
+    }),
+  ];
+  const vm = buildReport({ snapshot: snapshotOf(events) });
+
+  assert.deepEqual(
+    vm.projects.map((row) => row.displayProject),
+    ["alpha", "beta", "gamma", "delta"],
+  );
+  assert.equal(vm.projectRemainder.count, 2);
+  assert.equal(vm.projectRemainder.totalTokens, 3_000);
+  assert.equal(vm.summary.topFourProjectTokens, 18_000);
+  assert.equal(
+    vm.summary.topFourProjectSharePercent,
+    (18_000 / 21_000) * 100,
+  );
+
+  const report = renderTrendImage({
+    snapshot: snapshotOf(events),
+    bounds,
+    days: 7,
+    options: { imageWidth: 1_280 },
+    reportTimeMs: timestampMs(23, 12),
+    sourceStatus: "verified-current",
+  });
+  assert.match(report, />delta<\/text>/);
+  assert.match(report, />2 other projects<\/text>/);
+  assert.match(report, />Top 4 projects = 85\.7% of tokens<\/text>/);
+  assert.equal(report.match(/data-role="project-row"/g)?.length, 5);
+  assert.doesNotMatch(report, /data-kind="placeholder"/);
+  const projectBaselines = [...report.matchAll(
+    /data-role="project-row"[^>]*data-baseline="([^"]+)"/g,
+  )].map((match) => Number(match[1]));
+  const modelBaselines = [...report.matchAll(
+    /data-role="model-cache-row"[^>]*data-baseline="([^"]+)"/g,
+  )].map((match) => Number(match[1]));
+  assert.deepEqual(projectBaselines, modelBaselines);
+
+  const sparseReport = renderTrendImage({
+    snapshot: snapshotOf(events.slice(0, 2)),
+    bounds,
+    days: 7,
+    options: { imageWidth: 1_280 },
+    reportTimeMs: timestampMs(23, 12),
+    sourceStatus: "verified-current",
+  });
+  assert.equal(sparseReport.match(/data-role="project-row"/g)?.length, 5);
+  assert.equal(sparseReport.match(/data-kind="placeholder"/g)?.length, 3);
+});
+
+test("compact KPI typography keeps long cache labels inside their card", () => {
+  const report = renderTrendImage({
+    snapshot: snapshotOf([
+      usage(23, 10, {
+        totalTokens: 9_500_000_000,
+        inputTokens: 9_500_000_000,
+        outputTokens: 0,
+        cachedInputTokens: 9_250_000_000,
+      }),
+    ]),
+    bounds,
+    days: 7,
+    options: { imageWidth: 1_280 },
+    reportTimeMs: timestampMs(23, 12),
+    sourceStatus: "verified-current",
+  });
+
+  assert.match(
+    report,
+    /data-role="kpi-unit" data-placement="stacked">[\s\S]*?>input-weighted<\/text>/,
+  );
+  assert.match(report, />9\.25B of 9\.50B input cached<\/text>/);
+  assert.doesNotMatch(report, /input cach…/);
+});
+
 test("cache efficiency is input-weighted and fast mode remains a total subset", () => {
   assert.equal(isFastMode("priority"), true);
   assert.equal(isFastMode("fast"), true);
@@ -182,6 +287,26 @@ test("cache efficiency is input-weighted and fast mode remains a total subset", 
     assert.ok(row.fastTokens <= row.totalTokens);
     assert.equal(row.normalTokens + row.fastTokens, row.totalTokens);
   }
+});
+
+test("model cache panel names a single overflow model", () => {
+  const report = renderTrendImage({
+    snapshot: snapshotOf([
+      usage(17, 8, { model: "gpt-5.6-luna", totalTokens: 6_000 }),
+      usage(18, 8, { model: "gpt-5.6-sol", totalTokens: 5_000 }),
+      usage(19, 8, { model: "gpt-5.5", totalTokens: 4_000 }),
+      usage(20, 8, { model: "gpt-auto-review", totalTokens: 3_000 }),
+      usage(21, 8, { model: "gpt-5.4", totalTokens: 1_000 }),
+    ]),
+    bounds,
+    days: 7,
+    options: { imageWidth: 1_280 },
+    reportTimeMs: timestampMs(23, 12),
+    sourceStatus: "verified-current",
+  });
+
+  assert.match(report, />GPT-5\.4<\/text>/);
+  assert.doesNotMatch(report, />1 other models<\/text>/);
 });
 
 test("prior comparison matches the equivalent partial local duration", () => {
@@ -421,6 +546,68 @@ test("partial, stale, and quota states keep their honesty markers", () => {
       assert.equal(vm.meter.remainingPercent, null, scenario.name);
     }
   }
+});
+
+test("report image omits provenance and integrity notification badges", () => {
+  const report = renderTrendImage({
+    snapshot: snapshotOf([usage(23, 10)]),
+    bounds,
+    days: 7,
+    options: { imageWidth: 1_280 },
+    reportTimeMs: timestampMs(24, 5),
+    sourceStatus: "unchecked-cache",
+  });
+
+  assert.doesNotMatch(report, /data-role="integrity-warning"/);
+  assert.doesNotMatch(report, /PROVENANCE ·/);
+  assert.doesNotMatch(report, /UNCHECKED CACHE/);
+  assert.doesNotMatch(report, /COMPONENT COVERAGE/);
+  assert.doesNotMatch(report, /ESTIMATED HISTORY/);
+  assert.doesNotMatch(report, /LEGACY HISTORY SKIPPED/);
+});
+
+test("fast-mode hatching uses muted dark ink", () => {
+  const report = renderTrendImage({
+    snapshot: snapshotOf([
+      usage(23, 10, { serviceTier: "priority", totalTokens: 10_000 }),
+    ]),
+    bounds,
+    days: 7,
+    options: { imageWidth: 1_280 },
+    reportTimeMs: timestampMs(23, 12),
+    sourceStatus: "verified-current",
+  });
+
+  assert.match(
+    report,
+    /id="fast-mode-hatch"[\s\S]*stroke="rgba\(14,20,32,\.48\)" stroke-width="1\.6"/,
+  );
+  assert.doesNotMatch(report, /stroke="rgba\(255,255,255,\.75\)"/);
+});
+
+test("bar total labels move clear of restart marker lines", () => {
+  const report = renderTrendImage({
+    snapshot: snapshotOf(
+      [usage(20, 12, { totalTokens: 3_000_000_000 })],
+      [
+        quota(19, 8, 70, resetAt(26, 22)),
+        quota(19, 9, 71, resetAt(26, 22)),
+        quota(20, 12, 5, resetAt(27, 22)),
+        quota(20, 13, 6, resetAt(27, 22)),
+      ],
+    ),
+    bounds,
+    days: 7,
+    options: { imageWidth: 1_280 },
+    reportTimeMs: timestampMs(23, 12),
+    sourceStatus: "verified-current",
+  });
+
+  assert.match(
+    report,
+    /data-role="bar-total-label" data-placement="reset-(?:left|right)" data-clearance="reset-marker"/,
+  );
+  assert.doesNotMatch(report, /data-placement="centered-over-reset"/);
 });
 
 test("representative report output is finite SVG and decodes to PNG", async () => {

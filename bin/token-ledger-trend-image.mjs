@@ -24,11 +24,6 @@ import {
   buildTrendReportViewModel,
   zonedMidnight,
 } from "./token-ledger-report-data.mjs";
-import {
-  sourceStatusLabel,
-  sourceStatusLine,
-} from "./token-ledger-source-status.mjs";
-
 export {
   compact,
   escapeXml,
@@ -82,6 +77,7 @@ const COLORS = {
 
 const FAST_MODE_LABEL_COLOR = "#a78bfa";
 const MIN_BAR_WIDTH = 26;
+const PROJECT_PANEL_ROW_COUNT = 5;
 
 function pct(value) {
   if (!Number.isFinite(value)) return "—";
@@ -119,24 +115,56 @@ function durationLabel(ms) {
   return `${Math.max(1, Math.round(hours))} ${Math.max(1, Math.round(hours)) === 1 ? "hour" : "hours"}`;
 }
 
-// Source-bin resolution is evidence about aggregation precision, so preserve
-// it exactly instead of applying the intentionally coarse meter-duration
-// labels above. Stored resolutions are whole seconds, with adaptive bins
-// normally landing on whole minutes, hours, or days.
-function sourceResolutionLabel(value) {
-  const seconds = Number(value);
-  if (!Number.isFinite(seconds) || seconds <= 0) return "—";
-  const units = [
-    [86_400, "day"],
-    [3_600, "hour"],
-    [60, "minute"],
-  ];
-  for (const [unitSeconds, unit] of units) {
-    if (seconds % unitSeconds !== 0) continue;
-    const count = seconds / unitSeconds;
-    return `${count} ${unit}${count === 1 ? "" : "s"}`;
+function barTotalLabelPlacement({
+  centerX,
+  labelWidth,
+  slotLeft,
+  slotRight,
+  resetXs,
+}) {
+  const resetPadding = 5;
+  const resetGap = 8;
+  const boundsFor = (x, anchor) => {
+    if (anchor === "end") return { left: x - labelWidth, right: x };
+    if (anchor === "start") return { left: x, right: x + labelWidth };
+    return { left: x - labelWidth / 2, right: x + labelWidth / 2 };
+  };
+  const isClear = ({ left, right }) =>
+    left >= slotLeft &&
+    right <= slotRight &&
+    !resetXs.some((resetX) =>
+      resetX >= left - resetPadding && resetX <= right + resetPadding
+    );
+  const centered = {
+    x: centerX,
+    anchor: "middle",
+    placement: "centered",
+  };
+  if (isClear(boundsFor(centered.x, centered.anchor))) return centered;
+
+  const candidates = [];
+  for (const resetX of resetXs) {
+    for (const candidate of [
+      { x: resetX - resetGap, anchor: "end", placement: "reset-left" },
+      { x: resetX + resetGap, anchor: "start", placement: "reset-right" },
+    ]) {
+      const bounds = boundsFor(candidate.x, candidate.anchor);
+      if (!isClear(bounds)) continue;
+      candidates.push({
+        ...candidate,
+        distance: Math.abs((bounds.left + bounds.right) / 2 - centerX),
+      });
+    }
   }
-  return `${seconds} second${seconds === 1 ? "" : "s"}`;
+  candidates.sort((left, right) => left.distance - right.distance);
+  if (candidates.length) {
+    return {
+      x: candidates[0].x,
+      anchor: candidates[0].anchor,
+      placement: candidates[0].placement,
+    };
+  }
+  return { ...centered, placement: "centered-over-reset" };
 }
 
 function fastRateSummary(snapshot, bounds, effectiveEndMs, events = null) {
@@ -230,6 +258,14 @@ function truncateToWidth(text, maxWidth, size, weight = 400) {
     kept = kept.slice(0, -1);
   }
   return `${kept.trimEnd()}…`;
+}
+
+function fitTextSize(text, maxWidth, preferredSize, minimumSize, weight = 400) {
+  let size = preferredSize;
+  while (size > minimumSize && textWidth(text, size, weight) > maxWidth) {
+    size = Math.max(minimumSize, size - 0.25);
+  }
+  return size;
 }
 
 function svgLine(x1, y1, x2, y2, attrs = {}) {
@@ -400,12 +436,6 @@ export function renderTrendImage({
     meta.effectiveEndMs,
     reportEvents ?? analysis?.currentEvents,
   );
-  const componentsComplete = vm.coverage.componentCoveragePercent >= 99.95;
-  const rateCardMismatch = Boolean(
-    vm.provenance.snapshotRateCardAsOf &&
-      vm.provenance.snapshotRateCardAsOf !== vm.provenance.rateCardAsOf,
-  );
-
   // Drain mode swaps the main chart to observed meter-drain columns; every
   // other panel keeps actual-token semantics.
   const drainTrend = options.drain
@@ -418,7 +448,7 @@ export function renderTrendImage({
     // Fast-mode tokens keep the model color and add this hatch so they stay
     // visible in grayscale without inventing extra bar height.
     '<pattern id="fast-mode-hatch" patternUnits="userSpaceOnUse" width="7" height="7" patternTransform="rotate(45)">',
-    '<line x1="0" y1="0" x2="0" y2="7" stroke="rgba(255,255,255,.75)" stroke-width="2"/>',
+    '<line x1="0" y1="0" x2="0" y2="7" stroke="rgba(14,20,32,.48)" stroke-width="1.6"/>',
     "</pattern>",
     "</defs>",
   ].join("\n");
@@ -460,23 +490,9 @@ export function renderTrendImage({
     const throughLine = verified
       ? `Report through ${shortDateTimeLabel(meta.reportThroughMs, timeZone)}`
       : `Snapshot generated ${generatedLabel}`;
-    const provenanceBadge = chip(
-      contentRight,
-      32,
-      sourceStatusLine(meta.sourceStatus),
-      {
-        fill: verified
-          ? "rgba(255,255,255,.06)"
-          : "rgba(246,183,60,.16)",
-        stroke: verified ? COLORS.separator : COLORS.line,
-        color: verified ? COLORS.secondary : COLORS.line,
-        anchor: "end",
-      },
-    );
-    elements.push(provenanceBadge.markup);
     elements.push(svgText({
       x: contentRight,
-      y: 51,
+      y: 34,
       value: throughLine,
       fill: COLORS.secondary,
       size: 12.5,
@@ -484,7 +500,7 @@ export function renderTrendImage({
     }));
     elements.push(svgText({
       x: contentRight,
-      y: 69,
+      y: 54,
       value: meter.lastObservedAtMs !== null
         ? `Meter last observed ${shortDateTimeLabel(meter.lastObservedAtMs, timeZone)}`
         : "No weekly meter observation",
@@ -493,105 +509,6 @@ export function renderTrendImage({
       anchor: "end",
     }));
     return 82;
-  }
-
-  // Material trust conditions stay compact and disappear entirely for a
-  // healthy local/current/exact report. Each chip contains the actual scope or
-  // count so the warning remains useful even when the PNG is viewed alone.
-  function buildIntegrityWarnings(top) {
-    const warnings = [];
-    if (vm.coverage.parseErrors > 0) {
-      warnings.push({
-        kind: "parse-errors",
-        label: `${vm.coverage.parseErrors.toLocaleString("en-US")} UNPARSED SOURCE ${vm.coverage.parseErrors === 1 ? "RECORD" : "RECORDS"}`,
-      });
-    }
-    if (vm.coverage.invalidTokenRecords > 0) {
-      warnings.push({
-        kind: "invalid-token-records",
-        label: `${vm.coverage.invalidTokenRecords.toLocaleString("en-US")} INVALID TOKEN ${vm.coverage.invalidTokenRecords === 1 ? "RECORD" : "RECORDS"} EXCLUDED`,
-      });
-    }
-    if (vm.coverage.invalidQuotaRecords > 0) {
-      warnings.push({
-        kind: "invalid-quota-records",
-        label: `${vm.coverage.invalidQuotaRecords.toLocaleString("en-US")} INVALID QUOTA ${vm.coverage.invalidQuotaRecords === 1 ? "RECORD" : "RECORDS"} EXCLUDED`,
-      });
-    }
-    if (vm.coverage.sourceIncomplete) {
-      warnings.push({
-        kind: "source-incomplete",
-        label: "INCOMPLETE SOURCE PROVENANCE",
-      });
-    }
-    if (!componentsComplete) {
-      warnings.push({
-        kind: "component-coverage",
-        label: `${meterPct(vm.coverage.componentCoveragePercent)} COMPONENT COVERAGE`,
-      });
-    }
-    if (!vm.provenance.localOnly) {
-      warnings.push({ kind: "external-source", label: "EXTERNAL SNAPSHOT INPUT" });
-    }
-    if (!verified) {
-      const label = sourceStatusLabel(meta.sourceStatus);
-      warnings.push({ kind: "source-status", label });
-    }
-    if (vm.coverage.estimated) {
-      const resolution = vm.coverage.maximumResolutionSeconds
-        ? ` · ${sourceResolutionLabel(vm.coverage.maximumResolutionSeconds)} SOURCE BINS`
-        : "";
-      warnings.push({
-        kind: "estimated-history",
-        label: `≈ ESTIMATED HISTORY${resolution}`,
-      });
-    }
-    const legacyStatusLabel = new Map([
-      ["collection-scope-unverified", "SCOPE UNVERIFIED"],
-      ["codex-home-unverified", "HOME UNVERIFIED"],
-      ["codex-home-mismatch", "HOME MISMATCH"],
-    ]).get(vm.coverage.legacySnapshotStatus);
-    if (legacyStatusLabel) {
-      warnings.push({
-        kind: "legacy-history",
-        label: `LEGACY HISTORY SKIPPED · ${legacyStatusLabel}`,
-      });
-    }
-    if (rateCardMismatch) {
-      warnings.push({
-        kind: "rate-card-mismatch",
-        label: `RATE CARD ${vm.provenance.snapshotRateCardAsOf} → ${vm.provenance.rateCardAsOf}`,
-      });
-    }
-    if (!warnings.length) return top;
-
-    const gap = 8;
-    const rowHeight = 28;
-    let x = outer;
-    let baseline = top + 14;
-    for (const warning of warnings) {
-      const item = chip(x, baseline, warning.label, {
-        fill: "rgba(240,163,94,.10)",
-        stroke: "rgba(240,163,94,.55)",
-        color: COLORS.warn,
-        size: 10.5,
-      });
-      if (x > outer && x + item.width > contentRight) {
-        x = outer;
-        baseline += rowHeight;
-      }
-      const placed = chip(x, baseline, warning.label, {
-        fill: "rgba(240,163,94,.10)",
-        stroke: "rgba(240,163,94,.55)",
-        color: COLORS.warn,
-        size: 10.5,
-      });
-      elements.push(
-        `<g data-role="integrity-warning" data-kind="${warning.kind}">${placed.markup}</g>`,
-      );
-      x += placed.width + gap;
-    }
-    return baseline + 9;
   }
 
   // -------------------------------------------------------------- KPI cards
@@ -669,9 +586,9 @@ export function renderTrendImage({
       label: "PROJECTS",
       value: String(summary.activeProjects),
       unit: "active",
-      sub: summary.topThreeProjectSharePercent !== null
+      sub: summary.topFourProjectSharePercent !== null
         ? {
-            text: `Top ${Math.min(3, vm.projects.length)} = ${approximateLabel(pct(summary.topThreeProjectSharePercent), summary.estimated)}`,
+            text: `Top ${Math.min(4, vm.projects.length)} = ${approximateLabel(pct(summary.topFourProjectSharePercent), summary.estimated)}`,
             color: COLORS.secondary,
           }
         : { text: "no project activity", color: COLORS.muted },
@@ -692,30 +609,53 @@ export function renderTrendImage({
       spacing: "1.08",
     }));
     const valueBaseline = y + 62;
+    const innerWidth = cardWidth - 32;
+    const valueSize = 30;
+    const unitSize = 12.5;
+    const inlineUnitGap = 11;
+    const valueWidth = textWidth(card.value, valueSize, 800);
+    const unitInline = !card.unit ||
+      valueWidth + inlineUnitGap + textWidth(card.unit, unitSize) <= innerWidth;
     elements.push(svgText({
       x: x + 16,
       y: valueBaseline,
       value: card.value,
-      size: 30,
+      size: valueSize,
       weight: 800,
       spacing: "-0.6",
     }));
     if (card.unit) {
+      const placement = unitInline ? "inline" : "stacked";
+      elements.push(`<g data-role="kpi-unit" data-placement="${placement}">`);
       elements.push(svgText({
-        x: x + 16 + textWidth(card.value, 30, 800) + 11,
-        y: valueBaseline,
+        x: unitInline ? x + 16 + valueWidth + inlineUnitGap : x + 16,
+        y: unitInline ? valueBaseline : y + 81,
         value: card.unit,
         fill: COLORS.muted,
-        size: 12.5,
+        size: unitInline ? unitSize : 11.5,
       }));
+      elements.push("</g>");
     }
     if (card.sub) {
+      const subWidth = innerWidth;
+      const subSize = fitTextSize(
+        card.sub.text,
+        subWidth,
+        12.5,
+        11.5,
+        card.sub.weight ?? 400,
+      );
       elements.push(svgText({
         x: x + 16,
-        y: y + 88,
-        value: truncateToWidth(card.sub.text, cardWidth - 32, 12.5, card.sub.weight ?? 400),
+        y: unitInline ? y + 88 : y + 102,
+        value: truncateToWidth(
+          card.sub.text,
+          subWidth,
+          subSize,
+          card.sub.weight ?? 400,
+        ),
         fill: card.sub.color,
-        size: 12.5,
+        size: subSize,
         weight: card.sub.weight ?? 400,
       }));
     }
@@ -1188,6 +1128,9 @@ export function renderTrendImage({
       plotLeft +
       Math.max(0, Math.min(1, spanMs > 0 ? (timestampMs - meta.startMs) / spanMs : 0)) *
         plotWidth;
+    const resetXs = meterVisible
+      ? meter.resets.map((reset) => xForTs(reset.timestampMs))
+      : [];
     const yForRemaining = (value) =>
       plotTop + (1 - Math.max(0, Math.min(100, value)) / 100) * plotHeight;
     const pixelSegments = meterVisible
@@ -1341,24 +1284,45 @@ export function renderTrendImage({
       const total = binTotalOf(bin);
       if (total > 0 && isLabeledColumn(binIndex)) {
         const estimatedPrefix = (percentMode ? bin.approximate : bin.estimated) ? "≈" : "";
+        const labelValue = percentMode
+          ? `${estimatedPrefix}${pct(total)}`
+          : `${estimatedPrefix}${compact(total)}`;
+        const labelWidth = textWidth(labelValue, 15, 700);
+        const placement = barTotalLabelPlacement({
+          centerX,
+          labelWidth,
+          slotLeft: centerX - slotWidth / 2 + 4,
+          slotRight: centerX + slotWidth / 2 - 4,
+          resetXs,
+        });
         let labelTop = y;
+        const labelLeft = placement.anchor === "end"
+          ? placement.x - labelWidth
+          : placement.anchor === "start"
+            ? placement.x
+            : placement.x - labelWidth / 2;
+        const labelRight = labelLeft + labelWidth;
         const clearance = lineTopWithin(
-          centerX - barWidth / 2 - 8,
-          centerX + barWidth / 2 + 8,
+          labelLeft - 5,
+          labelRight + 5,
           labelTop - 28,
           labelTop + 8,
         );
         if (clearance !== null) labelTop = Math.min(labelTop, clearance);
-        segmentLabels.push(svgText({
-          x: centerX,
-          y: Math.max(plotTop + 12, labelTop - 9),
-          value: percentMode
-            ? `${estimatedPrefix}${pct(total)}`
-            : `${estimatedPrefix}${compact(total)}`,
-          size: 15,
-          weight: 700,
-          anchor: "middle",
-        }));
+        const lineSafeLabelY = Math.max(plotTop + 12, labelTop - 9);
+        const labelY = placement.placement.startsWith("reset-")
+          ? Math.max(plotTop + 40, lineSafeLabelY)
+          : lineSafeLabelY;
+        segmentLabels.push(
+          `<g data-role="bar-total-label" data-placement="${placement.placement}"${placement.placement.startsWith("reset-") ? ' data-clearance="reset-marker"' : ""}>${svgText({
+            x: placement.x,
+            y: labelY,
+            value: labelValue,
+            size: 15,
+            weight: 700,
+            anchor: placement.anchor,
+          })}</g>`,
+        );
       }
       // Day labels.
       if (isLabeledColumn(binIndex)) {
@@ -1763,18 +1727,16 @@ export function renderTrendImage({
         muted: true,
       });
     }
-    if (!rows.length) {
-      elements.push(svgText({
-        x: x + 16,
-        y: y + 60,
-        value: "No project activity in range",
-        fill: COLORS.muted,
-        size: 12.5,
-      }));
-      return;
+    while (rows.length < PROJECT_PANEL_ROW_COUNT) {
+      rows.push({
+        rank: String(rows.length + 1).padStart(2, "0"),
+        name: rows.length === 0 ? "No project activity in range" : "—",
+        empty: true,
+        muted: true,
+      });
     }
 
-    const rowTop = y + 44;
+    const rowTop = y + 52;
     const rowGap = 33;
     const rankX = x + 16;
     const nameX = rankX + 26;
@@ -1785,6 +1747,7 @@ export function renderTrendImage({
     const nameWidth = barX - nameX - 12;
     rows.forEach((row, index) => {
       const centerY = rowTop + index * rowGap + 8;
+      elements.push(`<g data-role="project-row" data-kind="${row.empty ? "placeholder" : "data"}" data-baseline="${centerY + 4}">`);
       elements.push(svgText({
         x: rankX,
         y: centerY + 4,
@@ -1801,42 +1764,45 @@ export function renderTrendImage({
         size: 13.5,
         weight: row.muted ? 400 : 700,
       }));
-      elements.push(svgRect(barX, centerY - 4, barWidth, 9, {
-        rx: 2,
-        fill: COLORS.projectTrack,
-      }));
-      const fillWidth = (Math.max(0, Math.min(100, row.share)) / 100) * barWidth;
-      if (fillWidth > 0) {
-        elements.push(svgRect(barX, centerY - 4, fillWidth, 9, {
+      if (!row.empty) {
+        elements.push(svgRect(barX, centerY - 4, barWidth, 9, {
           rx: 2,
-          fill: row.muted ? COLORS.remainderBar : COLORS.leftAxis,
+          fill: COLORS.projectTrack,
+        }));
+        const fillWidth = (Math.max(0, Math.min(100, row.share)) / 100) * barWidth;
+        if (fillWidth > 0) {
+          elements.push(svgRect(barX, centerY - 4, fillWidth, 9, {
+            rx: 2,
+            fill: row.muted ? COLORS.remainderBar : COLORS.leftAxis,
+          }));
+        }
+        elements.push(svgText({
+          x: tokensRight,
+          y: centerY + 4,
+          value: approximateLabel(compact(row.tokens), row.estimated),
+          fill: row.muted ? COLORS.secondary : COLORS.ink,
+          size: 13.5,
+          weight: 700,
+          anchor: "end",
+        }));
+        elements.push(svgText({
+          x: pctRight,
+          y: centerY + 4,
+          value: approximateLabel(pct(row.share), summary.estimated),
+          fill: COLORS.muted,
+          size: 12,
+          anchor: "end",
         }));
       }
-      elements.push(svgText({
-        x: tokensRight,
-        y: centerY + 4,
-        value: approximateLabel(compact(row.tokens), row.estimated),
-        fill: row.muted ? COLORS.secondary : COLORS.ink,
-        size: 13.5,
-        weight: 700,
-        anchor: "end",
-      }));
-      elements.push(svgText({
-        x: pctRight,
-        y: centerY + 4,
-        value: approximateLabel(pct(row.share), summary.estimated),
-        fill: COLORS.muted,
-        size: 12,
-        anchor: "end",
-      }));
+      elements.push("</g>");
     });
 
-    if (summary.topThreeProjectSharePercent !== null && vm.projects.length) {
+    if (summary.topFourProjectSharePercent !== null && vm.projects.length) {
       const stripY = y + panelHeight - 32;
       elements.push(svgText({
         x: x + 16,
         y: stripY + 15,
-        value: `Top ${Math.min(3, vm.projects.length)} projects = ${approximateLabel(pct(summary.topThreeProjectSharePercent), summary.estimated)} of tokens`,
+        value: `Top ${Math.min(4, vm.projects.length)} projects = ${approximateLabel(pct(summary.topFourProjectSharePercent), summary.estimated)} of tokens`,
         fill: COLORS.leftAxis,
         size: 11.5,
       }));
@@ -1865,6 +1831,12 @@ export function renderTrendImage({
           estimated: false,
         },
       );
+      // A single overflow row is still one identifiable model. Naming it
+      // directly avoids making its cache rate look like an unexplained
+      // aggregate; reserve the aggregate label for real multi-model overflow.
+      merged.model = overflow.length === 1
+        ? overflow[0].model
+        : `${overflow.length} other models`;
       merged.uncachedInputTokens = Math.max(
         0,
         merged.cacheInputTokens - merged.cachedInputTokens,
@@ -1872,7 +1844,7 @@ export function renderTrendImage({
       merged.cacheRatePercent = merged.cacheInputTokens > 0
         ? (merged.cachedInputTokens / merged.cacheInputTokens) * 100
         : null;
-      merged.combined = true;
+      merged.combined = overflow.length > 1;
       rows.push(merged);
     }
     if (!rows.length) {
@@ -1915,6 +1887,7 @@ export function renderTrendImage({
     const barWidth = Math.max(44, inputRight - 66 - barX);
     rows.forEach((row, index) => {
       const centerY = rowTop + index * rowGap;
+      elements.push(`<g data-role="model-cache-row" data-baseline="${centerY}">`);
       if (!row.combined) {
         elements.push(`<circle cx="${x + 19}" cy="${centerY - 4}" r="4" fill="${styleForModel(row.model)}"/>`);
       }
@@ -1980,6 +1953,7 @@ export function renderTrendImage({
         anchor: "end",
         mono: true,
       }));
+      elements.push("</g>");
     });
 
     elements.push(svgText({
@@ -1993,8 +1967,7 @@ export function renderTrendImage({
 
   function buildLowerSection(top) {
     const gap = 14;
-    const projectRowCount = Math.min(4, vm.projects.length) +
-      (vm.projectRemainder.count > 0 ? 1 : 0);
+    const projectRowCount = PROJECT_PANEL_ROW_COUNT;
     const modelRowCount = Math.min(5, vm.models.filter((r) => r.totalTokens > 0).length || 1);
     const cacheHeight = 258;
     const projectsHeight = Math.max(150, 44 + projectRowCount * 33 + 46);
@@ -2039,18 +2012,14 @@ export function renderTrendImage({
   // ---------------------------------------------------------------- compose
   const body = [];
   const headerBottom = buildHeaderSection();
-  const warningTop = headerBottom + 10;
-  const warningBottom = buildIntegrityWarnings(warningTop);
-  const kpiBottom = buildKpiSection(
-    warningBottom + (warningBottom > warningTop ? 8 : 0),
-  );
+  const kpiBottom = buildKpiSection(headerBottom + 10);
   const mixBottom = buildModelMixSection(kpiBottom + 10);
   const chartBottom = buildDailyChartSection(mixBottom + 10);
   const lowerBottom = buildLowerSection(chartBottom + 14);
   const height = Math.ceil(lowerBottom + 16);
 
   const description =
-    "Dark report card: conditional integrity warnings; total usage, input-weighted cache efficiency, fast-mode share, and active-project KPI cards beside the sampled weekly-limit state; a model-mix strip; stacked daily token columns by model with hatched fast-mode overlays and the sampled weekly meter drawn as solid confirmed intervals and dashed unobserved gaps; plus daily cache efficiency, top projects, and per-model cache tables.";
+    "Dark report card: total usage, input-weighted cache efficiency, fast-mode share, and active-project KPI cards beside the sampled weekly-limit state; a model-mix strip; stacked daily token columns by model with hatched fast-mode overlays and the sampled weekly meter drawn as solid confirmed intervals and dashed unobserved gaps; plus daily cache efficiency, top projects, and per-model cache tables.";
   body.push(
     `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="trend-title trend-description">`,
     `<title id="trend-title">${escapeXml(`Token Ledger · ${meta.rangeDays}-day trend`)}</title>`,
