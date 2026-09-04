@@ -83,6 +83,7 @@ const MAX_ROLLING_DAYS = 3_650;
 const DURATION_ALIAS = /^(\d+)(d|w)$/i;
 const ANSI_RESET = "\u001b[0m";
 const MODEL_COLORS = {
+  astra: TERMINAL_MODEL_COLORS.astra,
   sol: TERMINAL_MODEL_COLORS.sol,
   luna: TERMINAL_MODEL_COLORS.luna,
   terra: TERMINAL_MODEL_COLORS.terra,
@@ -681,6 +682,7 @@ export function oneOffProjects(snapshot, events = null) {
 function modelLabel(value) {
   const model = cleanLabel(value, "Unknown model");
   const lower = model.toLowerCase();
+  if (lower.includes("astra")) return "Astra";
   if (lower.includes("sol")) return "Sol";
   if (lower.includes("luna")) return "Luna";
   if (lower.includes("terra")) return "Terra";
@@ -906,6 +908,7 @@ function colorize(value, code, enabled) {
 
 function modelColor(model) {
   const lower = model.toLowerCase();
+  if (lower.includes("astra")) return MODEL_COLORS.astra;
   if (lower.includes("sol")) return MODEL_COLORS.sol;
   if (lower.includes("luna")) return MODEL_COLORS.luna;
   if (lower.includes("terra")) return MODEL_COLORS.terra;
@@ -1538,7 +1541,7 @@ async function render(
     "",
     chart,
     "",
-    `Model mix · colors: ${colorize("Sol", MODEL_COLORS.sol, enabled)}  ${colorize("Luna", MODEL_COLORS.luna, enabled)}  ${colorize("Terra", MODEL_COLORS.terra, enabled)}  ${colorize("GPT", MODEL_COLORS["gpt-5.5"], enabled)}  ${colorize("Other", MODEL_COLORS.other, enabled)}`,
+    `Model mix · colors: ${colorize("Astra", MODEL_COLORS.astra, enabled)}  ${colorize("Sol", MODEL_COLORS.sol, enabled)}  ${colorize("Luna", MODEL_COLORS.luna, enabled)}  ${colorize("Terra", MODEL_COLORS.terra, enabled)}  ${colorize("GPT", MODEL_COLORS["gpt-5.5"], enabled)}  ${colorize("Other", MODEL_COLORS.other, enabled)}`,
   ];
 
   const details = rows.map((row, index) => {

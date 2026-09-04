@@ -39,6 +39,7 @@ const MODEL_LABEL_MAX_WIDTH = 40;
 function modelLabel(model) {
   const normalized = normalizeCodexCreditModel(model);
   const labels = {
+    "gpt-6-astra": "GPT-6 Astra",
     "gpt-5.6-sol": "GPT-5.6 Sol",
     "gpt-5.6-terra": "GPT-5.6 Terra",
     "gpt-5.6-luna": "GPT-5.6 Luna",
@@ -51,7 +52,9 @@ function modelLabel(model) {
     "gpt-5.2": "GPT-5.2",
   };
   const label = sanitizeTerminalText(
-    labels[normalized] ?? String(model ?? "Unknown model"),
+    normalized.includes("astra")
+      ? "GPT-6 Astra"
+      : labels[normalized] ?? String(model ?? "Unknown model"),
   );
   return label.length > MODEL_LABEL_MAX_WIDTH
     ? `${label.slice(0, MODEL_LABEL_MAX_WIDTH - 1)}…`

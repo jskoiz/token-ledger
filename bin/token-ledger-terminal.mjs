@@ -32,6 +32,7 @@ const ACCENT_STYLE = [38, 2, 51, 156, 255];
 const BORDER_STYLE = [38, 2, 88, 88, 88];
 const TRACK_STYLE = [38, 2, 59, 59, 59];
 export const MODEL_COLORS = {
+  astra: [38, 2, 232, 121, 249],
   sol: [38, 2, 120, 185, 242],
   luna: ACCENT_STYLE,
   terra: [38, 2, 214, 168, 95],
@@ -123,6 +124,7 @@ function plural(value, singular, pluralForm = `${singular}s`) {
 function modelLabel(value) {
   const model = String(value || "Unknown model");
   const lower = model.toLowerCase();
+  if (lower.includes("astra")) return "Astra";
   if (lower.includes("sol")) return "Sol";
   if (lower.includes("luna")) return "Luna";
   if (lower.includes("terra")) return "Terra";
@@ -288,9 +290,12 @@ export function quotaCycleSummary(snapshot = {}, displayedEvents = []) {
   const windowStartMs =
     (Number(observation.resetsAt) - Number(observation.windowMinutes) * 60) * 1_000;
   const resetAtMs = Number(observation.resetsAt) * 1_000;
+  const observationThroughMs = Number.isFinite(observation.observedThroughMs)
+    ? observation.observedThroughMs
+    : new Date(observation.eventCutoffAt ?? observation.timestamp).getTime();
   const observedThroughMs = Math.min(
     resetAtMs,
-    new Date(observation.eventCutoffAt ?? observation.timestamp).getTime(),
+    observationThroughMs,
   );
   if (
     !Number.isFinite(windowStartMs) ||
@@ -435,12 +440,12 @@ function summary(events, projectRows) {
 function modelLegendItems(models, totalTokens) {
   const known = new Map();
   for (const model of models) {
-    const key = ["Sol", "Luna", "Terra", "GPT"].includes(model.model)
+    const key = ["Astra", "Sol", "Luna", "Terra", "GPT"].includes(model.model)
       ? model.model
       : "Other";
     known.set(key, (known.get(key) ?? 0) + model.totalTokens);
   }
-  return ["Luna", "Sol", "Terra", "GPT", "Other"]
+  return ["Astra", "Luna", "Sol", "Terra", "GPT", "Other"]
     .map((model) => ({
       model,
       totalTokens: known.get(model) ?? 0,

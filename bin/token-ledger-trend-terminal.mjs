@@ -119,6 +119,7 @@ function alignBinsToScale(bins, scale) {
 
 // Mirrors the SVG renderer's validated categorical palette.
 export const TREND_MODEL_COLORS = {
+  Astra: [38, 2, 232, 121, 249],
   Luna: [38, 2, 42, 120, 214],
   Sol: [38, 2, 235, 104, 52],
   Terra: [38, 2, 27, 175, 122],
@@ -132,6 +133,7 @@ export const TREND_MODEL_COLORS = {
 };
 
 const MODEL_ORDER = [
+  "Astra",
   "Luna",
   "Sol",
   "Terra",
@@ -143,7 +145,7 @@ const MODEL_ORDER = [
   "Unknown",
 ];
 
-const ATTRIBUTION_MODEL_ORDER = ["Luna", "Sol", "Terra"];
+const ATTRIBUTION_MODEL_ORDER = ["Astra", "Luna", "Sol", "Terra"];
 
 function colorsEnabled(options = {}) {
   return options.forceColor ??
@@ -352,11 +354,17 @@ function allocateSegmentHeights(entries, total, maxValue, plotHeight) {
   return heights;
 }
 
-function sampleQuota(trend, bounds, width) {
+export function sampleQuota(trend, bounds, width) {
   const startMs = bounds.start.getTime();
   const endMs = bounds.end.getTime();
   const points = trend.points ?? [];
   const resets = trend.resets ?? [];
+  const lastObservedPoint = [...points]
+    .reverse()
+    .find((point) => point.observed !== false);
+  const observedThroughMs = Number.isFinite(trend.observedThroughMs)
+    ? Math.min(endMs, trend.observedThroughMs)
+    : lastObservedPoint?.timestampMs ?? null;
   const samples = [];
   let pointIndex = 0;
   let resetIndex = 0;
@@ -365,6 +373,18 @@ function sampleQuota(trend, bounds, width) {
   for (let column = 0; column < width; column += 1) {
     const ratio = width <= 1 ? 0 : column / (width - 1);
     const timestampMs = startMs + (endMs - startMs) * ratio;
+    if (
+      observedThroughMs === null ||
+      timestampMs > observedThroughMs
+    ) {
+      samples.push({
+        timestampMs,
+        point: null,
+        reset: false,
+        remainingPercent: null,
+      });
+      continue;
+    }
     while (
       pointIndex < points.length &&
       points[pointIndex].timestampMs <= timestampMs

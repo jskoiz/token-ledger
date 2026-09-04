@@ -1,6 +1,7 @@
 // Shared, dependency-neutral values and SVG helpers used by image reports.
 
 export const TREND_IMAGE_MODEL_COLORS = {
+  Astra: "#e879f9",
   Luna: "#3b82f6",
   Sol: "#10a394",
   Terra: "#8b7cf6",

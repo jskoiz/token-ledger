@@ -4,12 +4,17 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
-import { multiDayBounds } from "../bin/token-ledger-trend.mjs";
+import {
+  multiDayBounds,
+  trendModelLabel,
+} from "../bin/token-ledger-trend.mjs";
 import {
   buildTrendReportViewModel,
   isFastMode,
   resolveEffectiveEnd,
 } from "../bin/token-ledger-report-data.mjs";
+import { quotaCycleSummary } from "../bin/token-ledger-terminal.mjs";
+import { renderTrendCombo, sampleQuota } from "../bin/token-ledger-trend-terminal.mjs";
 import {
   renderTrendImage,
   writeTrendPng,
@@ -46,7 +51,14 @@ function usage(day, hour, overrides = {}) {
   };
 }
 
-function quota(day, hour, usedPercent, resetsAt, limitName = null) {
+function quota(
+  day,
+  hour,
+  usedPercent,
+  resetsAt,
+  limitName = null,
+  lastSeenAt = null,
+) {
   return {
     timestamp: timestamp(day, hour),
     usedPercent,
@@ -55,6 +67,7 @@ function quota(day, hour, usedPercent, resetsAt, limitName = null) {
     limitName,
     limitKey: limitName === null ? ACCOUNT_QUOTA_LIMIT_KEY : "0123456789abcdef",
     scope: limitName === null ? "account" : "named",
+    ...(lastSeenAt === null ? {} : { lastSeenAt }),
   };
 }
 
@@ -143,6 +156,36 @@ test("report totals reconcile across daily, model, project, and token components
   assert.equal(vm.daily.reduce((sum, row) => sum + row.outputTokens, 0), vm.summary.outputTokens);
   assert.equal(vm.daily.reduce((sum, row) => sum + row.cachedInputTokens, 0), vm.summary.cachedInputTokens);
   assert.equal(vm.models.reduce((sum, row) => sum + row.cacheInputTokens, 0), vm.summary.inputTokens);
+});
+
+test("Astra is a first-class model in report and terminal output", () => {
+  assert.equal(trendModelLabel("gpt-6-astra"), "Astra");
+  assert.equal(trendModelLabel("GPT-6-Astra-preview"), "Astra");
+
+  const snapshot = snapshotOf([
+    usage(23, 2, { model: "gpt-6-astra", totalTokens: 2_000 }),
+  ]);
+  const vm = buildReport({ snapshot });
+  assert.deepEqual(vm.models.map((row) => row.model), ["Astra"]);
+
+  const image = renderTrendImage({
+    snapshot,
+    bounds,
+    days: 7,
+    options: { imageWidth: 1_280 },
+    reportTimeMs: timestampMs(23, 12),
+    sourceStatus: "verified-current",
+  });
+  assert.match(image, />Astra</);
+  assert.match(image, /#e879f9/);
+
+  const terminal = renderTrendCombo({
+    snapshot,
+    bounds,
+    days: 7,
+    options: { plain: true, width: 100 },
+  });
+  assert.match(terminal, /■ Astra/);
 });
 
 test("project ranking fills five rows with four projects and a remainder", () => {
@@ -437,6 +480,55 @@ test("meter observations and line segments stop at the latest observation", () =
   assert.equal(vm.meter.observedThroughMs, latestObservedMs);
   assert.ok(vm.meter.observations.every((point) => point.timestampMs <= latestObservedMs));
   assert.ok(vm.meter.segments.every((segment) => segment.toMs <= latestObservedMs));
+});
+
+test("meter pace and attribution use a compacted reading's last-seen time", () => {
+  const activeReset = resetAt(30);
+  const observations = [
+    quota(22, 2, 10, activeReset, null, timestamp(22, 8)),
+    quota(23, 2, 40, activeReset, null, timestamp(23, 8)),
+  ];
+  const events = [usage(23, 6, { totalTokens: 1_000 })];
+  const latestObservedMs = timestampMs(23, 8);
+  const vm = buildReport({
+    snapshot: snapshotOf(events, observations),
+    reportTimeMs: timestampMs(24, 12),
+  });
+
+  assert.equal(vm.meter.lastObservedAtMs, latestObservedMs);
+  assert.equal(vm.meter.observedThroughMs, latestObservedMs);
+  assert.equal(vm.meter.burnPerDay, 24);
+  assert.equal(vm.meter.runwayDays, 2.5);
+  assert.ok(
+    vm.meter.segments.some(
+      (segment) =>
+        segment.kind === "confirmed" &&
+        segment.toMs === timestampMs(22, 8),
+    ),
+  );
+
+  const quotaSummary = quotaCycleSummary(snapshotOf(events, observations), events);
+  assert.equal(quotaSummary.displayedTokens, 1_000);
+  assert.equal(quotaSummary.estimatedDisplayedBurnPercent, 40);
+});
+
+test("terminal quota sampling leaves the unobserved tail blank", () => {
+  const startMs = bounds.start.getTime();
+  const endMs = bounds.end.getTime();
+  const observedThroughMs = startMs + (endMs - startMs) / 2;
+  const samples = sampleQuota(
+    {
+      points: [{ timestampMs: observedThroughMs, remainingPercent: 65, observed: true }],
+      resets: [],
+      observedThroughMs,
+    },
+    bounds,
+    5,
+  );
+
+  assert.equal(samples[2].remainingPercent, 65);
+  assert.equal(samples[3].remainingPercent, null);
+  assert.equal(samples[4].point, null);
 });
 
 test("report meter preserves the account selection for mixed quota pools", () => {

@@ -198,6 +198,25 @@ function modelRowFor(map, model) {
   return row;
 }
 
+function meterRemainingPercent(usedPercent) {
+  return Math.max(0, Math.min(100, 100 - usedPercent));
+}
+
+// A compacted quota row represents the same provider reading from its first
+// occurrence through lastSeenAt. Keep the distinction between the first
+// timestamp (where a change may have happened) and the confirmed observation
+// tail (where that unchanged value was still reported).
+function boundedObservationThroughMs(observation, effectiveEndMs) {
+  const timestampMs = observation.timestampMs;
+  const observedThroughMs = Number.isFinite(observation.observedThroughMs)
+    ? observation.observedThroughMs
+    : timestampMs;
+  return Math.min(
+    effectiveEndMs,
+    Math.max(timestampMs, observedThroughMs),
+  );
+}
+
 function buildMeter({ snapshot, bounds, effectiveEndMs, sourceStatus, events }) {
   const startMs = bounds.start.getTime();
   const stale = sourceStatus === "stale-fallback";
@@ -229,10 +248,11 @@ function buildMeter({ snapshot, bounds, effectiveEndMs, sourceStatus, events }) 
   if (!observationsAll.length) return empty;
 
   const latest = observationsAll.at(-1);
-  const remainingPercent = Math.max(
-    0,
-    Math.min(100, 100 - latest.normalizedUsedPercent),
+  const latestObservedThroughMs = boundedObservationThroughMs(
+    latest,
+    effectiveEndMs,
   );
+  const remainingPercent = meterRemainingPercent(latest.normalizedUsedPercent);
 
   // Points for the sampled meter line: real observations inside the range
   // plus one carried anchor at the range start when an earlier reading
@@ -243,30 +263,40 @@ function buildMeter({ snapshot, bounds, effectiveEndMs, sourceStatus, events }) 
   const before = observationsAll.filter(
     (observation) => observation.timestampMs < startMs,
   );
-  const points = [];
+  const pointRows = [];
+  const addPoint = (observation, timestampMs, observed) => {
+    if (timestampMs < startMs || timestampMs > effectiveEndMs) return;
+    pointRows.push({
+      timestampMs,
+      remainingPercent: meterRemainingPercent(observation.normalizedUsedPercent),
+      cycle: observation.cycle,
+      observed,
+    });
+  };
   const anchor = before.at(-1);
   if (anchor && (!inRange.length || inRange[0].cycle === anchor.cycle)) {
-    points.push({
-      timestampMs: startMs,
-      remainingPercent: Math.max(
-        0,
-        Math.min(100, 100 - anchor.normalizedUsedPercent),
-      ),
-      cycle: anchor.cycle,
-      observed: false,
-    });
+    addPoint(anchor, startMs, false);
+    const anchorThroughMs = boundedObservationThroughMs(
+      anchor,
+      effectiveEndMs,
+    );
+    if (anchorThroughMs > startMs) addPoint(anchor, anchorThroughMs, true);
   }
   for (const observation of inRange) {
-    points.push({
-      timestampMs: observation.timestampMs,
-      remainingPercent: Math.max(
-        0,
-        Math.min(100, 100 - observation.normalizedUsedPercent),
-      ),
-      cycle: observation.cycle,
-      observed: true,
-    });
+    addPoint(observation, observation.timestampMs, true);
+    const observationThroughMs = boundedObservationThroughMs(
+      observation,
+      effectiveEndMs,
+    );
+    if (observationThroughMs > observation.timestampMs) {
+      addPoint(observation, observationThroughMs, true);
+    }
   }
+  const points = pointRows.sort(
+    (left, right) =>
+      left.timestampMs - right.timestampMs ||
+      Number(left.observed) - Number(right.observed),
+  );
 
   // Straight segments between adjacent readings of one cycle. Repeated equal
   // readings confirm a flat reported interval; a changed value means the
@@ -320,7 +350,8 @@ function buildMeter({ snapshot, bounds, effectiveEndMs, sourceStatus, events }) 
   const firstCycleObservation = cycleObservations[0];
   const cycleBurnPercent =
     latest.normalizedUsedPercent - firstCycleObservation.normalizedUsedPercent;
-  const observedCycleMs = latest.timestampMs - firstCycleObservation.timestampMs;
+  const observedCycleMs =
+    latestObservedThroughMs - firstCycleObservation.timestampMs;
   const burnPerDay =
     cycleBurnPercent > 0 && observedCycleMs > 0
       ? cycleBurnPercent / (observedCycleMs / DAY_MS)
@@ -332,7 +363,7 @@ function buildMeter({ snapshot, bounds, effectiveEndMs, sourceStatus, events }) 
     for (const event of events) {
       if (
         event.timestampMs > firstCycleObservation.timestampMs &&
-        event.timestampMs <= latest.timestampMs
+        event.timestampMs <= latestObservedThroughMs
       ) {
         cycleTokens += event.tokens;
       }
@@ -370,8 +401,8 @@ function buildMeter({ snapshot, bounds, effectiveEndMs, sourceStatus, events }) 
     status,
     stale,
     remainingPercent,
-    lastObservedAtMs: latest.timestampMs,
-    observedThroughMs: latest.timestampMs,
+    lastObservedAtMs: latestObservedThroughMs,
+    observedThroughMs: latestObservedThroughMs,
     firstExhaustedObservedAtMs: firstExhausted?.timestampMs ?? null,
     resetsAtMs,
     resetInMs,

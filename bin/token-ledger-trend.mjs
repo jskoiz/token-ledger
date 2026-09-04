@@ -29,16 +29,17 @@ const MAX_TREND_DAYS = 3_650;
 const LONG_GAP_MS = 36 * 60 * 60 * 1_000;
 
 const MODEL_SORT_ORDER = new Map([
-  ["Luna", 0],
-  ["Sol", 1],
-  ["Terra", 2],
-  ["GPT-5.5", 3],
-  ["GPT-5.4", 4],
-  ["Daybreak", 5],
-  ["Auto review", 6],
-  ["Other", 7],
-  ["Unknown", 8],
-  ["Unattributed", 9],
+  ["Astra", 0],
+  ["Luna", 1],
+  ["Sol", 2],
+  ["Terra", 3],
+  ["GPT-5.5", 4],
+  ["GPT-5.4", 5],
+  ["Daybreak", 6],
+  ["Auto review", 7],
+  ["Other", 8],
+  ["Unknown", 9],
+  ["Unattributed", 10],
 ]);
 
 function finiteTimestamp(value) {
@@ -103,6 +104,7 @@ function clampPercent(value) {
 
 export function trendModelLabel(value) {
   const model = String(value || "unknown").trim().toLowerCase();
+  if (model.includes("astra")) return "Astra";
   if (model.includes("luna")) return "Luna";
   if (model.includes("sol")) return "Sol";
   if (model.includes("terra")) return "Terra";
