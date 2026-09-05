@@ -6,11 +6,11 @@ There is no server or long-running service.
 
 ## Canonical commands
 
-Use `package.json` and `README.md` as the command reference. The main local
-gates are:
+Use `package.json` and `README.md` as the command reference. Match checks to
+the changed surface. The available gates are:
 
 ```sh
-npm ci
+npm ci                 # only when dependencies changed or install state is unavailable
 npm run test:fast       # focused contracts during edits
 npm run check           # regular suite and lint before commit
 npm run prepublishOnly  # full suite, stress, lint, installed-package checks
@@ -19,6 +19,9 @@ npm run prepublishOnly  # full suite, stress, lint, installed-package checks
 Run only the applicable gate once for the final source state. `prepublishOnly`
 already includes the other release checks; do not rerun them individually.
 `npm test` remains the full regular suite. New tests are automatically discovered.
+For documentation or typo edits, use `git diff --check` and a focused
+documentation check when one exists; do not repeat a passing full gate when
+no relevant code or dependency changed.
 
 `sharp` is the native image encoder used by PNG reports.
 
