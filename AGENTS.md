@@ -6,15 +6,15 @@ There is no server or long-running service.
 
 ## Canonical commands
 
-Use `package.json` and `README.md` as the command reference. The main local
-gates are:
+Use `package.json` and `README.md` as the command reference. Match checks to
+the changed surface:
 
-```sh
-npm ci
-npm run test:all
-npm run lint
-npm run verify:release
-```
+- Run `npm ci` when dependencies changed or the install state is unavailable.
+- For CLI, report, dependency, or release behavior changes, run
+  `npm run test:all`, `npm run lint`, and `npm run verify:release`.
+- For a documentation or typo edit, use `git diff --check` and a focused
+  documentation check when one exists. Do not repeat a passing full gate when
+  no relevant code or dependency changed.
 
 `sharp` is the native image encoder used by PNG reports.
 
