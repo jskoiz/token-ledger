@@ -11,10 +11,14 @@ gates are:
 
 ```sh
 npm ci
-npm run test:all
-npm run lint
-npm run verify:release
+npm run test:fast       # focused contracts during edits
+npm run check           # regular suite and lint before commit
+npm run prepublishOnly  # full suite, stress, lint, installed-package checks
 ```
+
+Run only the applicable gate once for the final source state. `prepublishOnly`
+already includes the other release checks; do not rerun them individually.
+`npm test` remains the full regular suite. New tests are automatically discovered.
 
 `sharp` is the native image encoder used by PNG reports.
 

@@ -8,6 +8,10 @@ on:
     tags:
       - "v*"
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
@@ -23,7 +27,7 @@ jobs:
           node-version: 22.13.0
           cache: npm
       - run: npm ci
-      - run: npm run test:all
+      - run: npm test
       - run: npm run lint
       - run: npm run verify:release
 
@@ -44,7 +48,7 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: npm
       - run: npm ci
-      - run: npm run test:all
+      - run: npm test
       - run: npm run lint
         if: matrix.node-version == '22.13.0'
       - run: npm run verify:release

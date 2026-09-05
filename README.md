@@ -288,12 +288,20 @@ In the interactive dashboard:
 
 ```bash
 npm ci
-npm run test:all
-npm run lint
-npm run verify:release
+npm run test:fast  # quick contract feedback while editing
+npm run check      # all regular tests plus lint, before committing
+npm run prepublishOnly  # full suite, stress, lint, and installed-package checks
 ```
 
 `npm run verify:release` packs the allowlisted artifact, installs that tarball
 in a clean temporary directory with no network or Codex data access, and runs
 the installed help commands, a synthetic `tledger 1d --static` dashboard, and
 both standard and cache-rate PNG report smoke checks.
+
+New top-level test files are included automatically. `npm test` retains the full
+regular suite; `npm run test:integration` selects the CLI, importer subprocess,
+and durable-ledger suites omitted by `test:fast`. `npm run test:all` runs regular
+and stress tests together in one test-runner invocation. PR and main CI run all
+regular tests; stress tests also run for release tags and before publication.
+Superseded PR runs are cancelled automatically. Run the full gate once for the
+final source state, rather than repeating its constituent commands.
