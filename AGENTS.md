@@ -11,7 +11,7 @@ gates are:
 
 ```sh
 npm ci
-npm test
+npm run test:all
 npm run lint
 npm run verify:release
 ```
@@ -23,9 +23,11 @@ npm run verify:release
 - The default source is `CODEX_HOME` (`~/.codex`). In environments without
   that directory, use a privacy-reduced snapshot with `--input <file.json>
   --no-refresh`; do not expect live data.
-- `tests/fixtures/rolling-24h-projects.json` is dated August 2026. Use a
-  matching `--date` for calendar views such as `week`; rolling `1d` needs a
-  fixture whose timestamps are relative to now.
+- CLI tests generate their own synthetic snapshots; there is no checked-in
+  rolling-window JSON fixture. For manual calendar views such as `week`, use a
+  `--date` matching the fixture; rolling `1d` needs timestamps relative to now.
+- `node tools/render-report-fixture.mjs <output.png>` renders the documentation
+  report from synthetic data without reading local Codex history.
 - For scripted runs use `--static --tz UTC` and add `--plain` or `NO_COLOR=1`
   when stable, uncolored output is needed.
 - For PNG reports use `report <Nd|Nw> --no-open --image-output <path.png>`;

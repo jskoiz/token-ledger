@@ -147,23 +147,29 @@ or erase usage.
 
 Snapshot encoding is staged in a private temporary file. Source watermarks are
 validated twice before the SQLite commit and once immediately after it. The
-SQLite commit is the durable-ledger linearization point: it atomically exposes
-either the prior complete revision or the new complete revision. Coordinated
-readers use the same writer guard, so they never observe an in-progress
-transaction.
+SQLite commit atomically writes a complete candidate revision. That candidate
+remains pending until the post-commit source check succeeds and its recovery
+marker is cleared. Coordinated readers use the same writer guard, so they
+never observe an in-progress transaction.
 
 The staged report cache is published only after post-commit source validation
-succeeds. If sources changed after the final pre-commit check, the committed
-ledger revision remains a complete interpretation of the previously validated
-source state, the staged cache is discarded, and collection retries from the
-new source inventory. Repeated source changes can therefore leave the durable
-ledger ahead of the last published cache; the cache's revision mismatch marks
-it stale and forces a later refresh instead of labeling it verified-current.
+succeeds and the pending marker is cleared. If sources changed after the final
+pre-commit check, the candidate is reverted through its undo log, the staged
+cache is discarded, and collection retries from the new source inventory.
+An interrupted validation or failed marker-clear transaction also leaves a
+pending candidate that the next writer reverts before collecting again.
+Observations from such an incomplete refresh are not accepted history; their
+recovery requires the source files to remain available.
 
-A crash before commit is rolled back by SQLite. A crash after commit but before
-cache publication leaves a readable complete ledger and the prior cache. The
-same revision check forces the next automatic cache load to refresh and
-converge. Before staging a replacement cache, Token Ledger also removes a
+A crash before commit is rolled back by SQLite. A crash after the candidate
+commit but before finalization can leave that candidate visible to a direct
+ledger reader, but it remains provisional and will be unwound on refresh.
+After finalization, a cache-publication failure leaves the accepted ledger
+ahead of the prior cache. The cache's revision mismatch forces an automatic
+refresh instead of labeling it verified-current. Successfully finalized
+history remains available when its source files disappear.
+
+Before staging a replacement cache, Token Ledger also removes a
 same-destination temporary file only when it is an ordinary, single-link file
 owned by the current user and its recorded process is demonstrably gone. No
 ledger-sized baseline or restore copy is created during refresh.

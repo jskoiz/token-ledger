@@ -17,14 +17,15 @@ jobs:
     name: PR · Node 22.13
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22.13.0
           cache: npm
       - run: npm ci
-      - run: npm test
+      - run: npm run test:all
       - run: npm run lint
+      - run: npm run verify:release
 
   main:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -37,14 +38,16 @@ jobs:
           - 22.13.0
           - 26.x
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
       - run: npm ci
-      - run: npm test
+      - run: npm run test:all
       - run: npm run lint
+        if: matrix.node-version == '22.13.0'
+      - run: npm run verify:release
         if: matrix.node-version == '22.13.0'
 
   release:
@@ -52,10 +55,12 @@ jobs:
     name: Release verification
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22.13.0
           cache: npm
       - run: npm ci
+      - run: npm run test:all
+      - run: npm run lint
       - run: npm run verify:release

@@ -6,15 +6,22 @@
 
 import {
   normalizeQuotaTimeline,
+  priorPeriodBounds,
   trendModelLabel,
   weeklyQuotaObservations,
 } from "./token-ledger-trend.mjs";
+import { buildRangeAnalysis } from "../lib/token-ledger-range-analysis.mjs";
 import { historyScopeLabel } from "../lib/token-ledger-collection.mjs";
 import {
   CODEX_CREDIT_RATE_CARD_AS_OF,
   isFastServiceTier,
 } from "../lib/token-ledger-rates.mjs";
-import { MAX_SAFE_TOKEN_COUNT } from "../lib/token-ledger-usage.mjs";
+import {
+  MAX_SAFE_TOKEN_COUNT,
+  splitUsageBucketsAtBoundaries,
+  usageCallCount,
+  usageDetailedCallCount,
+} from "../lib/token-ledger-usage.mjs";
 import {
   localDateBoundary,
   localDateString,
@@ -25,6 +32,7 @@ import { SOURCE_STATUSES } from "./token-ledger-source-status.mjs";
 export { shiftCalendarDate, SOURCE_STATUSES };
 
 const DAY_MS = 86_400_000;
+const HOUR_MS = 3_600_000;
 // Two readings this close in percent confirm a flat reported interval.
 const METER_EQUAL_TOLERANCE = 0.05;
 // Remaining percent at or below this reads as an exhausted meter.
@@ -123,6 +131,29 @@ function zonedDateTime(dateString, timeZone, time = {}) {
 
 export function zonedMidnight(dateString, timeZone) {
   return localDateBoundary(dateString, timeZone);
+}
+
+function elapsedHourIntervals(startMs, endMs) {
+  const intervals = [];
+  for (let cursor = startMs; cursor < endMs; cursor += HOUR_MS) {
+    intervals.push({
+      startMs: cursor,
+      endMs: Math.min(endMs, cursor + HOUR_MS),
+    });
+  }
+  return intervals;
+}
+
+function intervalIndexAt(intervals, timestampMs) {
+  let low = 0;
+  let high = intervals.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (intervals[middle].startMs <= timestampMs) low = middle + 1;
+    else high = middle;
+  }
+  const index = low - 1;
+  return index >= 0 && timestampMs < intervals[index].endMs ? index : -1;
 }
 
 // Whether the stored input/output components of an event can be trusted.
@@ -442,6 +473,16 @@ export function buildTrendReportViewModel({
   });
   const partialFinalDay = effectiveEndMs < requestedEndMs;
 
+  const defaultRangeAnalysis =
+    (!Array.isArray(events) || !Array.isArray(priorEvents)) &&
+    bounds.startDateString &&
+    bounds.endDateString &&
+    bounds.timeZone
+      ? buildRangeAnalysis(snapshot, bounds, {
+          priorBounds: priorPeriodBounds(bounds, rangeDays),
+        })
+      : null;
+
   const dayStrings = Array.from({ length: rangeDays }, (_, index) =>
     shiftCalendarDate(bounds.startDateString, index),
   );
@@ -480,6 +521,36 @@ export function buildTrendReportViewModel({
     partial: partialDayIndex === index,
     models: new Map(),
   }));
+  const hourlyMode = rangeDays === 1;
+  // A 1d report is a selected local calendar day, but the chart follows
+  // elapsed one-hour intervals inside the captured portion of that day. This
+  // naturally yields 23/24/25 rows across DST transitions and avoids adding
+  // future zero-valued rows after a partial cutoff.
+  const hourlyIntervals = hourlyMode
+    ? elapsedHourIntervals(startMs, requestedEndMs).filter(
+        (interval) => interval.startMs < effectiveEndMs,
+      )
+    : [];
+  const hourly = hourlyMode
+    ? hourlyIntervals.map((interval) => ({
+        startMs: interval.startMs,
+        endMs: interval.endMs,
+        observedEndMs: Math.min(interval.endMs, effectiveEndMs),
+        dateString: localDateString(interval.startMs, timeZone),
+        totalTokens: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cachedInputTokens: 0,
+        uncachedInputTokens: 0,
+        cacheRatePercent: null,
+        modelCalls: 0,
+        estimated: false,
+        observed: true,
+        unobserved: false,
+        partial: effectiveEndMs > interval.startMs && effectiveEndMs < interval.endMs,
+        models: new Map(),
+      }))
+    : null;
 
   // One pass over the selected range classifies every event once; the bounded
   // set feeds every panel so subtotals reconcile by construction. Callers that
@@ -511,10 +582,29 @@ export function buildTrendReportViewModel({
   let detailedCalls = 0;
   let modelCalls = 0;
 
-  const currentEvents = Array.isArray(events) ? events : snapshot.events ?? [];
-  const comparisonEvents = Array.isArray(priorEvents)
+  const currentEventSource = Array.isArray(events)
+    ? events
+    : defaultRangeAnalysis?.currentEvents ?? snapshot.events ?? [];
+  const comparisonEventSource = Array.isArray(priorEvents)
     ? priorEvents
-    : snapshot.events ?? [];
+    : defaultRangeAnalysis?.priorEvents ?? snapshot.events ?? [];
+  const currentEvents = splitUsageBucketsAtBoundaries(
+    currentEventSource,
+    hourlyMode
+      ? [
+          startMs,
+          effectiveEndMs,
+          ...hourlyIntervals.flatMap(({ startMs: hourStartMs, endMs: hourEndMs }) => [
+            hourStartMs,
+            hourEndMs,
+          ]),
+        ]
+      : [startMs, effectiveEndMs],
+  );
+  const comparisonEvents = splitUsageBucketsAtBoundaries(
+    comparisonEventSource,
+    [priorStartMs, priorEndMs],
+  );
   const rawTokenTotal = currentEvents.reduce((sum, event) => {
     const tokens = Number(event?.totalTokens);
     return Number.isFinite(tokens) && tokens > 0 ? sum + tokens : sum;
@@ -526,6 +616,30 @@ export function buildTrendReportViewModel({
   const scaledTokens = (value) => {
     const tokens = Number(value);
     return Number.isFinite(tokens) && tokens > 0 ? tokens / tokenScale : 0;
+  };
+  const addUsageToRow = (
+    row,
+    { tokens, input, output, cached, callCount, model, fast, estimated },
+  ) => {
+    if (!row) return;
+    row.totalTokens += tokens;
+    row.inputTokens += input;
+    row.outputTokens += output;
+    row.cachedInputTokens += cached;
+    row.modelCalls += callCount;
+    row.estimated ||= estimated;
+    const rowModel = row.models.get(model) ?? {
+      model,
+      totalTokens: 0,
+      normalTokens: 0,
+      fastTokens: 0,
+      estimated: false,
+    };
+    rowModel.totalTokens += tokens;
+    if (fast) rowModel.fastTokens += tokens;
+    else rowModel.normalTokens += tokens;
+    rowModel.estimated ||= estimated;
+    row.models.set(model, rowModel);
   };
   for (const event of comparisonEvents) {
     const timestampMs = finiteTimestamp(event.timestamp);
@@ -553,13 +667,17 @@ export function buildTrendReportViewModel({
       ? Math.min(input, scaledTokens(event.cachedInputTokens))
       : 0;
     const estimated = tokens > 0 && event.rangeAllocationEstimated === true;
+    const callCount = usageCallCount(event);
+    const detailedCallCount = usable
+      ? usageDetailedCallCount(event)
+      : 0;
 
     boundedEvents.push({ timestampMs, tokens, model, fast, event });
     totalTokens += tokens;
-    modelCalls += 1;
+    modelCalls += callCount;
     if (usable) {
       detailedTokens += tokens;
-      detailedCalls += 1;
+      detailedCalls += detailedCallCount;
     }
     inputTokens += input;
     outputTokens += output;
@@ -574,30 +692,37 @@ export function buildTrendReportViewModel({
     modelRow.cachedInputTokens += cached;
     modelRow.estimated ||= estimated;
 
+    const rowValues = {
+      tokens,
+      input,
+      output,
+      cached,
+      callCount,
+      model,
+      fast,
+      estimated,
+    };
     const dayRow = daily[dayIndexByString.get(localDateString(timestampMs, timeZone)) ?? -1];
-    if (dayRow) {
-      dayRow.totalTokens += tokens;
-      dayRow.inputTokens += input;
-      dayRow.outputTokens += output;
-      dayRow.cachedInputTokens += cached;
-      dayRow.modelCalls += 1;
-      dayRow.estimated ||= estimated;
-      const dayModel = dayRow.models.get(model) ?? {
-        model,
-        totalTokens: 0,
-        normalTokens: 0,
-        fastTokens: 0,
-        estimated: false,
-      };
-      dayModel.totalTokens += tokens;
-      if (fast) dayModel.fastTokens += tokens;
-      else dayModel.normalTokens += tokens;
-      dayModel.estimated ||= estimated;
-      dayRow.models.set(model, dayModel);
+    addUsageToRow(dayRow, rowValues);
+    if (hourlyMode) {
+      addUsageToRow(
+        hourly[intervalIndexAt(hourlyIntervals, timestampMs)],
+        rowValues,
+      );
     }
   }
 
   for (const row of daily) {
+    row.uncachedInputTokens = Math.max(0, row.inputTokens - row.cachedInputTokens);
+    row.cacheRatePercent =
+      row.inputTokens > 0
+        ? (row.cachedInputTokens / row.inputTokens) * 100
+        : null;
+    row.models = [...row.models.values()].sort(
+      (left, right) => right.totalTokens - left.totalTokens,
+    );
+  }
+  for (const row of hourly ?? []) {
     row.uncachedInputTokens = Math.max(0, row.inputTokens - row.cachedInputTokens);
     row.cacheRatePercent =
       row.inputTokens > 0
@@ -727,6 +852,7 @@ export function buildTrendReportViewModel({
       effectiveEndMs,
       timeZone,
       rangeDays,
+      granularity: hourlyMode ? "hour" : "day",
       startDateString: bounds.startDateString,
       endDateString: bounds.endDateString,
       partialFinalDay,
@@ -764,6 +890,7 @@ export function buildTrendReportViewModel({
     },
     models: modelRows,
     daily,
+    hourly,
     meter,
     projects: topProjects,
     projectRemainder,
@@ -806,7 +933,7 @@ export function buildTrendReportViewModel({
 // a calculation bug, never something to render around, so it throws with a
 // descriptive message.
 export function validateReportViewModel(viewModel) {
-  const { summary, daily, models, projects, projectRemainder } = viewModel;
+  const { summary, daily, hourly, models, projects, projectRemainder } = viewModel;
 
   assertReconciles(
     "daily totals must sum to total usage",
@@ -829,6 +956,41 @@ export function validateReportViewModel(viewModel) {
     daily.reduce((sum, row) => sum + row.inputTokens, 0),
     summary.inputTokens,
   );
+  if (Array.isArray(hourly)) {
+    assertReconciles(
+      "hourly totals must sum to total usage",
+      hourly.reduce((sum, row) => sum + row.totalTokens, 0),
+      summary.totalTokens,
+    );
+    assertReconciles(
+      "hourly model totals must sum to total usage",
+      hourly.reduce(
+        (sum, row) => sum + [...row.models.values()]
+          .reduce((rowTotal, model) => rowTotal + model.totalTokens, 0),
+        0,
+      ),
+      summary.totalTokens,
+    );
+    assertReconciles(
+      "hourly input must sum to overall input",
+      hourly.reduce((sum, row) => sum + row.inputTokens, 0),
+      summary.inputTokens,
+    );
+    assertReconciles(
+      "hourly cached input must sum to overall cached input",
+      hourly.reduce((sum, row) => sum + row.cachedInputTokens, 0),
+      summary.cachedInputTokens,
+    );
+    assertReconciles(
+      "hourly fast tokens must sum to overall fast tokens",
+      hourly.reduce(
+        (sum, row) => sum + [...row.models.values()]
+          .reduce((rowTotal, model) => rowTotal + model.fastTokens, 0),
+        0,
+      ),
+      summary.fastTokens,
+    );
+  }
   assertReconciles(
     "model cache input must sum to overall input",
     models.reduce((sum, row) => sum + row.cacheInputTokens, 0),

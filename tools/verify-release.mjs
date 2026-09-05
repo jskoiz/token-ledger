@@ -494,33 +494,33 @@ async function main() {
       "Installed smoke output exposed a source or fixture path.",
     );
 
-    const reportPath = join(installDirectory, "release-report.png");
-    const reportOutput = run(
-      installedBinary,
-      [
-        "report",
-        "7d",
-        "--input",
-        fixturePath,
-        "--no-open",
-        "--tz",
-        "UTC",
-        "--image-output",
-        reportPath,
-      ],
-      { cwd: installDirectory, env: cleanEnvironment },
-    );
-    assert(
-      reportOutput.includes("Wrote report:") &&
-        reportOutput.includes("release-report.png"),
-      `Installed tledger report smoke output was unexpected:\n${reportOutput}`,
-    );
-    const reportBytes = await readFile(reportPath);
-    assert(
-      JSON.stringify([...reportBytes.subarray(0, 8)]) ===
-        JSON.stringify([137, 80, 78, 71, 13, 10, 26, 10]),
-      "Installed tledger report smoke did not write a PNG.",
-    );
+    // Select a day containing actual fixture usage, even when verification
+    // runs just after UTC midnight and the recent events are from yesterday.
+    const reportDate = JSON.parse(await readFile(fixturePath, "utf8"))
+      .events[0].timestamp.slice(0, 10);
+    for (const period of ["1d", "7d"]) {
+      const reportName = `release-report-${period}.png`;
+      const reportPath = join(installDirectory, reportName);
+      const reportOutput = run(
+        installedBinary,
+        [
+          "report", period, "--date", reportDate,
+          "--input", fixturePath, "--no-open", "--tz", "UTC",
+          "--image-output", reportPath,
+        ],
+        { cwd: installDirectory, env: cleanEnvironment },
+      );
+      assert(
+        reportOutput.includes("Wrote report:") && reportOutput.includes(reportName),
+        `Installed tledger ${period} report output was unexpected:\n${reportOutput}`,
+      );
+      const reportBytes = await readFile(reportPath);
+      assert(
+        JSON.stringify([...reportBytes.subarray(0, 8)]) ===
+          JSON.stringify([137, 80, 78, 71, 13, 10, 26, 10]),
+        `Installed tledger ${period} report did not write a PNG.`,
+      );
+    }
 
     const cacheReportPath = join(installDirectory, "release-cache-report.png");
     const cacheReportOutput = run(
@@ -557,7 +557,7 @@ async function main() {
     console.log("tledger --help quick guide: passed.");
     console.log("tledger --help-all command reference: passed.");
     console.log("tledger 1d --static project smoke: passed (Alpha 1.20K, Beta 800, 2.00K total).");
-    console.log("tledger report PNG smoke: passed.");
+    console.log("tledger report 1d/7d PNG smoke: passed.");
     console.log("tledger report --cache-rate PNG smoke: passed.");
     console.log("Release verification passed.");
   } finally {

@@ -1,6 +1,6 @@
 {
   "name": "tledger",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "A local-only terminal dashboard for Codex token usage",
   "license": "MIT",
   "keywords": [
@@ -44,7 +44,7 @@
     "usage:day": "node bin/token-ledger.mjs day",
     "usage:week": "node bin/token-ledger.mjs week",
     "verify:release": "node tools/verify-release.mjs",
-    "prepublishOnly": "npm test && npm run verify:release",
+    "prepublishOnly": "npm run test:all && npm run lint && npm run verify:release",
     "benchmark:refresh": "node tools/benchmark-importer.mjs"
   },
   "devDependencies": {

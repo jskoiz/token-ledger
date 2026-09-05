@@ -8,7 +8,7 @@ cycle context without sending your data anywhere.
 
 Requires Node.js 22.13 or newer.
 
-Once published, install the CLI with:
+Install the published CLI with:
 
 ```bash
 npm install -g tledger
@@ -20,10 +20,10 @@ For a one-time run without a permanent global install:
 npx tledger week
 ```
 
-Until the package is published, install it from this repository:
+To install the development version from this repository:
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/jskoiz/token-ledger.git
 cd token-ledger
 npm install -g .
 ```
@@ -74,6 +74,16 @@ dashboard PNG (identical to `trend --image`) to
 same flags as the trend view (`--drain`, `--date`, `--tz`, `--image-output`,
 `--image-width`) and prints progress while rendering and encoding the image.
 
+`tledger report 1d` shows the selected local calendar day in hourly columns,
+including hourly cache efficiency. The current hour is marked partial; future
+hours are not treated as observed zero usage. Use `--date yesterday` for a
+completed day. This differs from the rolling 24-hour `tledger 1d` terminal view.
+
+Use `tledger report 1d --private` to replace project names with `Project 1`,
+`Project 2`, and so on, ranked by usage within that report. Counts and usage
+remain visible; the local snapshot is unchanged. The default filename ends
+in `-private.png` so the named report is preserved.
+
 The terminal trend view is a compact approximation of the image view. For the
 full chart grammar, use `--image`: it writes a single shareable report card as
 a PNG. The report leads with a total-usage KPI (with a delta against the prior
@@ -93,11 +103,9 @@ through the final day, that column is marked `PARTIAL` with the actual cutoff
 time, and the prior-period delta compares an equally long partial window.
 Values allocated from compacted history are marked with `≈`; unmarked values
 come from exact event data. Reports built from an explicit or stale snapshot
-say `Snapshot generated …` (with a `STALE` badge on fallback) instead of
-claiming to be current. Compact warning chips appear only when the report has
-unparsed source records, incomplete token-component coverage, external or
-non-current input, estimated history, or a snapshot/current rate-card
-mismatch.
+say `Snapshot generated …` (with a `STALE SNAPSHOT` badge on fallback).
+Detailed source and integrity diagnostics remain in the generated snapshot's
+coverage metadata.
 
 When run from a terminal, the finished PNG opens in the default image viewer
 automatically so the report lands on screen instead of in a file browser.
@@ -135,6 +143,10 @@ legible and falls back to the same readable multi-day binning for longer
 windows. Meter-drain weighting uses the rate card bundled with this release;
 subscription limits are not billed per token.
 
+Models without a bundled price remain explicitly unrated in cost estimates.
+Astra is recognized in usage reports but is unrated in this release's
+purchased-credit and API-dollar estimates.
+
 The CLI checks the local Codex source manifest on every automatic load. If it
 differs from the cached watermark, the CLI rebuilds the privacy-reduced
 snapshot; otherwise it reuses the cache immediately. The first refresh may
@@ -146,10 +158,12 @@ The `1d` project dashboard shows a compact snapshot-age line such as
 `SNAPSHOT · fresh · 12m old`. `fresh` means the snapshot is within the
 one-hour cache window, `stale` means it is older, and `age unknown` means the
 snapshot has no usable capture-time metadata. The indicator does not print a
-local path or trigger another source scan. Every terminal and image report
-also shows a separate provenance status: `VERIFIED CURRENT`, `STALE FALLBACK`,
-`UNCHECKED CACHE`, or `EXPLICIT SNAPSHOT`. Snapshot age describes capture time;
-it never implies that the local source was checked successfully.
+local path or trigger another source scan. Terminal reports also show a
+separate provenance status: `VERIFIED CURRENT`, `STALE FALLBACK`,
+`UNCHECKED CACHE`, or `EXPLICIT SNAPSHOT`. The standard PNG report communicates
+freshness through its generation timestamp and stale/partial labels. Snapshot
+age describes capture time; it never implies that the local source was checked
+successfully.
 
 Useful overrides:
 
@@ -229,8 +243,7 @@ an aggregate that also contains active usage.
 
 Legacy snapshot history is imported only when its collection scope and hashed
 Codex-home identity are both provable. If either check fails, exact rollout
-collection continues without that legacy history and reports show a compact
-`LEGACY HISTORY SKIPPED` warning. The reason is also recorded as
+collection continues without that legacy history. The reason is recorded as
 `coverage.legacySnapshotStatus` in the generated snapshot.
 
 Codex quota records do not contain a ChatGPT account identifier. Token Ledger
@@ -274,11 +287,13 @@ In the interactive dashboard:
 ## Verify from source
 
 ```bash
-npm test
+npm ci
+npm run test:all
 npm run lint
 npm run verify:release
 ```
 
 `npm run verify:release` packs the allowlisted artifact, installs that tarball
 in a clean temporary directory with no network or Codex data access, and runs
-the installed `tledger --help` and synthetic `tledger 1d --static` smoke checks.
+the installed help commands, a synthetic `tledger 1d --static` dashboard, and
+both standard and cache-rate PNG report smoke checks.

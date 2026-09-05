@@ -43,7 +43,10 @@ const MODEL_SORT_ORDER = new Map([
 ]);
 
 function finiteTimestamp(value) {
-  const timestamp = new Date(value).getTime();
+  if (typeof value !== "string" && !Number.isFinite(value)) return null;
+  const timestamp = typeof value === "string"
+    ? Date.parse(value)
+    : new Date(value).getTime();
   return Number.isFinite(timestamp) ? timestamp : null;
 }
 
@@ -98,10 +101,6 @@ export function priorPeriodBounds(bounds, days = bounds.rangeDays) {
   );
 }
 
-function clampPercent(value) {
-  return Math.min(100, Math.max(0, Number(value) || 0));
-}
-
 export function trendModelLabel(value) {
   const model = String(value || "unknown").trim().toLowerCase();
   if (model.includes("astra")) return "Astra";
@@ -118,7 +117,18 @@ export function trendModelLabel(value) {
 
 export function weeklyQuotaObservations(snapshot = {}) {
   if (!snapshotHasCurrentQuotaIdentityContract(snapshot)) return [];
-  let observations = (snapshot.quotaObservations ?? [])
+  if (!Array.isArray(snapshot.quotaObservations)) return [];
+  let observations = snapshot.quotaObservations
+    .filter((observation) =>
+      observation !== null &&
+      typeof observation === "object" &&
+      observation.windowMinutes === WEEK_MINUTES &&
+      Number.isFinite(observation.resetsAt) &&
+      observation.resetsAt > 0 &&
+      Number.isFinite(observation.usedPercent) &&
+      observation.usedPercent >= 0 &&
+      observation.usedPercent <= 100,
+    )
     .map((observation) => {
       const timestampMs = finiteTimestamp(observation.timestamp);
       const lastSeenAtMs = finiteTimestamp(observation.lastSeenAt);
@@ -129,22 +139,9 @@ export function weeklyQuotaObservations(snapshot = {}) {
           timestampMs === null
             ? lastSeenAtMs
             : Math.max(timestampMs, lastSeenAtMs ?? timestampMs),
-        resetsAt: Number(observation.resetsAt),
-        usedPercent: Number(observation.usedPercent),
       };
     })
-    .filter(
-      (observation) =>
-        Number(observation.windowMinutes) === WEEK_MINUTES &&
-        observation.timestampMs !== null &&
-        Number.isFinite(observation.resetsAt) &&
-        observation.resetsAt > 0 &&
-        Number.isFinite(observation.usedPercent),
-    )
-    .map((observation) => ({
-      ...observation,
-      usedPercent: clampPercent(observation.usedPercent),
-    }));
+    .filter((observation) => observation.timestampMs !== null);
 
   // Keep exactly one meter: only explicit provider-derived account scope is
   // authoritative. A missing display label does not prove account scope.

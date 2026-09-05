@@ -12,6 +12,10 @@ import {
   renderTrendImage,
   writeTrendPng,
 } from "../bin/token-ledger-trend-image.mjs";
+import {
+  ACCOUNT_QUOTA_LIMIT_KEY,
+  QUOTA_IDENTITY_CONTRACT_VERSION,
+} from "../lib/token-ledger-quota-contract.mjs";
 
 const output = resolve(process.argv[2] ?? "docs/token-ledger-report-7-day.png");
 const width = Number(process.argv[3]) || 1_280;
@@ -92,6 +96,9 @@ function observe(day, hour, usedPercent, resetsAt) {
     usedPercent,
     windowMinutes: 10_080,
     resetsAt,
+    limitName: null,
+    limitKey: ACCOUNT_QUOTA_LIMIT_KEY,
+    scope: "account",
   });
 }
 observe(17, 1, 88, resetAt);
@@ -119,6 +126,11 @@ const snapshot = {
   generatedAt: iso(23, 12, 9),
   label: "Fixture snapshot",
   provenance: { kind: "codex-local-metadata", rateCardAsOf: "2026-08-17" },
+  metadata: {
+    durableLedger: {
+      quotaIdentityContract: QUOTA_IDENTITY_CONTRACT_VERSION,
+    },
+  },
   coverage: { parseErrors: 0 },
   events,
   threads: [],

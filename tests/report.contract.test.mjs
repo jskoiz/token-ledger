@@ -23,6 +23,7 @@ import {
   ACCOUNT_QUOTA_LIMIT_KEY,
   QUOTA_IDENTITY_CONTRACT_VERSION,
 } from "../lib/token-ledger-quota-contract.mjs";
+import { buildRangeAnalysis } from "../lib/token-ledger-range-analysis.mjs";
 
 const TIME_ZONE = "Pacific/Honolulu";
 const bounds = multiDayBounds("2026-08-23", TIME_ZONE, 7);
@@ -102,6 +103,10 @@ function buildReport(overrides = {}) {
 
 function resetAt(day, hour = 6) {
   return Math.floor(Date.UTC(2026, 7, day, hour) / 1_000);
+}
+
+function assertApproximately(actual, expected, message) {
+  assert.ok(Math.abs(actual - expected) < 1e-4, message ?? `${actual} vs ${expected}`);
 }
 
 test("report totals reconcile across daily, model, project, and token components", () => {
@@ -186,6 +191,159 @@ test("Astra is a first-class model in report and terminal output", () => {
     options: { plain: true, width: 100 },
   });
   assert.match(terminal, /■ Astra/);
+});
+
+test("shared range analysis splits local-midnight buckets and preserves call counts", () => {
+  const currentBounds = multiDayBounds("2026-08-24", TIME_ZONE, 2);
+  const priorBounds = multiDayBounds("2026-08-22", TIME_ZONE, 2);
+  const currentEvent = {
+    timestamp: "2026-08-24T10:00:00.000Z",
+    startAt: "2026-08-24T09:30:00.000Z",
+    endAt: "2026-08-24T10:30:00.000Z",
+    model: "gpt-5.6-luna",
+    project: "cross-midnight",
+    totalTokens: 100,
+    inputTokens: 100,
+    outputTokens: 0,
+    cachedInputTokens: 0,
+    callCount: 4,
+    detailedCallCount: 3,
+    inputCallCount: 4,
+    breakdownAvailable: true,
+  };
+  const priorEvent = {
+    ...currentEvent,
+    timestamp: "2026-08-22T10:00:00.000Z",
+    startAt: "2026-08-22T09:30:00.000Z",
+    endAt: "2026-08-22T10:30:00.000Z",
+    totalTokens: 200,
+    inputTokens: 200,
+    callCount: 6,
+    detailedCallCount: 5,
+    inputCallCount: 6,
+  };
+  const snapshot = snapshotOf([currentEvent, priorEvent]);
+  const analysis = buildRangeAnalysis(snapshot, currentBounds, { priorBounds });
+
+  assert.equal(analysis.currentEvents.length, 2);
+  assert.equal(analysis.priorEvents.length, 2);
+  assert.ok(analysis.currentEvents.every((event) => event.rangeAllocationEstimated));
+  assertApproximately(
+    analysis.currentEvents.reduce((sum, event) => sum + event.totalTokens, 0),
+    100,
+    "current tokens must remain additive",
+  );
+  assertApproximately(
+    analysis.currentEvents.reduce((sum, event) => sum + event.callCount, 0),
+    4,
+    "current call counts must remain additive",
+  );
+  assertApproximately(
+    analysis.currentEvents.reduce((sum, event) => sum + event.detailedCallCount, 0),
+    3,
+    "current detailed call counts must remain additive",
+  );
+
+  const vm = buildTrendReportViewModel({
+    snapshot,
+    bounds: currentBounds,
+    days: 2,
+    reportTimeMs: currentBounds.end.getTime(),
+    sourceStatus: "verified-current",
+    events: analysis.currentEvents,
+    priorEvents: analysis.priorEvents,
+  });
+  assertApproximately(vm.coverage.modelCalls, 4);
+  assertApproximately(vm.coverage.detailedCalls, 3);
+  assertApproximately(
+    vm.daily.reduce((sum, row) => sum + row.modelCalls, 0),
+    4,
+    "daily call counts must reconcile with coverage",
+  );
+  assertApproximately(vm.daily[0].totalTokens, 50);
+  assertApproximately(vm.daily[1].totalTokens, 50);
+  assertApproximately(vm.daily[0].modelCalls, 2);
+  assertApproximately(vm.daily[1].modelCalls, 2);
+
+  const directVm = buildTrendReportViewModel({
+    snapshot,
+    bounds: currentBounds,
+    days: 2,
+    reportTimeMs: currentBounds.end.getTime(),
+    sourceStatus: "verified-current",
+  });
+  assertApproximately(directVm.daily[0].totalTokens, 50);
+  assertApproximately(directVm.daily[1].totalTokens, 50);
+  assertApproximately(directVm.coverage.modelCalls, 4);
+  assertApproximately(directVm.coverage.detailedCalls, 3);
+
+  const partialVm = buildTrendReportViewModel({
+    snapshot: snapshotOf([currentEvent, priorEvent], [], {
+      generatedAt: "2026-08-24T10:20:00.000Z",
+    }),
+    bounds: currentBounds,
+    days: 2,
+    reportTimeMs: Date.parse("2026-08-24T10:15:00.000Z"),
+    sourceStatus: "verified-current",
+  });
+  assert.equal(partialVm.meta.partialFinalDay, true);
+  assertApproximately(partialVm.summary.totalTokens, 75);
+  assertApproximately(partialVm.daily[0].totalTokens, 50);
+  assertApproximately(partialVm.daily[1].totalTokens, 25);
+  assertApproximately(partialVm.coverage.modelCalls, 3);
+  assertApproximately(partialVm.summary.priorEquivalentTokens, 150);
+
+  const image = renderTrendImage({
+    snapshot,
+    bounds: currentBounds,
+    days: 2,
+    analysis,
+    options: { imageWidth: 1_280 },
+    reportTimeMs: currentBounds.end.getTime(),
+    sourceStatus: "verified-current",
+  });
+  assert.match(image, /DAILY TOKEN VOLUME/);
+
+  const directImage = renderTrendImage({
+    snapshot,
+    bounds: currentBounds,
+    days: 2,
+    options: { imageWidth: 1_280 },
+    reportTimeMs: currentBounds.end.getTime(),
+    sourceStatus: "verified-current",
+  });
+  assert.match(directImage, /DAILY TOKEN VOLUME/);
+});
+
+test("shared range analysis uses the DST-aware local midnight", () => {
+  const timeZone = "America/New_York";
+  const dstBounds = multiDayBounds("2026-03-09", timeZone, 2);
+  const snapshot = snapshotOf([{
+    timestamp: "2026-03-09T04:00:00.000Z",
+    startAt: "2026-03-09T03:30:00.000Z",
+    endAt: "2026-03-09T04:30:00.000Z",
+    model: "gpt-5.6-luna",
+    project: "dst-boundary",
+    totalTokens: 100,
+    inputTokens: 100,
+    outputTokens: 0,
+    cachedInputTokens: 0,
+    callCount: 2,
+    detailedCallCount: 2,
+    inputCallCount: 2,
+    breakdownAvailable: true,
+  }]);
+
+  const analysis = buildRangeAnalysis(snapshot, dstBounds);
+  assert.equal(analysis.currentEvents.length, 2);
+  assert.equal(
+    analysis.currentEvents[1].startAt,
+    "2026-03-09T04:00:00.000Z",
+  );
+  assertApproximately(
+    analysis.currentEvents.reduce((sum, event) => sum + event.totalTokens, 0),
+    100,
+  );
 });
 
 test("project ranking fills five rows with four projects and a remainder", () => {
@@ -293,6 +451,35 @@ test("compact KPI typography keeps long cache labels inside their card", () => {
   assert.doesNotMatch(report, /input cach…/);
 });
 
+test("stacked KPI units keep subtitles and captions separated", () => {
+  const report = renderTrendImage({
+    snapshot: snapshotOf([
+      usage(16, 10, { totalTokens: 1_000 }),
+      usage(23, 10, {
+        totalTokens: 999_999_000_000_000,
+        inputTokens: 999_999_000_000_000,
+        outputTokens: 0,
+        cachedInputTokens: 999_999_000_000_000,
+      }),
+    ]),
+    bounds,
+    days: 7,
+    options: { imageWidth: 1_280 },
+    reportTimeMs: timestampMs(23, 12),
+    sourceStatus: "verified-current",
+  });
+
+  const stackedSub = report.match(
+    /data-role="kpi-sub" data-placement="stacked" data-baseline="([^"]+)"/,
+  );
+  const stackedCaption = report.match(
+    /data-role="kpi-caption" data-placement="stacked" data-baseline="([^"]+)"/,
+  );
+  assert.ok(stackedSub);
+  assert.ok(stackedCaption);
+  assert.ok(Number(stackedCaption[1]) - Number(stackedSub[1]) >= 12);
+});
+
 test("cache efficiency is input-weighted and fast mode remains a total subset", () => {
   assert.equal(isFastMode("priority"), true);
   assert.equal(isFastMode("fast"), true);
@@ -330,6 +517,26 @@ test("cache efficiency is input-weighted and fast mode remains a total subset", 
     assert.ok(row.fastTokens <= row.totalTokens);
     assert.equal(row.normalTokens + row.fastTokens, row.totalTokens);
   }
+});
+
+test("model cache panel names a single overflow model", () => {
+  const report = renderTrendImage({
+    snapshot: snapshotOf([
+      usage(17, 8, { model: "gpt-5.6-luna", totalTokens: 6_000 }),
+      usage(18, 8, { model: "gpt-5.6-sol", totalTokens: 5_000 }),
+      usage(19, 8, { model: "gpt-5.5", totalTokens: 4_000 }),
+      usage(20, 8, { model: "gpt-auto-review", totalTokens: 3_000 }),
+      usage(21, 8, { model: "gpt-5.4", totalTokens: 1_000 }),
+    ]),
+    bounds,
+    days: 7,
+    options: { imageWidth: 1_280 },
+    reportTimeMs: timestampMs(23, 12),
+    sourceStatus: "verified-current",
+  });
+
+  assert.match(report, />GPT-5\.4<\/text>/);
+  assert.doesNotMatch(report, />1 other models<\/text>/);
 });
 
 test("prior comparison matches the equivalent partial local duration", () => {

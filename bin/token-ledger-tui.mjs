@@ -1,3 +1,6 @@
+import { EventEmitter } from "node:events";
+import { emitKeypressEvents } from "node:readline";
+
 import { renderFullscreen, SCREEN_BASE } from "./token-ledger-terminal.mjs";
 import { actionFor } from "./token-ledger-controls.mjs";
 
@@ -49,6 +52,10 @@ export function startInteractive(view, {
     const previousRawMode = stdin.isRaw === true;
     const previousFlowing = stdin.readableFlowing;
     const registrations = [];
+    // Decode complete keys across stream chunks without attaching readline's
+    // internal listeners to the caller-owned terminal stream.
+    const keyInput = new EventEmitter();
+    emitKeypressEvents(keyInput, { escapeCodeTimeout: 50 });
 
     const registerListener = (target, event, handler, method = "on") => {
       const registration = { target, event, handler };
@@ -160,10 +167,10 @@ export function startInteractive(view, {
       teardown(streamError ?? new Error("Interactive stream failed."));
     }
 
-    function onData(input) {
+    function onKeypress(_text, key) {
       if (closed) return;
       try {
-        const action = actionFor(input);
+        const action = actionFor(key.sequence);
         if (action === "quit") {
           teardown();
           return;
@@ -182,6 +189,15 @@ export function startInteractive(view, {
       }
     }
 
+    function onData(input) {
+      if (closed) return;
+      try {
+        keyInput.emit("data", Buffer.isBuffer(input) ? input : Buffer.from(String(input)));
+      } catch (inputError) {
+        teardown(inputError);
+      }
+    }
+
     try {
       registerListener(stdin, "error", onStreamError);
       registerListener(stdout, "error", onStreamError);
@@ -195,6 +211,7 @@ export function startInteractive(view, {
       stdin.setEncoding("utf8");
       streamFlowTouched = true;
       stdin.resume();
+      registerListener(keyInput, "keypress", onKeypress);
       registerListener(stdin, "data", onData);
       registerListener(stdout, "resize", draw);
       terminalStateTouched = true;

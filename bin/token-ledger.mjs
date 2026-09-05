@@ -194,6 +194,7 @@ Terminal output:
   --youplot                  Use the legacy single-series renderer
 
 Report output:
+  --private                 Hide project names in the report
   --drain                    Chart estimated meter drain instead of token volume
   --cache-rate               Write the cache-only report (report command only)
   --image                    Write the trend view as a PNG
@@ -310,6 +311,7 @@ export function parseArgs(argv) {
     openImage: true,
     drain: false,
     cacheRate: false,
+    private: false,
     legacyPlot: false,
     help: argv.length === 0 || helpCommand,
     helpAll: false,
@@ -415,6 +417,11 @@ export function parseArgs(argv) {
         throw new Error("--drain is only available for the trend view.");
       }
       options.drain = true;
+    } else if (argument === "--private") {
+      if (!options.report) {
+        throw new Error("--private is only available with the report command.");
+      }
+      options.private = true;
     } else if (argument === "--cache-rate") {
       if (!options.report) {
         throw new Error("--cache-rate is only available with the report command.");
@@ -602,6 +609,12 @@ const QUOTED_ABSOLUTE_PATH =
 const UNQUOTED_ABSOLUTE_PATH =
   /(^|[\s([{=])((?:\/(?!\/)|\/\/|\\\\|[A-Za-z]:[\\/])[^\s"'`)\]},;]+)/g;
 
+const QUOTED_FILE_URL_PATH = /(["'])(file:\/\/\/[^"'\r\n]*)\1/gi;
+const UNQUOTED_FILE_URL_PATH =
+  /(^|[\s([{=:])(file:\/\/\/[^\s"'`)\]},;]+)/gi;
+const COLON_PREFIXED_LOCAL_PATH =
+  /(^|:)((?:\/(?!\/)|\\\\|[A-Za-z]:[\\/])[^\s"'`)\]},;]+)/g;
+
 function isAbsoluteLocalPath(path) {
   return (
     path.startsWith("/") ||
@@ -633,6 +646,39 @@ export function redactLocalPaths(value, paths = []) {
   ])]
     .filter((path) => path && path !== "/")
     .sort((left, right) => right.length - left.length);
+
+  const detectedPathLabel = (detectedPath) => {
+    const candidates = [detectedPath];
+    if (/^file:\/\/\//i.test(detectedPath)) {
+      const filePath = detectedPath.slice("file://".length);
+      candidates.push(filePath);
+      try {
+        candidates.push(decodeURIComponent(filePath));
+      } catch {
+        // Keep the raw file URL as the only candidate when its escape syntax
+        // is malformed; it is still safe to redact as an implicit path.
+      }
+    }
+    const explicit = [...explicitPaths].find((path) => candidates.includes(path));
+    return explicit ? safeDisplayLabel(explicit) : "[local path]";
+  };
+
+  // These forms occur in Node/worker diagnostics but are not covered by the
+  // ordinary absolute-path boundaries below. Handle them before replacing an
+  // explicit path substring so an explicit input still gets its safe filename.
+  redacted = redacted
+    .replace(
+      QUOTED_FILE_URL_PATH,
+      (_match, quote, path) => `${quote}${detectedPathLabel(path)}${quote}`,
+    )
+    .replace(
+      UNQUOTED_FILE_URL_PATH,
+      (_match, prefix, path) => `${prefix}${detectedPathLabel(path)}`,
+    )
+    .replace(
+      COLON_PREFIXED_LOCAL_PATH,
+      (_match, prefix, path) => `${prefix}${detectedPathLabel(path)}`,
+    );
 
   for (const path of pathsToRedact) {
     redacted = redacted.replaceAll(
@@ -1612,9 +1658,10 @@ function emptyRangeMessage(
 export async function run(options, { nowMs } = {}) {
   const hasInjectedNow = nowMs !== undefined;
   const now = new Date(hasInjectedNow ? nowMs : Date.now());
+  const reportTimeMs = now.getTime();
   const bounds = boundsForOptions(options, now);
   const { snapshot, sourceStatus } = await loadSnapshot(options);
-  const reportTimeMs = hasInjectedNow ? now.getTime() : Date.now();
+  const freshnessNowMs = hasInjectedNow ? reportTimeMs : Date.now();
   const analysis = buildRangeAnalysis(
     snapshot,
     bounds,
@@ -1638,8 +1685,10 @@ export async function run(options, { nowMs } = {}) {
     // Keep the terminal aggregation and the report's project breakdown on the
     // same captured event window. The report view model independently applies
     // the same bound to raw snapshot events for its other panels.
-    events = events.filter(
-      (event) => new Date(event.timestamp).getTime() < effectiveEndMs,
+    events = usageBucketsInRange(
+      { events },
+      bounds.start.getTime(),
+      effectiveEndMs,
     );
   }
   if (events.length === 0 && !writingEmptyCacheReport) {
@@ -1656,7 +1705,7 @@ export async function run(options, { nowMs } = {}) {
     ? options.imageOutput ??
       resolve(
         process.cwd(),
-        `token-ledger-${options.cacheRate ? "cache-report" : options.report ? "report" : "trend"}-${options.trendDays}d.png`,
+        `token-ledger-${options.cacheRate ? "cache-report" : options.report ? "report" : "trend"}-${options.trendDays}d${options.private ? "-private" : ""}.png`,
       )
     : null;
   const imageLabel = options.cacheRate
@@ -1676,7 +1725,7 @@ export async function run(options, { nowMs } = {}) {
     allRows,
     snapshotFreshness(
       snapshot,
-      reportTimeMs,
+      freshnessNowMs,
     ),
     { sourceStatus, reportTimeMs },
     analysis,

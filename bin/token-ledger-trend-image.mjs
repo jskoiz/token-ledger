@@ -338,13 +338,146 @@ function binDateLabel(bin, timeZone) {
   const start = localDateLabel(bin.startDateString, timeZone);
   const lastDate = bin.lastDateString;
   if (lastDate === bin.startDateString) return start;
-  return `${start}–${localDateLabel(lastDate, timeZone).replace(/^[A-Za-z]+ /, "")}`;
+  const end = localDateLabel(lastDate, timeZone);
+  if (bin.startDateString.slice(0, 4) !== lastDate.slice(0, 4)) {
+    return `${start} ${bin.startDateString.slice(0, 4)}–${end} ${lastDate.slice(0, 4)}`;
+  }
+  const [startMonth] = start.split(" ");
+  const [endMonth, endDay] = end.split(" ");
+  return startMonth === endMonth ? `${start}–${endDay}` : `${start}–${end}`;
 }
 
 function labelEvery(binCount) {
   if (binCount <= 14) return 1;
   if (binCount <= 20) return 2;
   return 3;
+}
+
+// Keep the requested cadence, but drop a candidate when its actual label
+// bounds would crowd the preceding label. The final bin is always retained so
+// a partial marker and its through-time remain visible.
+function selectDateLabelIndices(
+  bins,
+  {
+    timeZone,
+    slotWidth,
+    labelStep,
+    labelSize,
+    labelForBin = (bin) => binDateLabel(bin, timeZone),
+    gap = 8,
+  },
+) {
+  const finalIndex = bins.length - 1;
+  if (finalIndex < 0 || !(slotWidth > 0)) return new Set();
+  const cadence = Math.max(1, Math.floor(Number(labelStep) || 1));
+  const candidates = [];
+  for (let index = 0; index < bins.length; index += 1) {
+    if (index % cadence !== 0 && index !== finalIndex) continue;
+    const width = textWidth(labelForBin(bins[index]), labelSize);
+    const center = (index + 0.5) * slotWidth;
+    candidates.push({
+      index,
+      left: center - width / 2,
+      right: center + width / 2,
+    });
+  }
+
+  const selected = [];
+  for (const candidate of candidates) {
+    while (
+      candidate.index === finalIndex &&
+      selected.length > 0 &&
+      candidate.left - selected.at(-1).right < gap
+    ) {
+      selected.pop();
+    }
+    if (
+      selected.length > 0 &&
+      candidate.left - selected.at(-1).right < gap
+    ) {
+      continue;
+    }
+    selected.push(candidate);
+  }
+  return new Set(selected.map(({ index }) => index));
+}
+
+function hourLabel(timestampMs, timeZone, withZone = false) {
+  if (!Number.isFinite(timestampMs)) return "unknown time";
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hour: "numeric",
+    minute: "2-digit",
+    ...(withZone ? { timeZoneName: "short" } : {}),
+  }).format(new Date(timestampMs));
+}
+
+function hourlyChartRows(rows, timeZone) {
+  const baseLabels = rows.map((row) => hourLabel(row.startMs, timeZone));
+  const labelCounts = new Map();
+  for (const label of baseLabels) {
+    labelCounts.set(label, (labelCounts.get(label) ?? 0) + 1);
+  }
+  return rows.map((row, index) => ({
+    ...row,
+    startDateString: row.dateString,
+    lastDateString: row.dateString,
+    hourStartMs: row.startMs,
+    hourEndMs: row.endMs,
+    hourLabel: labelCounts.get(baseLabels[index]) > 1
+      ? hourLabel(row.startMs, timeZone, true)
+      : baseLabels[index],
+  }));
+}
+
+export function buildBurnHourBins(trend, hourRows, startMs, endMs) {
+  const bins = hourRows.map((row) => ({
+    ...row,
+    values: new Map(),
+    totalPercent: 0,
+    approximate: false,
+  }));
+  for (const interval of trend?.burnIntervals ?? []) {
+    const intervalStartMs = Number(interval.startMs);
+    const intervalEndMs = Number(interval.endMs);
+    if (!Number.isFinite(intervalStartMs) || !Number.isFinite(intervalEndMs)) continue;
+    const fullDurationMs = intervalEndMs - intervalStartMs;
+    if (!(fullDurationMs > 0)) continue;
+    const clippedStartMs = Math.max(startMs, intervalStartMs);
+    const clippedEndMs = Math.min(endMs, intervalEndMs);
+    if (!(clippedEndMs > clippedStartMs)) continue;
+    for (const bin of bins) {
+      const overlapMs = Math.min(bin.endMs, clippedEndMs) -
+        Math.max(bin.startMs, clippedStartMs);
+      if (!(overlapMs > 0)) continue;
+      // A burn interval can straddle the report window. Allocate only its
+      // in-window elapsed share; dividing by the clipped duration would
+      // incorrectly move the entire interval's drain into this chart.
+      const fraction = overlapMs / fullDurationMs;
+      if (interval.spansLongGap) bin.approximate = true;
+      for (const [model, burnPoints] of Object.entries(interval.contributions ?? {})) {
+        const share = Number(burnPoints) * fraction;
+        if (!(share > 0)) continue;
+        bin.values.set(model, (bin.values.get(model) ?? 0) + share);
+        bin.totalPercent += share;
+      }
+    }
+  }
+  const totals = new Map();
+  let totalPercent = 0;
+  for (const bin of bins) {
+    for (const [model, value] of bin.values) {
+      totals.set(model, (totals.get(model) ?? 0) + value);
+      totalPercent += value;
+    }
+  }
+  return {
+    bins,
+    totals,
+    totalPercent,
+    binSize: 1,
+    binCount: bins.length,
+  };
 }
 
 // Merge the view model's per-day rows into multi-day bins for narrow layouts.
@@ -645,9 +778,11 @@ export function renderTrendImage({
         11.5,
         card.sub.weight ?? 400,
       );
+      const subBaseline = unitInline ? y + 88 : y + 96;
+      elements.push(`<g data-role="kpi-sub" data-placement="${unitInline ? "inline" : "stacked"}" data-baseline="${subBaseline}">`);
       elements.push(svgText({
         x: x + 16,
-        y: unitInline ? y + 88 : y + 102,
+        y: subBaseline,
         value: truncateToWidth(
           card.sub.text,
           subWidth,
@@ -658,15 +793,19 @@ export function renderTrendImage({
         size: subSize,
         weight: card.sub.weight ?? 400,
       }));
+      elements.push("</g>");
     }
     if (card.caption) {
+      const captionBaseline = unitInline ? y + 107 : y + 112;
+      elements.push(`<g data-role="kpi-caption" data-placement="${unitInline ? "inline" : "stacked"}" data-baseline="${captionBaseline}">`);
       elements.push(svgText({
         x: x + 16,
-        y: y + 107,
+        y: captionBaseline,
         value: truncateToWidth(card.caption, cardWidth - 32, 12),
         fill: COLORS.muted,
         size: 12,
       }));
+      elements.push("</g>");
     }
     if (card.bar) {
       const barY = y + cardHeight - 22;
@@ -989,23 +1128,39 @@ export function renderTrendImage({
 
   // ------------------------------------------------------------ daily chart
   function buildDailyChartSection(top) {
-    const percentMode = Boolean(options.drain) &&
+    const hourlyMode = meta.granularity === "hour" &&
+      Array.isArray(vm.hourly) &&
+      vm.hourly.length > 0;
+    const hourlyRows = hourlyMode ? hourlyChartRows(vm.hourly, timeZone) : null;
+    const plotWidthEstimate = contentWidth - 70 - 66 - 24;
+    const binSize = hourlyMode
+      ? 1
+      : chooseBinSize(meta.rangeDays, plotWidthEstimate, {
+          minBinWidth: MIN_BAR_WIDTH,
+          preferDaily: true,
+        });
+    const tokenBins = hourlyMode ? hourlyRows : binDailyRows(vm.daily, binSize);
+    const meterDrainAvailable = Boolean(options.drain) &&
       Boolean(drainTrend?.available) &&
       meter.status !== "unavailable";
-
-    const plotWidthEstimate = contentWidth - 70 - 66 - 24;
-    const binSize = chooseBinSize(meta.rangeDays, plotWidthEstimate, {
-      minBinWidth: MIN_BAR_WIDTH,
-      preferDaily: true,
-    });
-    const tokenBins = binDailyRows(vm.daily, binSize);
-    const burn = percentMode
-      ? buildBurnDayBins(drainTrend, bounds, { days: meta.rangeDays, binSize })
+    const burnCandidate = meterDrainAvailable
+      ? hourlyMode
+        ? buildBurnHourBins(
+            drainTrend,
+            hourlyRows,
+            meta.startMs,
+            meta.effectiveEndMs,
+          )
+        : buildBurnDayBins(drainTrend, bounds, { days: meta.rangeDays, binSize })
       : null;
+    const percentMode = Boolean(options.drain && burnCandidate?.totalPercent > 0);
+    const drainFallback = Boolean(options.drain) && !percentMode;
+    const burn = percentMode ? burnCandidate : null;
     const bins = percentMode
       ? burn.bins.map((bin, index) => ({
+          ...bin,
           startDateString: bin.startDateString,
-          lastDateString: shiftCalendarDate(bin.endDateString, -1),
+          lastDateString: bin.lastDateString ?? shiftCalendarDate(bin.endDateString, -1),
           totalPercent: bin.totalPercent,
           approximate: bin.approximate,
           values: bin.values,
@@ -1039,10 +1194,22 @@ export function renderTrendImage({
     }));
 
     // Panel header: title + legend + right axis caption.
+    const chartTitle = percentMode
+      ? "OBSERVED LIMIT DRAIN"
+      : hourlyMode
+        ? "HOURLY TOKEN VOLUME"
+        : "DAILY TOKEN VOLUME";
+    const chartSubtitle = percentMode
+      ? hourlyMode
+        ? "(meter percent by hour)"
+        : "(meter percent by model)"
+      : drainFallback
+        ? "(actual · --drain unavailable; raw local tokens)"
+        : "(actual)";
     elements.push(svgText({
       x: outer + 16,
       y: headerBaseline,
-      value: percentMode ? "OBSERVED LIMIT DRAIN" : "DAILY TOKEN VOLUME",
+      value: chartTitle,
       fill: COLORS.leftAxis,
       size: 12,
       weight: 600,
@@ -1050,9 +1217,9 @@ export function renderTrendImage({
     }));
     elements.push(svgText({
       x: outer + 16 +
-        spacedWidth(percentMode ? "OBSERVED LIMIT DRAIN" : "DAILY TOKEN VOLUME", 12, 600, 1.08) + 8,
+        spacedWidth(chartTitle, 12, 600, 1.08) + 8,
       y: headerBaseline,
-      value: percentMode ? "(meter percent by model)" : "(actual)",
+      value: chartSubtitle,
       fill: COLORS.muted,
       size: 11.5,
     }));
@@ -1123,7 +1290,13 @@ export function renderTrendImage({
 
     // Meter pixel geometry is needed both by the overlay and by bar-total
     // placement (totals step above the line when it crosses their band).
-    const spanMs = meta.requestedEndMs - meta.startMs;
+    // Hourly bars retain the nominal end of the final partial hour so meter
+    // timestamps land inside the same column; meter observations themselves
+    // are still clipped by the view model's effective cutoff.
+    const chartEndMs = hourlyMode
+      ? hourlyRows.at(-1).endMs
+      : meta.requestedEndMs;
+    const spanMs = chartEndMs - meta.startMs;
     const xForTs = (timestampMs) =>
       plotLeft +
       Math.max(0, Math.min(1, spanMs > 0 ? (timestampMs - meta.startMs) / spanMs : 0)) *
@@ -1196,7 +1369,27 @@ export function renderTrendImage({
     const slotWidth = plotWidth / binCount;
     const barWidth = Math.min(86, Math.max(MIN_BAR_WIDTH, slotWidth * 0.62));
     const labelStep = labelEvery(binCount);
-    const isLabeledColumn = (index) => index % labelStep === 0 || index === binCount - 1;
+    const peakBinIndex = hourlyMode && maxBin > 0
+      ? bins.reduce(
+          (peakIndex, bin, index) =>
+            binTotalOf(bin) > binTotalOf(bins[peakIndex]) ? index : peakIndex,
+          0,
+        )
+      : -1;
+    const isLabeledColumn = (index) =>
+      index % labelStep === 0 ||
+      index === binCount - 1 ||
+      index === peakBinIndex;
+    const dateLabelIndices = selectDateLabelIndices(bins, {
+      timeZone,
+      slotWidth,
+      labelStep,
+      labelSize: 14,
+      labelForBin: hourlyMode
+        ? (bin) => bin.hourLabel
+        : (bin) => binDateLabel(bin, timeZone),
+    });
+    const isDateLabeledColumn = (index) => dateLabelIndices.has(index);
     const segmentLabels = [];
 
     bins.forEach((bin, binIndex) => {
@@ -1206,7 +1399,7 @@ export function renderTrendImage({
         elements.push(svgRect(centerX - slotWidth / 2 + 2, plotTop, slotWidth - 4, plotHeight, {
           fill: "rgba(255,255,255,.025)",
         }));
-        if (isLabeledColumn(binIndex)) {
+        if (isDateLabeledColumn(binIndex)) {
           elements.push(chip(centerX, plotBottom + 21, "UNOBSERVED", {
             fill: "rgba(255,255,255,.04)",
             stroke: COLORS.baseline,
@@ -1217,7 +1410,7 @@ export function renderTrendImage({
           elements.push(svgText({
             x: centerX,
             y: plotBottom + 45,
-            value: binDateLabel(bin, timeZone),
+            value: hourlyMode ? bin.hourLabel : binDateLabel(bin, timeZone),
             fill: COLORS.secondary,
             size: 14,
             anchor: "middle",
@@ -1325,8 +1518,10 @@ export function renderTrendImage({
         );
       }
       // Day labels.
-      if (isLabeledColumn(binIndex)) {
-        const weekday = binSize === 1 && bin.lastDateString === bin.startDateString
+      if (isDateLabeledColumn(binIndex)) {
+        const weekday = !hourlyMode &&
+          binSize === 1 &&
+          bin.lastDateString === bin.startDateString
           ? localWeekdayLabel(bin.startDateString, timeZone).toUpperCase()
           : "";
         if (bin.partial) {
@@ -1351,7 +1546,7 @@ export function renderTrendImage({
         elements.push(svgText({
           x: centerX,
           y: plotBottom + (weekday || bin.partial ? 45 : 34),
-          value: binDateLabel(bin, timeZone),
+          value: hourlyMode ? bin.hourLabel : binDateLabel(bin, timeZone),
           fill: COLORS.secondary,
           size: 14,
           anchor: "middle",
@@ -1504,15 +1699,26 @@ export function renderTrendImage({
   }
 
   function buildCacheByDayPanel(x, y, panelWidth, panelHeight) {
-    panelHeading(x, y, "CACHE EFFICIENCY BY DAY", "(input-weighted)");
+    const hourlyMode = meta.granularity === "hour" &&
+      Array.isArray(vm.hourly) &&
+      vm.hourly.length > 0;
+    const hourlyRows = hourlyMode ? hourlyChartRows(vm.hourly, timeZone) : null;
+    panelHeading(
+      x,
+      y,
+      hourlyMode ? "CACHE EFFICIENCY BY HOUR" : "CACHE EFFICIENCY BY DAY",
+      "(input-weighted)",
+    );
     const inner = panelWidth - 32;
     const left = x + 16;
 
-    const binSize = chooseBinSize(meta.rangeDays, inner, {
-      minBinWidth: 18,
-      preferDaily: true,
-    });
-    const cacheBins = binDailyRows(vm.daily, binSize);
+    const binSize = hourlyMode
+      ? 1
+      : chooseBinSize(meta.rangeDays, inner, {
+          minBinWidth: 18,
+          preferDaily: true,
+        });
+    const cacheBins = hourlyMode ? hourlyRows : binDailyRows(vm.daily, binSize);
     const rated = cacheBins.filter((bin) => bin.inputTokens > 0);
     if (!rated.length) {
       elements.push(svgText({
@@ -1597,10 +1803,19 @@ export function renderTrendImage({
       }));
     }
     const rateLabelStep = cacheBins.length <= 8 ? 1 : Math.ceil(cacheBins.length / 8);
+    const cacheDateLabelIndices = selectDateLabelIndices(cacheBins, {
+      timeZone,
+      slotWidth: slot,
+      labelStep: rateLabelStep,
+      labelSize: 10,
+      labelForBin: hourlyMode
+        ? (bin) => bin.hourLabel
+        : (bin) => binDateLabel(bin, timeZone),
+    });
     linePoints.forEach((point, index) => {
       if (!point) return;
       elements.push(`<circle cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="3.2" fill="${COLORS.cache}"/>`);
-      if (index % rateLabelStep === 0 || index === linePoints.length - 1) {
+      if (cacheDateLabelIndices.has(index)) {
         elements.push(svgText({
           x: point.x,
           y: point.y - 8,
@@ -1645,7 +1860,7 @@ export function renderTrendImage({
           rx: 1.5,
         }));
       }
-      if (index % rateLabelStep === 0 || index === cacheBins.length - 1) {
+      if (cacheDateLabelIndices.has(index)) {
         if (bin.inputTokens > 0) {
           elements.push(svgText({
             x: centerX,
@@ -1671,7 +1886,7 @@ export function renderTrendImage({
           elements.push(svgText({
             x: centerX,
             y: columnsBottom + 15,
-            value: binDateLabel(bin, timeZone),
+            value: hourlyMode ? bin.hourLabel : binDateLabel(bin, timeZone),
             fill: COLORS.muted,
             size: 10,
             anchor: "middle",
@@ -1709,7 +1924,7 @@ export function renderTrendImage({
 
     const rows = vm.projects.map((row, index) => ({
       rank: String(index + 1).padStart(2, "0"),
-      name: row.displayProject,
+      name: options.private ? `Project ${index + 1}` : row.displayProject,
       tokens: row.totalTokens,
       share: row.sharePercent,
       estimated: row.estimated,
@@ -1831,6 +2046,12 @@ export function renderTrendImage({
           estimated: false,
         },
       );
+      // A single overflow row is still one identifiable model. Naming it
+      // directly avoids making its cache rate look like an unexplained
+      // aggregate; reserve the aggregate label for real multi-model overflow.
+      merged.model = overflow.length === 1
+        ? overflow[0].model
+        : `${overflow.length} other models`;
       merged.uncachedInputTokens = Math.max(
         0,
         merged.cacheInputTokens - merged.cachedInputTokens,
@@ -1838,7 +2059,7 @@ export function renderTrendImage({
       merged.cacheRatePercent = merged.cacheInputTokens > 0
         ? (merged.cachedInputTokens / merged.cacheInputTokens) * 100
         : null;
-      merged.combined = true;
+      merged.combined = overflow.length > 1;
       rows.push(merged);
     }
     if (!rows.length) {

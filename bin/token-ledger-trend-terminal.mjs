@@ -95,6 +95,10 @@ function mergeBinTotals(state, bin) {
       (state.fastValues.get(model) ?? 0) + value * sourceRatio,
     );
   }
+  if (bin.estimated) state.estimated = true;
+  for (const model of bin.estimatedModels) {
+    state.estimatedModels.add(model);
+  }
 
   const scaleFactor = Math.max(1, state.totalTokens / MAX_SAFE_TOKEN_COUNT);
   if (scaleFactor > 1) {
@@ -257,6 +261,8 @@ export function buildActualTokenBins(
     fastValues: new Map(),
     totalTokens: 0,
     calls: 0,
+    estimated: false,
+    estimatedModels: new Set(),
   }));
   const startDate = bounds.startDateString;
   const dateIndexByString = new Map(
@@ -287,6 +293,10 @@ export function buildActualTokenBins(
     const allowFractional = event.rangeAllocationEstimated === true;
     const tokens = tokenValue(event.totalTokens, { allowFractional });
     const model = trendModelLabel(event.model);
+    if (event.rangeAllocationEstimated === true && tokens > 0) {
+      bin.estimated = true;
+      bin.estimatedModels.add(model);
+    }
     bin.calls = checkedTokenAdd(bin.calls, usageCallCount(event), {
       allowFractional,
     });
@@ -298,6 +308,8 @@ export function buildActualTokenBins(
     totalTokens: 0,
     values: new Map(),
     fastValues: new Map(),
+    estimated: false,
+    estimatedModels: new Set(),
   };
   for (const bin of bins) {
     mergeBinTotals(totalsState, bin);
@@ -307,6 +319,8 @@ export function buildActualTokenBins(
     bins,
     totals: totalsState.values,
     fastTotals: totalsState.fastValues,
+    estimated: totalsState.estimated,
+    estimatedModels: totalsState.estimatedModels,
     scale: totalsState.scale,
     binSize,
     binCount,
@@ -555,6 +569,8 @@ export function renderTrendCombo({
   const meterUsable = Boolean(trend.available && burn.totalPercent > 0);
   const percentMode = Boolean(options.drain) && meterUsable;
   const meterAvailable = Boolean(trend.available && (trend.points ?? []).length > 0);
+  const drainFallback = Boolean(options.drain) && !percentMode;
+  const actualEstimated = actual.estimated === true;
   const barBins = percentMode ? burn.bins : actual.bins;
   const binTotal = (bin) => (percentMode ? bin.totalPercent : bin.totalTokens);
   const maxLeft = niceCeiling(
@@ -630,11 +646,21 @@ export function renderTrendCombo({
   const axisRows = [0, Math.floor(baseline / 2), baseline];
   const history = historyScopeLabel(snapshot);
   const sourceWarning = incompleteSourceWarning(snapshot);
+  const actualModeTitle = drainFallback
+    ? "ACTUAL TOKENS · DRAIN UNAVAILABLE"
+    : meterAvailable
+      ? "ACTUAL TOKENS + WEEKLY QUOTA"
+      : "ACTUAL TOKENS";
+  const actualModeSubtitle = drainFallback
+    ? `DRAIN UNAVAILABLE · BARS = raw local tokens${actualEstimated ? " · ≈ marks allocated estimates" : ""}${meterAvailable ? " · LINE = meter remaining" : ""}`
+    : meterAvailable
+      ? `BARS = ${actualEstimated ? "token quantity by model · ≈ marks allocated estimates" : "actual token quantity by model"} · LINE = meter remaining${meterUsable ? " · -% row = observed drain per column" : " · no usable meter drain observed"}`
+      : `BARS = ${actualEstimated ? "token quantity by model · ≈ marks allocated estimates" : "actual token quantity by model"} · no account-wide weekly meter observed`;
   const lines = [
     `┌${"─".repeat(frameWidth - 2)}┐`,
     frameLine(
       colorize(
-        `TOKEN LEDGER · ${percentMode ? "OBSERVED LIMIT DRAIN + WEEKLY METER" : meterAvailable ? "ACTUAL TOKENS + WEEKLY QUOTA" : "ACTUAL TOKENS"} · ${localDateLabel(bounds.startDateString)} – ${localDateLabel(bounds.endDateString)} · ${days}D`,
+        `TOKEN LEDGER · ${percentMode ? "OBSERVED LIMIT DRAIN + WEEKLY METER" : actualModeTitle} · ${localDateLabel(bounds.startDateString)} – ${localDateLabel(bounds.endDateString)} · ${days}D`,
         PRIMARY_STYLE,
         enabled,
       ),
@@ -644,9 +670,7 @@ export function renderTrendCombo({
       colorize(
         percentMode
           ? "BARS = observed limit % consumed per day by model · LINE = meter remaining · one percent scale"
-          : meterAvailable
-            ? "BARS = actual token quantity by model · LINE = meter remaining · -% row = observed drain per column"
-            : "BARS = actual token quantity by model · no account-wide weekly meter observed",
+          : actualModeSubtitle,
         SECONDARY_STYLE,
         enabled,
       ),
@@ -694,6 +718,8 @@ export function renderTrendCombo({
   if (!percentMode && meterUsable) {
     lines.push(frameLine(drainLabelLine(burn.bins, plotWidth, leftWidth, rightWidth, enabled), frameWidth));
     lines.push(frameLine(fit("CALENDAR DAY · -% = OBSERVED METER DROP", innerWidth, "center"), frameWidth));
+  } else if (drainFallback) {
+    lines.push(frameLine(fit("CALENDAR DAY · --drain unavailable; showing raw local tokens", innerWidth, "center"), frameWidth));
   } else {
     lines.push(frameLine(fit("CALENDAR DAY", innerWidth, "center"), frameWidth));
   }
@@ -720,13 +746,14 @@ export function renderTrendCombo({
     const fastPart = fastTokens > 0
       ? ` · ${percent((fastTokens / actual.totals.get(model)) * 100)} fast`
       : "";
+    const estimatedPrefix = actual.estimatedModels?.has(model) ? "≈" : "";
     return colorize(
-      `■ ${model} ${compact(actual.totals.get(model))} (${percent((actual.totals.get(model) / totalTokens) * 100)})${fastPart}`,
+      `■ ${model} ${estimatedPrefix}${compact(actual.totals.get(model))} (${percent((actual.totals.get(model) / totalTokens) * 100)})${fastPart}`,
       styleForModel(model),
       enabled,
     );
   });
-  lines.push(frameLine(colorize(percentMode ? "OBSERVED LIMIT DRAIN BY MODEL · LEFT AXIS" : "ACTUAL TOKEN VOLUME · LEFT AXIS", PRIMARY_STYLE, enabled), frameWidth));
+  lines.push(frameLine(colorize(percentMode ? "OBSERVED LIMIT DRAIN BY MODEL · LEFT AXIS" : actualEstimated ? "ACTUAL TOKEN VOLUME BY MODEL · ≈ = ALLOCATED ESTIMATE · LEFT AXIS" : "ACTUAL TOKEN VOLUME · LEFT AXIS", PRIMARY_STYLE, enabled), frameWidth));
   for (let index = 0; index < legend.length; index += 2) {
     const leftLegendWidth = Math.floor((innerWidth - 2) / 2);
     const rightLegendWidth = innerWidth - 2 - leftLegendWidth;

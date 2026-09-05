@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import {
   mkdir,
   mkdtemp,
@@ -15,6 +17,7 @@ import { gzipSync } from "node:zlib";
 
 import {
   readPrivateSnapshot,
+  stagePrivateSnapshot,
   writePrivateSnapshot,
 } from "../lib/token-ledger-snapshot.mjs";
 import { SNAPSHOT_SCHEMA_VERSION } from "../lib/token-ledger-usage.mjs";
@@ -151,6 +154,35 @@ test("an oversized replacement preserves the previous valid private cache", asyn
       ["snapshot.json", "snapshot.json.gz"],
     );
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a competing destination replacement survives candidate verification", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "token-ledger-snapshot-race-"));
+  const output = resolve(root, "snapshot.json");
+  const replacement = resolve(root, "competing-replacement.tmp");
+  const originalRename = fs.rename;
+  let candidate;
+  try {
+    candidate = await stagePrivateSnapshot(output, snapshot("candidate"));
+    // Inject the competing atomic replacement precisely between publication
+    // and its identity check; the result must not depend on scheduler timing.
+    fs.rename = async (from, to) => {
+      const result = await originalRename(from, to);
+      if (to === output) {
+        await writeFile(replacement, "competing writer replacement");
+        await originalRename(replacement, output);
+      }
+      return result;
+    };
+    syncBuiltinESMExports();
+    await assert.rejects(candidate.publish(), { code: "ERR_SNAPSHOT_CANDIDATE_CHANGED" });
+    assert.equal(await readFile(output, "utf8"), "competing writer replacement");
+  } finally {
+    fs.rename = originalRename;
+    syncBuiltinESMExports();
+    await candidate?.discard();
     await rm(root, { recursive: true, force: true });
   }
 });

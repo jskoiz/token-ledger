@@ -224,6 +224,12 @@ function crashCollection(fixture, point, { stageSnapshot = false } = {}) {
         ...process.env,
         NODE_TEST_CONTEXT: "child-process",
         TOKEN_LEDGER_TEST_STATE_NAMESPACE: String(process.pid),
+        ...(process.env.TOKEN_LEDGER_TEST_STATE_ROOT
+          ? {
+              TOKEN_LEDGER_TEST_STATE_ROOT:
+                process.env.TOKEN_LEDGER_TEST_STATE_ROOT,
+            }
+          : {}),
         TOKEN_LEDGER_CRASH_OPTIONS: JSON.stringify(options(fixture)),
         TOKEN_LEDGER_CRASH_POINT: point,
         TOKEN_LEDGER_STAGE_SNAPSHOT: stageSnapshot ? "1" : "0",
@@ -2719,6 +2725,18 @@ test("session-index title changes reuse unchanged rollout content", async () => 
     assert.equal(refreshed.coverage.filesScanned, 0);
     assert.equal(refreshed.coverage.filesReused, 1);
     assert.equal(refreshed.coverage.bytesScanned, 0);
+
+    const refreshedLedger = await readDurableLedger(
+      resolveDurableLedgerPath({ codexHome: fixture.root }),
+    );
+    assert.equal(
+      refreshedLedger.threadRows.find((row) => row.id === THREAD_ID)?.title,
+      "New title",
+    );
+
+    await rm(sessionIndex);
+    const afterIndexRotation = await collectUsage(options(fixture));
+    assert.equal(afterIndexRotation.threads[0].title, "New title");
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }

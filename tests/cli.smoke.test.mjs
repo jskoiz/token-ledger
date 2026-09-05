@@ -13,6 +13,8 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+import { redactLocalPaths } from "../bin/token-ledger.mjs";
+
 const CLI_ENTRYPOINT = fileURLToPath(
   new URL("../bin/token-ledger.mjs", import.meta.url),
 );
@@ -456,6 +458,30 @@ test("CLI failures redact absolute local paths while retaining safe labels", asy
     assert.match(refreshResult.stderr, /Codex data directory not found: missing-codex-home/);
     assert.doesNotMatch(refreshResult.stderr, new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   });
+});
+
+test("local-path redaction handles file URLs and colon-prefixed paths", () => {
+  const implicitPosix = "/tmp/token-ledger-redaction-fixture/report.jsonl";
+  const implicitWindows = String.raw`C:\\token-ledger-redaction-fixture\\report.jsonl`;
+  const explicitPosix = "/tmp/token-ledger-redaction-fixture/space name.jsonl";
+  const result = redactLocalPaths([
+    `file://${implicitPosix}`,
+    `"file://${explicitPosix}"`,
+    `origin:${implicitPosix}`,
+    `origin:${implicitWindows}`,
+    `"${explicitPosix}"`,
+    "https://example.test/token-ledger/report.jsonl",
+  ].join("\n"), [explicitPosix]);
+
+  assert.equal(result, [
+    "[local path]",
+    '"space name.jsonl"',
+    "origin:[local path]",
+    "origin:[local path]",
+    '"space name.jsonl"',
+    "https://example.test/token-ledger/report.jsonl",
+  ].join("\n"));
+  assert.doesNotMatch(result, /token-ledger-redaction-fixture/);
 });
 
 test("refresh publishes a local cache that a no-refresh run can read", async () => {

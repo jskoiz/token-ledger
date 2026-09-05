@@ -63,8 +63,12 @@ export const IMAGE_FONT_FAMILY = "system-ui, -apple-system, 'Segoe UI', sans-ser
 export const IMAGE_MONO_FAMILY = "ui-monospace, Menlo, monospace";
 export const FAST_MODE_LABEL_COLOR = "#a78bfa";
 
+const XML_INVALID_CHARACTERS =
+  /[^\u0009\u000a\u000d\u0020-\uD7FF\uE000-\uFFFD\u{10000}-\u{10FFFF}]/gu;
+
 export function escapeXml(value) {
   return String(value)
+    .replace(XML_INVALID_CHARACTERS, "")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")

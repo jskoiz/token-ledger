@@ -5,16 +5,6 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir, userInfo } from "node:os";
 import { resolve } from "node:path";
 
-import {
-  collectUsage,
-  collectUsageSequential,
-} from "../lib/token-ledger-importer.mjs";
-import {
-  DURABLE_LEDGER_RETENTION_DAYS,
-  readDurableLedger,
-  resolveDurableLedgerPath,
-} from "../lib/token-ledger-ledger.mjs";
-
 function positiveInteger(argv, name, fallback) {
   const index = argv.indexOf(name);
   if (index === -1) return fallback;
@@ -100,8 +90,25 @@ const warmRuns = positiveInteger(argv, "--warm-runs", tokenEvents ? 2 : 1);
 const eventAgeDays = positiveInteger(argv, "--event-age-days", 4_000);
 const sequential = argv.includes("--sequential");
 const root = await mkdtemp(resolve(tmpdir(), "token-ledger-benchmark-"));
+const benchmarkStateRoot = resolve(root, ".token-ledger-test-state");
+
+// The benchmark is an isolated workload. Set the existing test-state marker
+// before loading the ledger modules so their module-level namespace is unique
+// to this process and no benchmark refresh can write the user's live ledger.
+process.env.NODE_TEST_CONTEXT = "benchmark";
+process.env.TOKEN_LEDGER_TEST_STATE_NAMESPACE = String(process.pid);
+process.env.TOKEN_LEDGER_TEST_STATE_ROOT = benchmarkStateRoot;
 
 try {
+  const { collectUsage, collectUsageSequential } = await import(
+    "../lib/token-ledger-importer.mjs"
+  );
+  const {
+    DURABLE_LEDGER_FILENAME,
+    DURABLE_LEDGER_RETENTION_DAYS,
+    readDurableLedger,
+    resolveDurableLedgerPath,
+  } = await import("../lib/token-ledger-ledger.mjs");
   const directory = resolve(root, "sessions", "2026", "08", "23");
   await mkdir(directory, { recursive: true });
   const newline = String.fromCharCode(10);
@@ -150,7 +157,19 @@ try {
 
   const before = process.resourceUsage().maxRSS;
   const runWallTimeMs = [];
+  const runCoverage = [];
   const output = resolve(root, "snapshot.json");
+  const durableLedgerPath = resolveDurableLedgerPath({ codexHome: root, output });
+  const normalLedgerPath = resolve(
+    userInfo().homedir,
+    ".token-ledger",
+    DURABLE_LEDGER_FILENAME,
+  );
+  if (durableLedgerPath === normalLedgerPath) {
+    throw new Error(
+      "Benchmark durable state is not isolated from the live Token Ledger ledger.",
+    );
+  }
   let snapshot;
   for (let run = 0; run < warmRuns; run += 1) {
     const started = performance.now();
@@ -161,9 +180,15 @@ try {
       since: null,
     });
     runWallTimeMs.push(Number((performance.now() - started).toFixed(1)));
+    runCoverage.push({
+      filesScanned: snapshot.coverage.filesScanned,
+      filesReused: snapshot.coverage.filesReused,
+      bytesScanned: snapshot.coverage.bytesScanned,
+      bytesReused: snapshot.coverage.bytesReused,
+    });
   }
   const ledger = await readDurableLedger(
-    resolveDurableLedgerPath({ codexHome: root }),
+    durableLedgerPath,
   );
   const durableTotalTokens = ledger.usageRows.reduce(
     (sum, row) => sum + Number(row.totalTokens || 0),
@@ -213,6 +238,7 @@ try {
         eventAgeDays: tokenEvents ? eventAgeDays : null,
         bytes,
         runWallTimeMs,
+        runCoverage,
         coldWallTimeMs: runWallTimeMs[0],
         warmMedianWallTimeMs,
         peakRssKb: Math.max(before, after),
@@ -228,14 +254,6 @@ try {
     ),
   );
 } finally {
+  await rm(benchmarkStateRoot, { recursive: true, force: true });
   await rm(root, { recursive: true, force: true });
-  await rm(
-    resolve(
-      userInfo().homedir,
-      ".token-ledger",
-      "test-state",
-      String(process.pid),
-    ),
-    { recursive: true, force: true },
-  );
 }

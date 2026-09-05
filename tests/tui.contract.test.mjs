@@ -123,6 +123,32 @@ function assertRestored(terminal, { rawCalls = [true, false], pauseCalls = 1 } =
   assertListenersRemoved(terminal);
 }
 
+test("coalesced and fragmented terminal input preserves every complete key", async () => {
+  for (const [chunks, expectedSelection] of [
+    [["jq"], [0, 1]],
+    [["jjkq"], [0, 1, 2, 1]],
+    [["\u001b", "[B", "j", "kq"], [0, 1, 2, 1]],
+    [["\u001b[B\u001b[Aq"], [0, 1, 0]],
+    [["\u001b"], [0]],
+  ]) {
+    const terminal = createTerminal();
+    const selected = [];
+    const done = startInteractive({ ...view(), rows: [{}, {}, {}] }, {
+      stdin: terminal.stdin,
+      stdout: terminal.stdout,
+      signalTarget: terminal.signalTarget,
+      render: ({ options }) => {
+        selected.push(options.selectedIndex);
+        return "screen";
+      },
+    });
+    for (const chunk of chunks) terminal.stdin.emit("data", chunk);
+    await done;
+    assert.deepEqual(selected, expectedSelection);
+    assertRestored(terminal);
+  }
+});
+
 test("quit and supported signals restore terminal state", async () => {
   const cases = [
     {
