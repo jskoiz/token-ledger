@@ -41,9 +41,22 @@ const RECONCILE_RELATIVE_TOLERANCE = 1e-6;
 const RECONCILE_ABSOLUTE_TOLERANCE = 1.5;
 
 // Fast mode is an overlapping usage property, not a separate model. Both
-// recognized service-tier labels count.
+// recognized service-tier labels count. Keep normalTokens limited to the
+// explicit standard/default tiers; a missing or unfamiliar tier is unknown.
+const KNOWN_NORMAL_SERVICE_TIERS = new Set(["default", "standard"]);
+
+function serviceTierClass(serviceTier) {
+  const tier = String(serviceTier ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_]+/g, "-");
+  if (isFastServiceTier(tier)) return "fast";
+  if (KNOWN_NORMAL_SERVICE_TIERS.has(tier)) return "normal";
+  return "unknown";
+}
+
 export function isFastMode(serviceTier) {
-  return isFastServiceTier(serviceTier);
+  return serviceTierClass(serviceTier) === "fast";
 }
 
 function finiteTimestamp(value) {
@@ -220,6 +233,7 @@ function modelRowFor(map, model) {
     totalTokens: 0,
     normalTokens: 0,
     fastTokens: 0,
+    unknownTokens: 0,
     cacheInputTokens: 0,
     cachedInputTokens: 0,
     uncachedInputTokens: 0,
@@ -578,6 +592,8 @@ export function buildTrendReportViewModel({
   let outputTokens = 0;
   let cachedInputTokens = 0;
   let fastTokens = 0;
+  let normalTokens = 0;
+  let unknownTokens = 0;
   let detailedTokens = 0;
   let detailedCalls = 0;
   let modelCalls = 0;
@@ -619,7 +635,16 @@ export function buildTrendReportViewModel({
   };
   const addUsageToRow = (
     row,
-    { tokens, input, output, cached, callCount, model, fast, estimated },
+    {
+      tokens,
+      input,
+      output,
+      cached,
+      callCount,
+      model,
+      serviceTierClass: tierClass,
+      estimated,
+    },
   ) => {
     if (!row) return;
     row.totalTokens += tokens;
@@ -633,11 +658,13 @@ export function buildTrendReportViewModel({
       totalTokens: 0,
       normalTokens: 0,
       fastTokens: 0,
+      unknownTokens: 0,
       estimated: false,
     };
     rowModel.totalTokens += tokens;
-    if (fast) rowModel.fastTokens += tokens;
-    else rowModel.normalTokens += tokens;
+    if (tierClass === "fast") rowModel.fastTokens += tokens;
+    else if (tierClass === "normal") rowModel.normalTokens += tokens;
+    else rowModel.unknownTokens += tokens;
     rowModel.estimated ||= estimated;
     row.models.set(model, rowModel);
   };
@@ -659,7 +686,8 @@ export function buildTrendReportViewModel({
 
     const tokens = scaledTokens(event.totalTokens);
     const model = trendModelLabel(event.model);
-    const fast = isFastMode(event.serviceTier);
+    const tierClass = serviceTierClass(event.serviceTier);
+    const fast = tierClass === "fast";
     const usable = usableComponents(event);
     const input = usable ? scaledTokens(event.inputTokens) : 0;
     const output = usable ? scaledTokens(event.outputTokens) : 0;
@@ -682,12 +710,15 @@ export function buildTrendReportViewModel({
     inputTokens += input;
     outputTokens += output;
     cachedInputTokens += cached;
-    if (fast) fastTokens += tokens;
+    if (tierClass === "fast") fastTokens += tokens;
+    else if (tierClass === "normal") normalTokens += tokens;
+    else unknownTokens += tokens;
 
     const modelRow = modelRowFor(models, model);
     modelRow.totalTokens += tokens;
-    if (fast) modelRow.fastTokens += tokens;
-    else modelRow.normalTokens += tokens;
+    if (tierClass === "fast") modelRow.fastTokens += tokens;
+    else if (tierClass === "normal") modelRow.normalTokens += tokens;
+    else modelRow.unknownTokens += tokens;
     modelRow.cacheInputTokens += input;
     modelRow.cachedInputTokens += cached;
     modelRow.estimated ||= estimated;
@@ -699,7 +730,7 @@ export function buildTrendReportViewModel({
       cached,
       callCount,
       model,
-      fast,
+      serviceTierClass: tierClass,
       estimated,
     };
     const dayRow = daily[dayIndexByString.get(localDateString(timestampMs, timeZone)) ?? -1];
@@ -878,11 +909,15 @@ export function buildTrendReportViewModel({
       cacheRatePercent:
         inputTokens > 0 ? (cachedInputTokens / inputTokens) * 100 : null,
       fastTokens,
+      normalTokens,
+      unknownTokens,
       fastEstimated: boundedEvents.some(
         ({ fast, tokens, event }) =>
           fast && tokens > 0 && event.rangeAllocationEstimated === true,
       ),
       fastSharePercent: totalTokens > 0 ? (fastTokens / totalTokens) * 100 : null,
+      unknownSharePercent:
+        totalTokens > 0 ? (unknownTokens / totalTokens) * 100 : null,
       activeProjects: allProjectRows.length,
       topFourProjectTokens,
       topFourProjectSharePercent:
@@ -929,6 +964,26 @@ export function buildTrendReportViewModel({
   return viewModel;
 }
 
+function modelRowsFor(row) {
+  if (row?.models instanceof Map) return [...row.models.values()];
+  return Array.isArray(row?.models) ? row.models : [];
+}
+
+function assertServiceTierBuckets(label, row) {
+  for (const field of ["normalTokens", "fastTokens", "unknownTokens"]) {
+    if (!Number.isFinite(row[field]) || row[field] < 0) {
+      throw new Error(
+        `Report reconciliation failed: ${label} ${field} is invalid`,
+      );
+    }
+  }
+  assertReconciles(
+    `${label} service-tier buckets must sum to total usage`,
+    row.normalTokens + row.fastTokens + row.unknownTokens,
+    row.totalTokens,
+  );
+}
+
 // Core reconciliation invariants from the report specification. A failure is
 // a calculation bug, never something to render around, so it throws with a
 // descriptive message.
@@ -945,6 +1000,25 @@ export function validateReportViewModel(viewModel) {
     models.reduce((sum, row) => sum + row.totalTokens, 0),
     summary.totalTokens,
   );
+  assertReconciles(
+    "model normal tokens must sum to overall normal tokens",
+    models.reduce((sum, row) => sum + row.normalTokens, 0),
+    summary.normalTokens,
+  );
+  assertReconciles(
+    "model fast tokens must sum to overall fast tokens",
+    models.reduce((sum, row) => sum + row.fastTokens, 0),
+    summary.fastTokens,
+  );
+  assertReconciles(
+    "model unknown tokens must sum to overall unknown tokens",
+    models.reduce((sum, row) => sum + row.unknownTokens, 0),
+    summary.unknownTokens,
+  );
+  assertServiceTierBuckets("summary", summary);
+  for (const row of models) {
+    assertServiceTierBuckets(`model ${row.model}`, row);
+  }
   assertReconciles(
     "project totals plus remainder must sum to total usage",
     projects.reduce((sum, row) => sum + row.totalTokens, 0) +
@@ -990,6 +1064,29 @@ export function validateReportViewModel(viewModel) {
       ),
       summary.fastTokens,
     );
+    assertReconciles(
+      "hourly normal tokens must sum to overall normal tokens",
+      hourly.reduce(
+        (sum, row) => sum + modelRowsFor(row)
+          .reduce((rowTotal, model) => rowTotal + model.normalTokens, 0),
+        0,
+      ),
+      summary.normalTokens,
+    );
+    assertReconciles(
+      "hourly unknown tokens must sum to overall unknown tokens",
+      hourly.reduce(
+        (sum, row) => sum + modelRowsFor(row)
+          .reduce((rowTotal, model) => rowTotal + model.unknownTokens, 0),
+        0,
+      ),
+      summary.unknownTokens,
+    );
+    for (const row of hourly) {
+      for (const model of modelRowsFor(row)) {
+        assertServiceTierBuckets(`hour ${row.startMs} model ${model.model}`, model);
+      }
+    }
   }
   assertReconciles(
     "model cache input must sum to overall input",
@@ -1011,6 +1108,16 @@ export function validateReportViewModel(viewModel) {
       "Report reconciliation failed: fast-mode tokens exceed total usage",
     );
   }
+  if (summary.normalTokens > summary.totalTokens) {
+    throw new Error(
+      "Report reconciliation failed: known normal tokens exceed total usage",
+    );
+  }
+  if (summary.unknownTokens > summary.totalTokens) {
+    throw new Error(
+      "Report reconciliation failed: unknown-tier tokens exceed total usage",
+    );
+  }
   for (const row of daily) {
     if (row.inputTokens > row.totalTokens) {
       throw new Error(
@@ -1021,6 +1128,9 @@ export function validateReportViewModel(viewModel) {
       throw new Error(
         `Report reconciliation failed: ${row.dateString} cached input exceeds its input`,
       );
+    }
+    for (const model of modelRowsFor(row)) {
+      assertServiceTierBuckets(`day ${row.dateString} model ${model.model}`, model);
     }
   }
   for (const row of models) {

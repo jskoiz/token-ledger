@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   buildUsageTrend,
+  normalizeQuotaTimeline,
   multiDayBounds,
 } from "../bin/token-ledger-trend.mjs";
 import {
@@ -194,4 +195,70 @@ test("terminal trend discloses allocated compacted values", () => {
 
   assert.match(terminal, /≈ marks allocated estimates/);
   assert.match(terminal, /■ Luna ≈/);
+});
+
+test("tiny daily segments retain model names and amounts outside the bars", () => {
+  const snapshot = snapshotOf([
+    usage({ timestamp: "2026-08-22T12:00:00Z", totalTokens: 1_000_000_000 }),
+    usage({ timestamp: "2026-08-23T12:00:00Z", model: "gpt-6-astra", totalTokens: 1_000 }),
+  ], [quota("2026-08-22T12:00:00Z", 91), quota("2026-08-23T12:00:00Z", 92)]);
+  for (const width of [900, 1280]) {
+    const report = renderTrendImage({
+      snapshot, bounds: multiDayBounds("2026-08-23", "UTC", 14), days: 14,
+      reportTimeMs: Date.parse(snapshot.generatedAt), options: { imageWidth: width },
+    });
+    const labels = [...report.matchAll(/<g data-role="small-segment-label"[^>]*>(.*?)<\/g>/gs)]
+      .map((match) => match[1]);
+    assert.ok(labels.some((label) => label.includes("Astra ") && label.includes("1.00K")));
+    assert.doesNotMatch(report, /NaN|Infinity/);
+    const astraLabel = labels.find((label) => label.includes("Astra "));
+    const calloutY = Number(astraLabel.match(/y="([\d.]+)"/)[1]);
+    const totalLabels = [...report.matchAll(/<g data-role="bar-total-label"[^>]*>(.*?)<\/g>/gs)];
+    const smallTotal = totalLabels.find((match) => match[1].includes(">1.00K</text>"));
+    assert.ok(smallTotal, "tiny bar retains its total");
+    const totalY = Number(smallTotal[1].match(/y="([\d.]+)"/)[1]);
+    assert.ok(totalY - calloutY >= 24, "callout stays above meter-adjusted total");
+  }
+});
+
+test("bar amounts scale to fit beneath model names", () => {
+  const snapshot = snapshotOf([
+    usage({ model: "gpt-5.6-sol", totalTokens: 1_870_000_000 }),
+    usage({ model: "gpt-5.6-luna", totalTokens: 954_000_000 }),
+  ]);
+  const report = renderTrendImage({
+    snapshot, bounds: multiDayBounds("2026-08-23", "UTC", 14), days: 14,
+    reportTimeMs: Date.parse(snapshot.generatedAt), options: { imageWidth: 1280 },
+  });
+  const labels = [...report.matchAll(/<g data-role="segment-label"[^>]*>(.*?)<\/g>/gs)]
+    .map((match) => match[1]);
+  for (const [model, amount] of [["Sol", "1.87B"], ["Luna", "954M"]]) {
+    assert.ok(labels.some((label) =>
+      label.includes(`>${model}</text>`) && label.includes(`>${amount}</text>`)));
+  }
+});
+
+
+test("old session timestamps cannot erase valid later quota windows", () => {
+  const reading = (timestamp, reset, usedPercent) => ({
+    timestamp, timestampMs: Date.parse(timestamp),
+    resetsAt: Date.parse(reset) / 1000, usedPercent,
+  });
+  const a = "2026-09-07T12:00:00Z";
+  const b = "2026-09-10T12:00:00Z";
+  const valid = [
+    reading("2026-08-31T12:00:00Z", a, 19),
+    reading("2026-09-01T12:00:00Z", a, 67),
+    reading("2026-09-02T12:00:00Z", a, 100),
+    reading("2026-09-03T12:00:00Z", b, 14),
+    reading("2026-09-04T12:00:00Z", b, 26),
+    reading("2026-09-05T12:00:00Z", b, 82),
+  ];
+  const contaminated = [
+    reading("2026-06-11T12:00:00Z", a, 0),
+    reading("2026-06-11T12:00:00Z", b, 0),
+    ...valid,
+  ];
+  assert.deepEqual(normalizeQuotaTimeline(contaminated), normalizeQuotaTimeline(valid));
+  assert.equal(normalizeQuotaTimeline(contaminated).length, valid.length);
 });

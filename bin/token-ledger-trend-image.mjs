@@ -493,11 +493,13 @@ function binDailyRows(daily, binSize) {
           totalTokens: 0,
           normalTokens: 0,
           fastTokens: 0,
+          unknownTokens: 0,
           estimated: false,
         };
         merged.totalTokens += dayModel.totalTokens;
         merged.normalTokens += dayModel.normalTokens;
         merged.fastTokens += dayModel.fastTokens;
+        merged.unknownTokens += dayModel.unknownTokens;
         merged.estimated ||= dayModel.estimated === true;
         models.set(dayModel.model, merged);
       }
@@ -688,31 +690,41 @@ export function renderTrendImage({
         : null,
     });
     const hasFast = summary.fastTokens > 0;
+    const hasUnknownTier = summary.unknownTokens > 0;
+    const confirmedFastShare = approximateLabel(
+      pct(summary.fastSharePercent),
+      summary.estimated,
+    );
+    const fastRateShare = hasFast &&
+        fastRates.effectiveMultiplier !== null &&
+        fastRates.unratedTokens === 0
+      ? ` · ${fastRates.effectiveMultiplier.toFixed(2)}× avg`
+      : "";
+    const unknownTierCaption = hasUnknownTier
+      ? `${approximateLabel(pct(summary.unknownSharePercent), summary.estimated)} unknown${
+          hasFast ? " · hatch=fast" : ""
+        }`
+      : null;
     cards.push({
       accent: FAST_MODE_LABEL_COLOR,
       label: "FAST MODE USAGE",
       value: approximateLabel(compact(summary.fastTokens), summary.fastEstimated),
       unit: "tokens",
-      sub: hasFast
-        ? {
-            text: `${approximateLabel(pct(summary.fastSharePercent), summary.estimated)} of usage${
-              fastRates.effectiveMultiplier === null
-                ? ""
-                : ` · ${fastRates.effectiveMultiplier.toFixed(2)}× avg`
-            }`,
-            color: COLORS.secondary,
-          }
-        : { text: "no fast-mode usage in range", color: COLORS.muted },
+      sub: {
+        text: `${confirmedFastShare} confirmed fast`,
+        optionalSuffix: fastRateShare,
+        color: hasFast || hasUnknownTier ? COLORS.secondary : COLORS.muted,
+      },
       bar: hasFast
         ? { fraction: summary.fastSharePercent / 100, fill: FAST_MODE_LABEL_COLOR }
         : null,
-      caption: hasFast
+      caption: unknownTierCaption ?? (hasFast
         ? fastRates.effectiveMultiplier === null
           ? "Fast credit rate: UNRATED"
           : fastRates.unratedTokens > 0
             ? "Some fast usage is unrated"
-            : "Fast mode shown with hatching"
-        : null,
+            : "Hatched = confirmed fast"
+        : null),
     });
     cards.push({
       accent: COLORS.secondary,
@@ -771,8 +783,12 @@ export function renderTrendImage({
     }
     if (card.sub) {
       const subWidth = innerWidth;
+      const fullSub = card.sub.text + (card.sub.optionalSuffix || "");
+      const subText = textWidth(fullSub, 11.5, card.sub.weight ?? 400) <= subWidth
+        ? fullSub
+        : card.sub.text;
       const subSize = fitTextSize(
-        card.sub.text,
+        subText,
         subWidth,
         12.5,
         11.5,
@@ -784,7 +800,7 @@ export function renderTrendImage({
         x: x + 16,
         y: subBaseline,
         value: truncateToWidth(
-          card.sub.text,
+          subText,
           subWidth,
           subSize,
           card.sub.weight ?? 400,
@@ -1100,6 +1116,7 @@ export function renderTrendImage({
     }
     const barY = top + 7;
     const barHeight = 14;
+    const unlabeledRows = [];
     let cursor = barLeft;
     const barWidth = Math.max(60, barRight - barLeft);
     rows.forEach((row, index) => {
@@ -1121,9 +1138,27 @@ export function renderTrendImage({
           anchor: "middle",
         }));
       }
+      if (!externalRows.includes(row) && textWidth(label, 10.5, 600) + 14 > segmentWidth) {
+        unlabeledRows.push(row);
+      }
       cursor += segmentWidth;
     });
-    return top + sectionHeight;
+    let captionX = barLeft;
+    let captionRow = 0;
+    for (const row of unlabeledRows) {
+      const label = segmentLabel(row);
+      const labelWidth = textWidth(label, 11, 500) + 24;
+      if (captionX > barLeft && captionX + labelWidth > contentRight - 16) {
+        captionX = barLeft;
+        captionRow += 1;
+      }
+      elements.push(svgText({
+        x: captionX, y: top + 38 + captionRow * 18, value: label,
+        fill: styleForModel(row.model), size: 11, weight: 500,
+      }));
+      captionX += labelWidth;
+    }
+    return top + sectionHeight + (unlabeledRows.length ? (captionRow + 1) * 18 : 0);
   }
 
   // ------------------------------------------------------------ daily chart
@@ -1184,6 +1219,23 @@ export function renderTrendImage({
     const plotHeight = wide ? 330 : 300;
     const plotBottom = plotTop + plotHeight;
     const partialInRange = bins.some((bin) => bin.partial);
+    const slotWidth = plotWidth / binCount;
+    const barWidth = Math.min(86, Math.max(MIN_BAR_WIDTH, slotWidth * 0.62));
+    const entriesForBin = (bin) => percentMode
+      ? [...bin.values.entries()]
+          .filter(([, value]) => value > 0)
+          .sort(([left], [right]) => modelSort(left, right))
+          .map(([model, value]) => ({ model, totalTokens: value, fastTokens: 0 }))
+      : [...bin.models].filter((entry) => entry.totalTokens > 0)
+          .sort((left, right) => modelSort(left.model, right.model));
+    const valueLabelFor = (entry) => percentMode
+      ? pct(entry.totalTokens)
+      : approximateLabel(compact(entry.totalTokens), entry.estimated);
+    const fitsInside = (entry) =>
+      (entry.totalTokens / ceiling) * plotHeight >= 20 &&
+      textWidth(entry.model, 12.5, 700) <= barWidth - 6;
+    const smallSegments = bins.map((bin) => bin.unobserved
+      ? [] : entriesForBin(bin).filter((entry) => !fitsInside(entry)));
     const labelBand = 58 + (partialInRange ? 18 : 0);
     const panelHeight = plotBottom - panelTop + labelBand;
     elements.push(svgRect(outer, panelTop, contentWidth, panelHeight, {
@@ -1366,8 +1418,6 @@ export function renderTrendImage({
     }
 
     // Bars.
-    const slotWidth = plotWidth / binCount;
-    const barWidth = Math.min(86, Math.max(MIN_BAR_WIDTH, slotWidth * 0.62));
     const labelStep = labelEvery(binCount);
     const peakBinIndex = hourlyMode && maxBin > 0
       ? bins.reduce(
@@ -1423,12 +1473,7 @@ export function renderTrendImage({
           fill: "rgba(255,255,255,.03)",
         }));
       }
-      const entries = percentMode
-        ? [...bin.values.entries()]
-            .filter(([, value]) => value > 0)
-            .sort(([left], [right]) => modelSort(left, right))
-            .map(([model, value]) => ({ model, totalTokens: value, fastTokens: 0 }))
-        : [...bin.models].sort((left, right) => modelSort(left.model, right.model));
+      const entries = entriesForBin(bin);
       let y = plotBottom;
       for (const entry of entries) {
         const value = entry.totalTokens;
@@ -1449,32 +1494,35 @@ export function renderTrendImage({
             fill: "url(#fast-mode-hatch)",
           }));
         }
-        const valueLabel = percentMode
-          ? pct(value)
-          : approximateLabel(compact(value), entry.estimated);
-        const fits = (text, size) => textWidth(text, size, 700) <= barWidth - 6;
-        if (segmentHeight >= 34 && fits(entry.model, 12.5) && fits(valueLabel, 14)) {
+        const valueLabel = valueLabelFor(entry);
+        if (fitsInside(entry)) {
           const segmentCenter = y + segmentHeight / 2;
+          const amountSize = Math.min(14,
+            14 * (barWidth - 6) / Math.max(1, textWidth(valueLabel, 14, 700)));
+          const showAmount = segmentHeight >= 34 && amountSize >= 9;
+          segmentLabels.push(`<g data-role="segment-label" data-bin="${binIndex}">`);
           segmentLabels.push(svgText({
             x: centerX,
-            y: segmentCenter - 4,
+            y: segmentCenter + (showAmount ? -4 : 4),
             value: entry.model,
             fill: COLORS.onFill,
             size: 12.5,
             anchor: "middle",
           }));
-          segmentLabels.push(svgText({
+          if (showAmount) segmentLabels.push(svgText({
             x: centerX,
             y: segmentCenter + 13,
             value: valueLabel,
             fill: "#ffffff",
-            size: 14,
+            size: amountSize,
             weight: 700,
             anchor: "middle",
           }));
+          segmentLabels.push("</g>");
         }
       }
       const total = binTotalOf(bin);
+      let totalLabelY = y - 9;
       if (total > 0 && isLabeledColumn(binIndex)) {
         const estimatedPrefix = (percentMode ? bin.approximate : bin.estimated) ? "≈" : "";
         const labelValue = percentMode
@@ -1506,6 +1554,7 @@ export function renderTrendImage({
         const labelY = placement.placement.startsWith("reset-")
           ? Math.max(plotTop + 40, lineSafeLabelY)
           : lineSafeLabelY;
+        totalLabelY = labelY;
         segmentLabels.push(
           `<g data-role="bar-total-label" data-placement="${placement.placement}"${placement.placement.startsWith("reset-") ? ' data-clearance="reset-marker"' : ""}>${svgText({
             x: placement.x,
@@ -1516,6 +1565,33 @@ export function renderTrendImage({
             anchor: placement.anchor,
           })}</g>`,
         );
+      }
+      // Low-volume columns have room above them for a compact callout;
+      // keep the date axis clear and connect the callout to its actual bar.
+      if (total > 0 && (total / ceiling) * plotHeight < 100) {
+        const details = smallSegments[binIndex]
+          .filter((entry) => entry.totalTokens / total >= 0.05)
+          .sort((left, right) => right.totalTokens - left.totalTokens);
+        const rowHeight = 16;
+        const calloutBottom = totalLabelY - 25;
+        if (details.length) {
+          elements.push(svgLine(centerX, calloutBottom + 5, centerX, totalLabelY - 13, {
+            stroke: COLORS.muted, "stroke-width": 1,
+          }));
+        }
+        details.forEach((entry, rowIndex) => {
+          const label = `${entry.model} ${valueLabelFor(entry)}`;
+          const labelSize = Math.min(10.5, 10.5 * (slotWidth - 6) /
+            Math.max(1, textWidth(label, 10.5, 600)));
+          elements.push(`<g data-role="small-segment-label" data-bin="${binIndex}">`);
+          elements.push(svgText({
+            x: centerX,
+            y: calloutBottom - (details.length - rowIndex - 1) * rowHeight,
+            value: label, fill: styleForModel(entry.model), size: labelSize,
+            weight: 600, anchor: "middle",
+          }));
+          elements.push("</g>");
+        });
       }
       // Day labels.
       if (isDateLabeledColumn(binIndex)) {

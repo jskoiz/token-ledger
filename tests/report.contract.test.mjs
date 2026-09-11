@@ -515,7 +515,10 @@ test("cache efficiency is input-weighted and fast mode remains a total subset", 
   assert.ok(vm.summary.fastTokens <= vm.summary.totalTokens);
   for (const row of vm.models) {
     assert.ok(row.fastTokens <= row.totalTokens);
-    assert.equal(row.normalTokens + row.fastTokens, row.totalTokens);
+    assert.equal(
+      row.normalTokens + row.fastTokens + row.unknownTokens,
+      row.totalTokens,
+    );
   }
 });
 
@@ -690,7 +693,7 @@ test("meter observations and line segments stop at the latest observation", () =
 });
 
 test("meter pace and attribution use a compacted reading's last-seen time", () => {
-  const activeReset = resetAt(30);
+  const activeReset = resetAt(29);
   const observations = [
     quota(22, 2, 10, activeReset, null, timestamp(22, 8)),
     quota(23, 2, 40, activeReset, null, timestamp(23, 8)),
@@ -869,8 +872,8 @@ test("bar total labels move clear of restart marker lines", () => {
     snapshot: snapshotOf(
       [usage(20, 12, { totalTokens: 3_000_000_000 })],
       [
-        quota(19, 8, 70, resetAt(26, 22)),
-        quota(19, 9, 71, resetAt(26, 22)),
+        quota(19, 8, 70, resetAt(26, 8)),
+        quota(19, 9, 71, resetAt(26, 8)),
         quota(20, 12, 5, resetAt(27, 22)),
         quota(20, 13, 6, resetAt(27, 22)),
       ],

@@ -165,6 +165,13 @@ export function weeklyQuotaObservations(snapshot = {}) {
 // stale readings from sessions still reporting a superseded window would
 // otherwise be fused into one line, producing meter drain that never happened.
 export function normalizeQuotaTimeline(observations) {
+  // Some source logs stamp new quota payloads with an old session timestamp.
+  // A weekly reading cannot precede its own window. Such an anchor would
+  // reorder entire epochs and suppress otherwise valid subsequent readings.
+  observations = observations.filter((observation) =>
+    observation.timestampMs >=
+      (observation.resetsAt - WEEK_MINUTES * 60 - RESET_JITTER_SECONDS) * 1_000,
+  );
   if (!observations.length) return [];
 
   const epochs = [];

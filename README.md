@@ -101,9 +101,11 @@ readings, dashed runs bridge unobserved gaps, and the line never extends past
 the latest reading. When the report is generated partway
 through the final day, that column is marked `PARTIAL` with the actual cutoff
 time, and the prior-period delta compares an equally long partial window.
-Values allocated from compacted history are marked with `≈`; unmarked values
-come from exact event data. Reports built from an explicit or stale snapshot
-say `Snapshot generated …` (with a `STALE SNAPSHOT` badge on fallback).
+Values allocated from compacted history or placed using an estimated event
+time are marked with `≈`. Splitting usage between meter readings does not by
+itself make the daily token total approximate. Reports built from an explicit
+or stale snapshot say `Snapshot generated …` (with a `STALE SNAPSHOT` badge on
+fallback).
 Detailed source and integrity diagnostics remain in the generated snapshot's
 coverage metadata.
 
@@ -115,6 +117,12 @@ Turns run in fast mode (service tiers "priority" and "fast") are drawn with a
 diagonal hatch inside their model's segment — fast mode is a property of usage,
 not a separate model, so the hatch never adds bar height and stays legible in
 grayscale.
+
+The fast-mode KPI counts only usage explicitly recorded as `priority` or
+`fast`. Missing or unrecognized service tiers are shown separately as unknown;
+they are included in total usage but cannot be classified as fast or normal.
+Input and cache metrics use only records with the necessary component counts.
+Total-only records still contribute their reported tokens to total usage.
 
 Pass `--drain` to flip the columns into limit-drain units instead: each column
 becomes the weekly limit percentage the meter dropped, stacked by model using
@@ -208,6 +216,12 @@ history. Refreshes scan both `sessions` and `archived_sessions`; a source that
 is removed is recorded as missing or tombstoned, and its committed observations
 remain available. A file replacement or truncation is recorded as a mutable
 source change and does not re-add earlier observations.
+
+When a token event is timestamped before its own recorded turn began, refresh
+can use the turn's time as an estimated placement and retain the original
+timestamp as provenance. The same repair applies to previously stored events.
+This changes their date attribution, not their token counts; it cannot recover
+the exact event time from a malformed source record.
 
 Exact observations are retained for 3,650 days. Older observations are
 compacted into UTC daily buckets with additive totals and source membership;

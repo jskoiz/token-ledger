@@ -9,12 +9,21 @@
   and the default output filename ends in `-private.png`.
 - Recognize Astra in usage reports. Models without bundled prices remain
   explicitly unrated in purchased-credit and API-equivalent estimates.
+- Keep model names and token amounts readable in narrow bars, with floating
+  labels for small segments and captions for small model-mix shares.
+- Show unrecorded fast-mode status separately from confirmed fast usage.
 
 ## Correctness and reliability
 
 - Allocate compacted usage across local calendar and hourly boundaries, retain
   persisted call counts, and compare equivalent partial reporting periods.
 - Keep report cutoffs fixed during collection and disclose allocated estimates.
+- Repair token timestamps that precede their own recorded turn, preserve token
+  totals, and mark the replacement time as estimated.
+- Reject impossible quota-window timestamps so valid meter history remains
+  visible, and keep meter attribution separate from daily token precision.
+- Correct detailed-call coverage for total-only records while retaining valid
+  partial coverage in compacted history.
 - Preserve competing snapshot replacements during publication checks.
 - Redact local project paths during legacy migration and report materialization,
   and redact local paths in CLI and collector diagnostics.
