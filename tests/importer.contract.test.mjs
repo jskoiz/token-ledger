@@ -172,6 +172,34 @@ test("model switches retain each call's model and count copied readings once", a
   }
 });
 
+test("non-original turns retain observation models and prices through durable reuse", async () => {
+  const root = await createHome();
+  try {
+    const starts = turnStart("2026-08-18T10:00:10.000Z", "copied-turn", "gpt-6-sol");
+    // A replayed turn's outer timestamp is later than its recorded start.
+    starts[0].payload.started_at = Date.parse("2026-08-18T10:00:00.000Z") / 1_000;
+    await writeRollout(root, [
+      ...starts,
+      tokenCount("2026-08-18T10:00:11.000Z", 100),
+      { timestamp: "2026-08-18T10:00:12.000Z", type: "turn_context",
+        payload: { turn_id: "copied-turn", model: "gpt-6.1-sol", effort: "high" } },
+      tokenCount("2026-08-18T10:00:13.000Z", 200, 100),
+    ]);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const snapshot = await collectUsage(collectionOptions(root));
+      assert.equal(snapshot.coverage.observedTokens, 200);
+      assert.equal(snapshot.coverage.observedModelCalls, 2);
+      assert.equal(snapshot.coverage.filesReused, attempt);
+      const calls = snapshot.events.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+      assert.deepEqual(calls.map((row) => row.model), ["gpt-6-sol", "gpt-6.1-sol"]);
+      assert.deepEqual(calls.map((row) => row.rateCardModel), ["gpt-6-sol", "gpt-6.1-sol"]);
+      assert.deepEqual(calls.map((row) => row.rateCardCredits), [0.00655, 0.006525]);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("cache-reused durable history rebuilds model labels and old credit estimates", async () => {
   const root = await createHome();
   try {

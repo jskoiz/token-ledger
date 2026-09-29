@@ -256,6 +256,28 @@ test("cost coverage marks missing speed assumptions for credits and API USD", as
   });
 });
 
+test("API cost output sums unrated reasons by their own token counts", async () => {
+  await inTemp("token-ledger-cli-unrated-reasons-", async (root) => {
+    const snapshotPath = await writeSnapshot(root, [[50, 25], [30, 10]].map(([cachedInputTokens, cacheWriteInputTokens], index) => ({
+      ...makeEvent({
+        id: `unrated-${index}`, timestamp: "2026-08-20T10:00:00Z",
+        project: "unrated reasons", threadId: `unrated-thread-${index}`,
+        model: "gpt-5.5-pro", totalTokens: 100, cachedInputTokens,
+      }),
+      cacheWriteInputTokens, serviceTier: "standard",
+    })));
+    const result = runCli([
+      "cost", "week", "--date", "2026-08-20", "--basis", "api-usd",
+      "--input", snapshotPath, "--no-refresh", "--static", "--plain", "--tz", "UTC",
+    ]);
+    assertExit(result);
+    assert.match(result.stdout, /Unrated tokens: 115/);
+    assert.match(result.stdout, /unsupported-cached-input-price \(80 tokens\)/);
+    assert.match(result.stdout, /unsupported-cache-write-price \(35 tokens\)/);
+    assert.match(result.stdout, /Rated token coverage: 42\.5%/);
+  });
+});
+
 test("non-image CLI paths keep the image renderer and Sharp graph lazy", async () => {
   await inTemp("token-ledger-cli-lazy-", async (root) => {
     const timestamp = new Date(Date.now() - 2 * 60 * 60 * 1_000).toISOString();

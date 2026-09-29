@@ -90,18 +90,21 @@ function eventEstimate(event, basis) {
   });
   const totalTokens = nonNegative(event?.totalTokens);
   if (amount === null) {
+    const reason = creditReason(event);
     return {
       amount: null,
       ratedTokens: 0,
       unratedTokens: totalTokens,
+      unratedTokensByReason: { [reason]: totalTokens },
       assumedStandardTokens: 0,
-      reasons: [creditReason(event)],
+      reasons: [reason],
     };
   }
   return {
     amount,
     ratedTokens: totalTokens,
     unratedTokens: 0,
+    unratedTokensByReason: {},
     assumedStandardTokens: isMissingServiceTier(event?.serviceTier) ? totalTokens : 0,
     reasons: [],
   };
@@ -149,8 +152,8 @@ function aggregate(events, basis) {
       amount += estimate.amount;
       amountKnown = true;
     }
-    for (const reason of estimate.reasons) {
-      reasons.set(reason, (reasons.get(reason) ?? 0) + estimate.unratedTokens);
+    for (const [reason, tokens] of Object.entries(estimate.unratedTokensByReason)) {
+      reasons.set(reason, (reasons.get(reason) ?? 0) + tokens);
     }
     models.set(key, row);
   }

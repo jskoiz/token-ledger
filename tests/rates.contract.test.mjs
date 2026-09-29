@@ -165,6 +165,21 @@ test("missing cache prices are partial coverage and old Cyber cache writes remai
   assert.deepEqual(pro.reasons, ["unsupported-cached-input-price"]);
 });
 
+test("unsupported-price reasons retain each unrated token partition", () => {
+  const estimate = apiUsdForUsage({ ...USAGE, model: "gpt-5.5-pro", serviceTier: "standard" });
+  assert.equal(estimate.unratedTokens, 75_000);
+  assert.deepEqual(estimate.unratedTokensByReason, {
+    "unsupported-cached-input-price": 50_000,
+    "unsupported-cache-write-price": 25_000,
+  });
+  assert.equal(Object.values(estimate.unratedTokensByReason).reduce((sum, count) => sum + count, 0),
+    estimate.unratedTokens);
+  const unknown = apiUsdForUsage({ ...USAGE, model: "unknown-model" });
+  assert.deepEqual(unknown.unratedTokensByReason, { "unknown-model": USAGE.totalTokens });
+  const rated = apiUsdForUsage({ ...USAGE, model: "gpt-6-astra", serviceTier: "standard" });
+  assert.deepEqual(rated.unratedTokensByReason, {});
+});
+
 test("Rosalind API estimates respect the published billing start date", () => {
   const usage = { ...USAGE, cacheWriteInputTokens: 0, model: "gpt-rosalind-research" };
   assert.equal(apiUsdForUsage({ ...usage, timestamp: "2026-09-29T12:00:00Z" }).amount, 0);
