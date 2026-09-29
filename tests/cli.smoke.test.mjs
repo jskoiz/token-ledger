@@ -204,6 +204,58 @@ test("invalid arguments are table-driven, short, and actionable", () => {
   }
 });
 
+test("cost output retains current model generations and reports unpriced tokens", async () => {
+  await inTemp("token-ledger-cli-current-models-", async (root) => {
+    const models = ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-6-astra", "gpt-reserve"];
+    const snapshotPath = await writeSnapshot(root, models.map((model, index) =>
+      makeEvent({
+        id: `model-${index}`, timestamp: "2026-08-20T10:00:00Z",
+        project: "current models", threadId: `thread-${index}`,
+        model, totalTokens: 1_000,
+      })));
+    for (const basis of ["codex-credits", "api-usd"]) {
+      const result = runCli([
+        "cost", "week", "--date", "2026-08-20", "--basis", basis,
+        "--input", snapshotPath, "--no-refresh", "--static", "--plain", "--tz", "UTC",
+      ]);
+      assertExit(result);
+      for (const label of ["GPT-6.1 Sol", "GPT-6 Sol", "GPT-6 Luna", "GPT-6 Astra", "gpt-reserve"]) {
+        assert.ok(result.stdout.includes(label), label);
+      }
+      assert.match(result.stdout, /80\.0%/);
+      assert.match(result.stdout, /unknown-model \(1\.0K tokens\)/);
+    }
+  });
+});
+
+test("cost coverage marks missing speed assumptions for credits and API USD", async () => {
+  await inTemp("token-ledger-cli-speed-assumptions-", async (root) => {
+    const event = makeEvent({
+      id: "speed-assumption", timestamp: "2026-08-20T10:00:00Z",
+      project: "speed assumptions", threadId: "speed-thread",
+      model: "gpt-6-astra", totalTokens: 1_000,
+    });
+    for (const serviceTier of [null, "standard"]) {
+      const snapshotPath = await writeSnapshot(root, [{ ...event, serviceTier }]);
+      for (const basis of ["codex-credits", "api-usd"]) {
+        const result = runCli([
+          "cost", "week", "--date", "2026-08-20", "--basis", basis,
+          "--input", snapshotPath, "--no-refresh", "--static", "--plain", "--tz", "UTC",
+        ]);
+        assertExit(result);
+        if (serviceTier === null) {
+          assert.match(result.stdout, /GPT-6 Astra[^\n]+100\.0%\*/);
+          assert.match(result.stdout, /Rated token coverage: 100\.0%\*/);
+          assert.match(result.stdout, /Speed tier missing: Standard prices assumed for 1\.0K tokens \(100\.0% of usage\)/);
+        } else {
+          assert.match(result.stdout, /Rated token coverage: 100\.0%\n/);
+          assert.doesNotMatch(result.stdout, /Standard prices assumed|100\.0%\*/);
+        }
+      }
+    }
+  });
+});
+
 test("non-image CLI paths keep the image renderer and Sharp graph lazy", async () => {
   await inTemp("token-ledger-cli-lazy-", async (root) => {
     const timestamp = new Date(Date.now() - 2 * 60 * 60 * 1_000).toISOString();

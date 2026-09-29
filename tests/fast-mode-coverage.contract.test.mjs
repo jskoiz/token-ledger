@@ -134,10 +134,28 @@ test("fast-mode KPI omits unknown-tier disclosure when every tier is known", () 
   assert.doesNotMatch(image, /tier unknown/);
 });
 
+test("Ultrafast is confirmed accelerated usage with its own credit multiplier", () => {
+  const events = [
+    usage(1, 200, "ultrafast", "gpt-6-astra"),
+    usage(2, 800, "default", "gpt-6-astra"),
+  ];
+  const report = buildReport(events);
+  assert.equal(report.summary.totalTokens, 1_000);
+  assert.equal(report.summary.fastTokens, 200);
+  assert.equal(report.summary.unknownTokens, 0);
+  const image = renderTrendImage({
+    snapshot: snapshotOf(events), bounds, days: 7,
+    options: { imageWidth: 900 }, reportTimeMs: bounds.end.getTime(),
+    sourceStatus: "verified-current",
+  });
+  assert.match(image, /20\.0% confirmed fast/);
+  assert.match(image, /6\.00× avg/);
+});
+
 test("fast-mode KPI does not show an unqualified average when fast rates are incomplete", () => {
   const events = [
     usage(1, 200, "fast"),
-    usage(2, 100, "fast", "gpt-daybreak-blue-latest"),
+    usage(2, 100, "fast", "gpt-future-unknown"),
     usage(3, 700, "default"),
   ];
   const image = renderTrendImage({

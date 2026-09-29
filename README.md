@@ -113,13 +113,14 @@ When run from a terminal, the finished PNG opens in the default image viewer
 automatically so the report lands on screen instead of in a file browser.
 Pass `--no-open` to skip that; piped or scripted runs never open a window.
 
-Turns run in fast mode (service tiers "priority" and "fast") are drawn with a
-diagonal hatch inside their model's segment — fast mode is a property of usage,
+Turns run in Fast or Ultrafast mode are drawn with a
+diagonal hatch inside their model's segment. Fast mode is a property of usage,
 not a separate model, so the hatch never adds bar height and stays legible in
 grayscale.
 
-The fast-mode KPI counts only usage explicitly recorded as `priority` or
-`fast`. Missing or unrecognized service tiers are shown separately as unknown;
+The fast-mode KPI counts only usage explicitly recorded as `priority`, `fast`, or
+`ultrafast`. Ultrafast is included in the fast hatch and uses its own purchased-credit
+rate. Missing or unfamiliar speed tiers are shown separately as unknown;
 they are included in total usage but cannot be classified as fast or normal.
 Input and cache metrics use only records with the necessary component counts.
 Total-only records still contribute their reported tokens to total usage.
@@ -151,9 +152,36 @@ legible and falls back to the same readable multi-day binning for longer
 windows. Meter-drain weighting uses the rate card bundled with this release;
 subscription limits are not billed per token.
 
-Models without a bundled price remain explicitly unrated in cost estimates.
-Astra is recognized in usage reports but is unrated in this release's
-purchased-credit and API-dollar estimates.
+The bundled rates were verified on September 29, 2026 against the official
+[Codex credit rates](https://learn.chatgpt.com/docs/pricing#token-rates) and
+[OpenAI API prices](https://developers.openai.com/api/docs/pricing). They include
+GPT-6.1 Sol, GPT-6 Astra, GPT-6 Sol, GPT-6 Luna, the GPT-5.6 family, and the
+current Daybreak aliases. Cost tables retain the exact model generation even
+when charts group models into Sol, Luna, or Astra families.
+
+Purchased-credit estimates use 2x for Fast and 6x for Astra Ultrafast. These
+are separate from included subscription limits, whose speed multipliers differ.
+API estimates use the published price for each supported model and service
+tier, including cache writes and the full-request surcharge above 272,000
+input tokens where applicable. Cache reads and writes are subsets of input;
+reasoning is a subset of output, so neither is added again to token totals.
+Compacted records that cannot establish a per-request long-context price remain
+explicitly unrated.
+
+Cost estimates use Standard prices when a record has no speed tier. An asterisk
+beside coverage marks these assumptions, and the report states how many tokens
+use an assumed price. Explicit but unsupported tiers remain unrated. Rosalind
+records that span its October 5 API billing start remain unrated, including
+fragments allocated from an aggregate spanning that date.
+
+All model identifiers contribute to usage totals. Models without a bundled
+price, including Reserve and Auto Review, remain explicitly unrated in cost
+estimates. Image, audio, and realtime prices require modality or duration
+details absent from local Codex token records, so those charges are excluded.
+The CLI uses current bundled prices for its estimates, including historical
+events; it does not reconstruct historical invoices or account-wide usage.
+Automatic loads rebuild snapshots from an older bundled rate card, while
+`--input` and `--no-refresh` continue to use the selected snapshot.
 
 The CLI checks the local Codex source manifest on every automatic load. If it
 differs from the cached watermark, the CLI rebuilds the privacy-reduced

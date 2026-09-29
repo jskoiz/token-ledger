@@ -6,6 +6,7 @@ import {
   calculateCodexPurchasedCredits,
   codexCreditMultiplier,
   hasDetailedTokenBreakdown,
+  isMissingServiceTier,
   normalizeCodexCreditModel,
 } from "../lib/token-ledger-rates.mjs";
 import { sanitizeTerminalText } from "../lib/token-ledger-terminal-text.mjs";
@@ -40,6 +41,9 @@ function modelLabel(model) {
   const normalized = normalizeCodexCreditModel(model);
   const labels = {
     "gpt-6-astra": "GPT-6 Astra",
+    "gpt-6.1-sol": "GPT-6.1 Sol",
+    "gpt-6-sol": "GPT-6 Sol",
+    "gpt-6-luna": "GPT-6 Luna",
     "gpt-5.6-sol": "GPT-5.6 Sol",
     "gpt-5.6-terra": "GPT-5.6 Terra",
     "gpt-5.6-luna": "GPT-5.6 Luna",
@@ -50,11 +54,10 @@ function modelLabel(model) {
     "gpt-5.4-mini": "GPT-5.4 mini",
     "gpt-5.3-codex": "GPT-5.3 Codex",
     "gpt-5.2": "GPT-5.2",
+    "gpt-rosalind-research": "GPT-Rosalind Research",
   };
   const label = sanitizeTerminalText(
-    normalized.includes("astra")
-      ? "GPT-6 Astra"
-      : labels[normalized] ?? String(model ?? "Unknown model"),
+    labels[normalized] ?? String(model ?? "Unknown model"),
   );
   return label.length > MODEL_LABEL_MAX_WIDTH
     ? `${label.slice(0, MODEL_LABEL_MAX_WIDTH - 1)}…`
@@ -65,7 +68,7 @@ function creditReason(event) {
   const model = normalizeCodexCreditModel(
     event?.rateCardModel ?? event?.model,
   );
-  if (!CODEX_CREDIT_RATE_CARD[model]) return "unknown-model";
+  if (!Object.hasOwn(CODEX_CREDIT_RATE_CARD, model)) return "unknown-model";
   if (!hasDetailedTokenBreakdown(event)) return "incomplete-token-breakdown";
   if (
     codexCreditMultiplier(
@@ -73,7 +76,7 @@ function creditReason(event) {
       event?.serviceTier,
     ) === null
   ) {
-    return "unsupported-credit-fast-tier";
+    return "unsupported-credit-service-tier";
   }
   return "unrated-credit-usage";
 }
@@ -91,6 +94,7 @@ function eventEstimate(event, basis) {
       amount: null,
       ratedTokens: 0,
       unratedTokens: totalTokens,
+      assumedStandardTokens: 0,
       reasons: [creditReason(event)],
     };
   }
@@ -98,6 +102,7 @@ function eventEstimate(event, basis) {
     amount,
     ratedTokens: totalTokens,
     unratedTokens: 0,
+    assumedStandardTokens: isMissingServiceTier(event?.serviceTier) ? totalTokens : 0,
     reasons: [],
   };
 }
@@ -109,11 +114,13 @@ function aggregate(events, basis) {
   let amountKnown = false;
   let ratedTokens = 0;
   let unratedTokens = 0;
+  let assumedStandardTokens = 0;
 
   for (const event of events) {
-    const key = normalizeCodexCreditModel(event?.model);
+    const rateModel = event?.rateCardModel ?? event?.model;
+    const key = normalizeCodexCreditModel(rateModel);
     const row = models.get(key) ?? {
-      model: modelLabel(event?.model),
+      model: modelLabel(rateModel),
       inputTokens: 0,
       cachedInputTokens: 0,
       outputTokens: 0,
@@ -121,6 +128,7 @@ function aggregate(events, basis) {
       amountKnown: false,
       ratedTokens: 0,
       unratedTokens: 0,
+      assumedStandardTokens: 0,
     };
     row.inputTokens += nonNegative(event?.inputTokens);
     row.cachedInputTokens += Math.min(
@@ -133,6 +141,8 @@ function aggregate(events, basis) {
     row.unratedTokens += estimate.unratedTokens;
     ratedTokens += estimate.ratedTokens;
     unratedTokens += estimate.unratedTokens;
+    row.assumedStandardTokens += estimate.assumedStandardTokens;
+    assumedStandardTokens += estimate.assumedStandardTokens;
     if (estimate.amount !== null) {
       row.amount += estimate.amount;
       row.amountKnown = true;
@@ -152,6 +162,7 @@ function aggregate(events, basis) {
     amount: amountKnown ? amount : null,
     ratedTokens,
     unratedTokens,
+    assumedStandardTokens,
     reasons,
   };
 }
@@ -195,7 +206,7 @@ export function renderCostTerminal({
       pad(compact(row.cachedInputTokens), 9, "right"),
       pad(compact(row.outputTokens), 9, "right"),
       pad(formatAmount(row.amountKnown ? row.amount : null, basis), 16, "right"),
-      pad(percent(row.ratedTokens, rowTokens), 9, "right"),
+      pad(`${percent(row.ratedTokens, rowTokens)}${row.assumedStandardTokens > 0 ? "*" : ""}`, 9, "right"),
     ].join("  ");
   });
   const totalTokens = report.ratedTokens + report.unratedTokens;
@@ -225,7 +236,10 @@ export function renderCostTerminal({
     ...rows,
     "",
     `Total rated amount: ${formatAmount(report.amount, basis)}`,
-    `Rated token coverage: ${percent(report.ratedTokens, totalTokens)}`,
+    `Rated token coverage: ${percent(report.ratedTokens, totalTokens)}${report.assumedStandardTokens > 0 ? "*" : ""}`,
+    ...(report.assumedStandardTokens > 0 ? [
+      `* Speed tier missing: Standard prices assumed for ${compact(report.assumedStandardTokens)} tokens (${percent(report.assumedStandardTokens, totalTokens)} of usage).`,
+    ] : []),
     `Unrated tokens: ${compact(report.unratedTokens)}`,
     `Rate card as of: ${cardDate}`,
     `Reasons: ${reasonLines.length > 0 ? reasonLines.join(", ") : "none"}`,
