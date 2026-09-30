@@ -26,6 +26,9 @@ import {
   SNAPSHOT_SCHEMA_VERSION,
   usageBucketStats,
 } from "../lib/token-ledger-usage.mjs";
+import { resolveDurableLedgerPath } from "../lib/token-ledger-ledger.mjs";
+import { writePrivateSnapshot } from "../lib/token-ledger-snapshot.mjs";
+import { loadSnapshot, parseArgs } from "../bin/token-ledger.mjs";
 
 const THREAD_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
@@ -137,6 +140,124 @@ function collectionOptions(root, overrides = {}) {
     ...overrides,
   };
 }
+
+test("model switches retain each call's model and count copied readings once", async () => {
+  const root = await createHome();
+  const timestamp = "2026-08-18T10:00:00.000Z";
+  try {
+    const first = tokenCount("2026-08-18T10:00:01.000Z", 100);
+    await writeRollout(root, [
+      ...turnStart(timestamp, "turn-switch", "gpt-6-sol"),
+      first,
+      first,
+      { timestamp: "2026-08-18T10:00:02.000Z", type: "turn_context",
+        payload: { turn_id: "turn-switch", model: "gpt-6.1-sol", effort: "high" } },
+      tokenCount("2026-08-18T10:00:03.000Z", 200, 100),
+      ...turnStart("2026-08-18T10:01:00.000Z", "turn-unpriced", "gpt-reserve"),
+      tokenCount("2026-08-18T10:01:01.000Z", 300, 100),
+    ]);
+    const options = collectionOptions(root);
+    for (const collect of [collectUsage, collectUsage]) {
+      const snapshot = await collect(options);
+      assert.equal(snapshot.coverage.observedTokens, 300);
+      assert.equal(snapshot.coverage.observedModelCalls, 3);
+      assert.deepEqual(snapshot.events.map((row) => row.model).sort(),
+        ["gpt-6-sol", "gpt-6.1-sol", "gpt-reserve"].sort());
+      const reserve = snapshot.events.find((row) => row.model === "gpt-reserve");
+      assert.equal(reserve.totalTokens, 100);
+      assert.equal(reserve.rateCardCredits, null);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("non-original turns retain observation models and prices through durable reuse", async () => {
+  const root = await createHome();
+  try {
+    const starts = turnStart("2026-08-18T10:00:10.000Z", "copied-turn", "gpt-6-sol");
+    // A replayed turn's outer timestamp is later than its recorded start.
+    starts[0].payload.started_at = Date.parse("2026-08-18T10:00:00.000Z") / 1_000;
+    await writeRollout(root, [
+      ...starts,
+      tokenCount("2026-08-18T10:00:11.000Z", 100),
+      { timestamp: "2026-08-18T10:00:12.000Z", type: "turn_context",
+        payload: { turn_id: "copied-turn", model: "gpt-6.1-sol", effort: "high" } },
+      tokenCount("2026-08-18T10:00:13.000Z", 200, 100),
+    ]);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const snapshot = await collectUsage(collectionOptions(root));
+      assert.equal(snapshot.coverage.observedTokens, 200);
+      assert.equal(snapshot.coverage.observedModelCalls, 2);
+      assert.equal(snapshot.coverage.filesReused, attempt);
+      const calls = snapshot.events.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+      assert.deepEqual(calls.map((row) => row.model), ["gpt-6-sol", "gpt-6.1-sol"]);
+      assert.deepEqual(calls.map((row) => row.rateCardModel), ["gpt-6-sol", "gpt-6.1-sol"]);
+      assert.deepEqual(calls.map((row) => row.rateCardCredits), [0.00655, 0.006525]);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("cache-reused durable history rebuilds model labels and old credit estimates", async () => {
+  const root = await createHome();
+  try {
+    await writeRollout(root, [
+      ...turnStart("2026-08-18T10:00:00.000Z", "turn-1", "gpt-6.1-sol"),
+      tokenCount("2026-08-18T10:00:01.000Z", 100),
+    ]);
+    const options = collectionOptions(root);
+    const first = await collectUsage(options);
+    const expectedCredits = first.events[0].rateCardCredits;
+    const database = new DatabaseSync(resolveDurableLedgerPath(options));
+    try {
+      database.exec("UPDATE usage_observations SET display_model = 'gpt-5.5', rate_card_credits = 999");
+    } finally {
+      database.close();
+    }
+    const current = await collectUsage(options);
+    assert.equal(current.coverage.filesReused, 1);
+    assert.equal(current.coverage.observedTokens, 100);
+    assert.equal(current.events[0].model, "gpt-6.1-sol");
+    assert.equal(current.events[0].rateCardCredits, expectedCredits);
+    assert.equal(current.provenance.rateCardAsOf, "2026-09-29");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("automatic loads refresh older rate cards while explicit and no-refresh loads stay selected", async () => {
+  const root = await createHome();
+  try {
+    await writeRollout(root, [
+      ...turnStart("2026-08-18T10:00:00.000Z", "turn-1", "gpt-6.1-sol"),
+      tokenCount("2026-08-18T10:00:01.000Z", 100),
+    ]);
+    const options = collectionOptions(root);
+    const snapshot = await collectUsage(options);
+    snapshot.provenance.rateCardAsOf = "2026-08-23";
+    snapshot.events[0].model = "gpt-5.5";
+    snapshot.events[0].rateCardCredits = 999;
+    await writePrivateSnapshot(options.output, snapshot);
+    const args = parseArgs([
+      "day", "2026-08-18", "--input", options.output, "--codex-home", root,
+      "--static", "--plain", "--tz", "UTC",
+    ]);
+    assert.equal((await loadSnapshot(args)).snapshot.provenance.rateCardAsOf, "2026-08-23");
+    assert.equal((await loadSnapshot({
+      ...args, inputExplicit: false, autoRefresh: false,
+    })).snapshot.provenance.rateCardAsOf, "2026-08-23");
+    const loaded = await loadSnapshot({ ...args, inputExplicit: false, autoRefresh: true });
+    assert.equal(loaded.snapshot.provenance.rateCardAsOf, "2026-09-29");
+    assert.equal(loaded.snapshot.events[0].model, "gpt-6.1-sol");
+    assert.ok(loaded.snapshot.events[0].rateCardCredits < 999);
+    assert.equal(loaded.snapshot.coverage.filesReused, 1);
+    assert.equal(loaded.snapshot.coverage.observedTokens, 100);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("collects a rollout into a private-shaped snapshot and exposes source watermarks", async () => {
   const root = await createHome();

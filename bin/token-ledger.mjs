@@ -61,7 +61,10 @@ import {
   usageCallCount,
   usageThreadIds,
 } from "../lib/token-ledger-usage.mjs";
-import { calculateCodexPurchasedCredits } from "../lib/token-ledger-rates.mjs";
+import {
+  calculateCodexPurchasedCredits,
+  CODEX_CREDIT_RATE_CARD_AS_OF,
+} from "../lib/token-ledger-rates.mjs";
 import { sanitizeTerminalText } from "../lib/token-ledger-terminal-text.mjs";
 import {
   QUOTA_IDENTITY_CONTRACT_VERSION,
@@ -1456,6 +1459,13 @@ export async function loadSnapshot(options) {
   const quotaContractTrusted =
     ledgerState?.quotaIdentityContract === QUOTA_IDENTITY_CONTRACT_VERSION &&
     snapshotHasCurrentQuotaIdentityContract(cached);
+  // Rebuild derived labels and estimates after a bundled rate-card update,
+  // even when the underlying local history has not changed.
+  if (cached.provenance?.rateCardAsOf !== CODEX_CREDIT_RATE_CARD_AS_OF) {
+    return refreshSnapshotOrUseStaleFallback(options, cached, {
+      quotaContractTrusted,
+    });
+  }
   if (!sourceWatermarksEqual(cached.sourceWatermark, inventory.watermark)) {
     return refreshSnapshotOrUseStaleFallback(options, cached, {
       quotaContractTrusted,

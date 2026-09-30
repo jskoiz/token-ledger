@@ -41,7 +41,7 @@ const RECONCILE_RELATIVE_TOLERANCE = 1e-6;
 const RECONCILE_ABSOLUTE_TOLERANCE = 1.5;
 
 // Fast mode is an overlapping usage property, not a separate model. Both
-// recognized service-tier labels count. Keep normalTokens limited to the
+// recognized Fast labels and Ultrafast count. Keep normalTokens limited to the
 // explicit standard/default tiers; a missing or unfamiliar tier is unknown.
 const KNOWN_NORMAL_SERVICE_TIERS = new Set(["default", "standard"]);
 

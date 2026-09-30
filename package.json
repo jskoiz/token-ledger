@@ -1,6 +1,6 @@
 {
   "name": "tledger",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "A local-only terminal dashboard for Codex token usage",
   "license": "MIT",
   "keywords": [
@@ -56,6 +56,6 @@
   },
   "type": "module",
   "dependencies": {
-    "sharp": "^0.35.3"
+    "sharp": "^0.35.5"
   }
 }
